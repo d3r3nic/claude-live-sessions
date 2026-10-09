@@ -14,6 +14,8 @@ import {
   TYPE_SCRIPT,
   attachCommand,
   backgroundCommand,
+  resumeCommand,
+  isShell,
   isClaudeProcess,
   isForeground,
   modeFlags,
@@ -101,6 +103,8 @@ const world = {
   mode: '"permissionMode":"bypassPermissions"\n',
   /** How MOVE_SCRIPT ends: its exit code, or `reject` for a run that times out. */
   move: 0 as number | 'reject',
+  /** The command of every session's parent. */
+  parent: '-zsh',
 }
 const resetWorld = () => {
   world.stat.clear()
@@ -108,6 +112,7 @@ const resetWorld = () => {
   world.noTab.clear()
   world.mode = '"permissionMode":"bypassPermissions"\n'
   world.move = 0
+  world.parent = '-zsh'
 }
 const changed = (pid: number, line: string) => {
   const stat = world.stat.get(pid)
@@ -123,6 +128,8 @@ function machine(argv: readonly string[], env: unknown): Run {
     case '/usr/bin/pgrep':
       return ok(PGREP)
     case '/bin/ps': {
+      if (argv.includes('ppid=')) return ok(`${9000 + Number(argv[argv.length - 1])}\n`)
+      if (argv.includes('comm=')) return ok(`${world.parent}\n`)
       const pids = pidsAfter('-p')
       const lines = pids.flatMap(pid => (PS_LINES[pid] === undefined ? [] : [changed(pid, PS_LINES[pid]!)]))
       const text = lines.map(line => (isUtcEnglish(env) ? line : local(line))).join('\n')
@@ -506,6 +513,16 @@ describe('collect', () => {
     expect(modeFlags('')).toEqual([])
     expect(modeFlags('"permissionMode":"default"')).toEqual([])
     expect(modeFlags('"permissionMode":"somethingNew"')).toBeUndefined()
+    // every mode the CLI takes, as itself; only bypassPermissions becomes the skip flag
+    for (const mode of ['acceptEdits', 'auto', 'manual', 'dontAsk', 'plan']) {
+      expect(modeFlags(`"permissionMode":"${mode}"`)).toEqual(['--permission-mode', mode])
+    }
+    expect(isShell('-zsh')).toBe(true)
+    expect(isShell('/bin/bash')).toBe(true)
+    for (const comm of ['node', 'claude', 'python3', 'tmux']) expect(isShell(comm)).toBe(false)
+    expect(resumeCommand({ sessionId: 'abc-123', startCwd: "/Users/u/it's", profile: 'claude-work' }, '/Users/u')).toBe(
+      "cd '/Users/u/it'\\''s' && CLAUDE_CONFIG_DIR='/Users/u/.claude-work' claude --resume abc-123",
+    )
     expect(isForeground('S+')).toBe(true)
     expect(isForeground('Ss+')).toBe(true)
     for (const stat of ['T+', 'T', 'S', 'Ss', 'Z+']) expect(isForeground(stat)).toBe(false)
@@ -694,6 +711,7 @@ describe('pane', () => {
     await attempt(() => files.set(path, JSON.stringify({ ...entry, kind: 'bg' })), /no longer idle/)
     await attempt(() => files.set(path, JSON.stringify({ ...entry, procStart: undefined })), /no start time/)
     await attempt(() => { world.mode = '"permissionMode":"somethingNew"' }, /permission mode/)
+    await attempt(() => { world.parent = 'node' }, /not started directly by a shell/)
     // and with nothing in the way, it moves
     await ui.press({ key: 'bg claude-104' })
     await ui.press({ key: 'bg claude-104' })
@@ -742,7 +760,7 @@ describe('pane', () => {
     }
     world.move = 4
     await twice()
-    expect(toasts.at(-1)).toMatch(/has not exited after 20 s.*claude --resume session-104/)
+    expect(toasts.at(-1)).toMatch(/has not exited after 20 s.*cd '\/Users\/u' && CLAUDE_CONFIG_DIR='\/Users\/u\/\.claude-work' claude --resume session-104/)
     world.move = 5
     await twice()
     expect(toasts.at(-1)).toMatch(/could not be typed into ttys022.*claude --bg --resume session-104/)

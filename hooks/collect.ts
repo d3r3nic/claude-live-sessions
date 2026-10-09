@@ -107,6 +107,11 @@ export const OPEN_SCRIPT = [
   '}',
 ].join('\n')
 
+/** The command that resumes a session in a terminal, where it started and under its profile. */
+export function resumeCommand(s: Pick<ClaudeSession, 'sessionId' | 'startCwd' | 'profile'>, home: string): string {
+  return `cd ${shellWord(s.startCwd)} && ${profileEnv(s.profile, home) ?? ''}claude --resume ${s.sessionId}`
+}
+
 /**
  * The command that opens a background Claude session in a terminal. Closing
  * that window leaves the session running in the background. A profile other
@@ -340,10 +345,19 @@ export function isClaudeProcess(args: string): boolean {
 
 /**
  * Prints the permission mode a session last recorded in its transcript
- * ("$1"): `"permissionMode":"auto"`, or nothing. A prompt's own text is
- * escaped inside the transcript, so it cannot pass for this record.
+ * ("$1"): `"permissionMode":"auto"`, or nothing. Only Claude's own records
+ * are read (lines of type `permission-mode`, several in any transcript's
+ * last 256 KB); a prompt's text is escaped inside its own line besides.
  */
-export const MODE_SCRIPT = `/usr/bin/tail -c 262144 "$1" 2>/dev/null | /usr/bin/grep -o '"permissionMode":"[A-Za-z]*"' | /usr/bin/tail -n 1`
+export const MODE_SCRIPT = [
+  `/usr/bin/tail -c 262144 "$1" 2>/dev/null`,
+  `/usr/bin/grep '^{"type":"permission-mode",'`,
+  `/usr/bin/grep -o '"permissionMode":"[A-Za-z]*"'`,
+  '/usr/bin/tail -n 1',
+].join(' | ')
+
+/** A shell, by its command name (`-zsh` for a login shell): what a session's parent should be. */
+export const isShell = (comm: string) => /(^|\/)-?(zsh|bash|sh|fish|ksh|tcsh|dash)$/.test(comm.trim())
 
 /** The modes `claude --permission-mode` takes, as a session records them. */
 const MODES = new Set(['acceptEdits', 'auto', 'manual', 'dontAsk', 'plan'])

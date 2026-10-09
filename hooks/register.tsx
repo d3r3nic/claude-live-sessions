@@ -24,6 +24,7 @@ import {
   codexTerminals,
   isClaudeProcess,
   isForeground,
+  isShell,
   modeFlags,
   PLACE_SCRIPT,
   RECENT_SCRIPT,
@@ -42,6 +43,7 @@ import {
   profileOf,
   readOnlyArgs,
   registryPid,
+  resumeCommand,
   sortClaude,
   statusSummary,
   threadQuery,
@@ -109,6 +111,8 @@ const manualOrder = atom({ plugin: 'live-sessions', key: 'order' } as const, {} 
 const registry = new Map<string, { mtimeMs: number; raw: unknown }>()
 let held: { key: string; at: number; byPid: Map<number, string[]> } | undefined
 const placed = new Map<string, { at: number; place: Place }>()
+/** After a git run that failed, how long before its directories are asked again. */
+const GIT_RETRY_MS = 30_000
 let recentRead: { key: string; at: number; dirs: Map<string, string[]> } | undefined
 /** How long the working directories sessions recorded are trusted before they are read again. */
 const RECENT_MAX_AGE_MS = 30_000
@@ -169,11 +173,13 @@ async function placesOf($: EngineInterface, dirs: readonly string[], now: number
       .run(['/bin/sh', '-c', PLACE_SCRIPT, 'sh', ...unknown], { timeoutMs: 20_000 })
       .catch((error: unknown) => ({ exitCode: -1, stdout: '', stderr: message(error) }))
     const found = parsePlaces(out.stdout)
-    // a failed run is said, and its directories asked again next time rather than kept as plain folders
+    // a failed run is said; its directories are asked again after GIT_RETRY_MS, not on every collection
     if (out.exitCode !== 0 && found.size < unknown.length) problems.push(`git: ${firstLine(out.stderr) || `exit ${out.exitCode}`}`)
     for (const dir of unknown) {
       const place = found.get(dir)
-      if (place !== undefined) placed.set(dir, { at: now, place })
+      placed.set(dir, place !== undefined
+        ? { at: now, place }
+        : { at: now - PLACE_MAX_AGE_MS + GIT_RETRY_MS, place: { repo: '', name: '', tree: dir, branch: '' } })
     }
   }
   const fallback = (dir: string): Place => ({ repo: '', name: '', tree: dir, branch: '' })
@@ -455,6 +461,10 @@ async function moveChecked($: EngineInterface, move: NonNullable<Item['move']>) 
   }
   if (still.kind !== 'interactive' || claudeState(still, now) !== 'idle') return refuse('it is no longer idle')
   if (!isForeground(proc.stat)) return refuse('it is suspended (Ctrl+Z) or not in front of its terminal; bring it back first')
+  // started by a shell, so the shell is what takes the typed resume once it exits (a launcher script might not be)
+  const ppid = (await $.process.run(['/bin/ps', '-o', 'ppid=', '-p', String(move.pid)], { timeoutMs: 10_000 })).stdout.trim()
+  const parent = /^\d+$/.test(ppid) ? (await $.process.run(['/bin/ps', '-o', 'comm=', '-p', ppid], { timeoutMs: 10_000 })).stdout : ''
+  if (!isShell(parent)) return refuse('it was not started directly by a shell, so the resume could not be typed after it')
   const hasTab = await $.process.run(['/usr/bin/osascript', '-l', 'JavaScript', '-e', HAS_TAB_SCRIPT, proc.tty], { timeoutMs: 10_000 })
   if (hasTab.stdout.trim() !== 'yes') return refuse(`${proc.tty} is not a Terminal.app tab (tmux, iTerm, VS Code are not supported)`)
   const transcript = transcriptPath(`${home}/.${move.profile}`, still.startCwd, still.sessionId)
@@ -463,7 +473,7 @@ async function moveChecked($: EngineInterface, move: NonNullable<Item['move']>) 
   if (flags === undefined) return refuse('its permission mode is not one this knows')
   const command = backgroundCommand(still, home, flags)
   if (command === undefined) return refuse('its id, profile or folder cannot be typed safely')
-  const resume = `cd '${still.startCwd}' && claude --resume ${still.sessionId}`
+  const resume = resumeCommand(still, home)
   const out = await $.process
     .run(['/bin/sh', '-c', MOVE_SCRIPT, 'sh', String(move.pid), proc.tty, command, TYPE_SCRIPT], { timeoutMs: 40_000 })
     .catch((error: unknown) => ({ exitCode: -1, stdout: '', stderr: message(error) }))

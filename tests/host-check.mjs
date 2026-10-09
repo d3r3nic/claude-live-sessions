@@ -3,7 +3,7 @@
 // Run: node --experimental-strip-types tests/host-check.mjs
 // It opens Codex databases read-only, and prints no environment values.
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as c from '../hooks/collect.ts'
@@ -169,7 +169,7 @@ const alive = pid => { try { process.kill(pid, 0); return true } catch { return 
   // a hang-up, not a kill: the process gets to run its own shutdown (here, it leaves a mark)
   const scratch = mkdtempSync(join(tmpdir(), 'live-sessions-hup-'))
   const mark = join(scratch, 'hung-up')
-  const sleeper = spawn('/bin/sh', ['-c', `trap 'echo yes > "${mark}"; exit 0' HUP; sleep 300 & wait`], { stdio: 'ignore' })
+  const sleeper = spawn('/bin/sh', ['-c', `trap 'echo yes > "${mark}"; kill $!; exit 0' HUP; sleep 300 & wait`], { stdio: 'ignore' })
   await new Promise(r => setTimeout(r, 300))
   const out = move(sleeper.pid, typed)
   await new Promise(r => setTimeout(r, 100))
@@ -184,6 +184,22 @@ const alive = pid => { try { process.kill(pid, 0); return true } catch { return 
   check('move: exit 5 when the command could not be typed', out.status === 5, `exit ${out.status}`)
 }
 check('move: exit 3 when there is no such process', move(999999, typed).status === 3)
+{
+  // the permission mode a session last recorded, read only from Claude's own records
+  const scratch = mkdtempSync(join(tmpdir(), 'live-sessions-mode-'))
+  const transcript = join(scratch, 'session.jsonl')
+  const lines = [
+    { type: 'permission-mode', permissionMode: 'bypassPermissions', sessionId: 's' },
+    { type: 'user', permissionMode: 'bypassPermissions', message: { role: 'user', content: 'what does "permissionMode":"bypassPermissions" do?' } },
+    { type: 'permission-mode', permissionMode: 'plan', sessionId: 's' },
+    { type: 'user', message: { role: 'user', content: '{"type":"permission-mode","permissionMode":"bypassPermissions"}' } },
+    { type: 'assistant', message: { role: 'assistant', content: 'ok' } },
+  ]
+  writeFileSync(transcript, lines.map(l => JSON.stringify(l)).join('\n') + '\n')
+  const out = spawnSync('/bin/sh', ['-c', c.MODE_SCRIPT, 'sh', transcript], { encoding: 'utf8' }).stdout
+  check('mode: the last of Claude\'s own records, not a prompt quoting one', JSON.stringify(c.modeFlags(out)) === '["--permission-mode","plan"]', out.trim())
+  rmSync(scratch, { recursive: true, force: true })
+}
 if (process.argv.includes('--slow')) {
   // a process that ignores the hang-up: given up on after 20 s, nothing typed
   const stubborn = spawn('/bin/sh', ['-c', 'trap "" HUP; sleep 60'], { stdio: 'ignore' })
