@@ -35,10 +35,13 @@ export function cueOf(line: string): Cue | undefined {
  * then `done|busy <tab> <turn id> <tab> <ISO time> <tab> <cue line>`: a
  * finished turn's id, when it ended and its last cue line, or a turn under
  * way. Nothing else of what was said leaves the pipeline.
- * - Claude's transcript: a turn ends with an `end_turn` reply (one reply can
- *   take several records, read together) or an interrupt, and starts with a
- *   prompt. A command run in the session (`/model`, `/compact`, `!ls`), its
- *   output, a compaction's summary and meta records start nothing.
+ * - Claude's transcript: a reply that stopped for a tool (or has not
+ *   stopped) is a turn under way, whatever started it (a prompt, a skill);
+ *   any other stop ends the turn (`end_turn`; one reply can take several
+ *   records, read together), as does an interrupt. A prompt starts a turn.
+ *   A command that only changes settings or shows output (`/model`,
+ *   `/compact`, `!ls`), its output, a compaction's summary and meta records
+ *   start nothing.
  * - A Codex rollout: `task_complete` or `turn_aborted` ends a turn,
  *   `task_started` starts one.
  * A subagent's records, and a line cut by `tail`, are skipped.
@@ -50,7 +53,9 @@ export const TURN_SCRIPT = [
   '    def cue: split("\\n") | map(select(test("^\\\\s*(?:[0-9]+\\\\.|[-*>])?\\\\s*[`*_]*(READY FOR (CLAUDE|CODEX)|NEEDS USER|SCOPE CLOSED) · "))) | (last // "") | gsub("[\\t\\r]"; " ");',
   '    def said: if (.message.content | type) == "string" then .message.content else ([.message.content[]? | select(.type == "text") | .text] | join("\\n")) end;',
   '    reduce (inputs | fromjson? | select(type == "object" and .isSidechain != true)) as $o (null;',
-  '      if $o.type == "assistant" and $o.message.stop_reason == "end_turn" then',
+  '      if $o.type == "assistant" and (($o.message.stop_reason // "") as $r | $r == "tool_use" or $r == "pause_turn" or $r == "") then',
+  '        {state: "busy", id: $o.uuid, at: $o.timestamp, text: ""}',
+  '      elif $o.type == "assistant" then',
   '        if . != null and .state == "done" and .mid != null and .mid == $o.message.id then .text += "\\n" + ($o | said)',
   '        else {state: "done", id: $o.uuid, at: $o.timestamp, mid: $o.message.id, text: ($o | said)} end',
   '      elif $o.type == "user" and $o.isMeta != true and $o.isCompactSummary != true and ([$o.message.content[]?.type] | index("tool_result") | not) then',
@@ -153,8 +158,9 @@ export const AGENT_COMMANDS: Record<Tool, string> = { claude: 'claude', codex: '
  * names only the group's leader, the shell that started it) and the pane is
  * not scrolled back (copy mode, where keys would go to tmux, not the agent),
  * and answers `passed`, `taken`, `gone`, `not-agent <the foreground
- * commands>`, `failed`, or `in-mode` (the step is left untaken, to pass
- * later). A `;` that ends the line goes as its key code: tmux takes an
+ * commands>`, `failed`, `in-mode` (the step is left untaken, to pass
+ * later), or `unsent` (the pane went into copy mode while the line was
+ * typed: it waits in the agent's input, for Enter). A `;` that ends the line goes as its key code: tmux takes an
  * argument ending in `;` as the end of a command and drops it.
  */
 export const RELAY_SCRIPT = [
@@ -176,7 +182,9 @@ export const RELAY_SCRIPT = [
   'while [ "${body%;}" != "$body" ]; do body=${body%;}; semis="$semis;"; done',
   't send-keys -t "$pane" -l -- "$body" || { echo failed; exit 0; }',
   'while [ -n "$semis" ]; do t send-keys -t "$pane" -H 3b || { echo failed; exit 0; }; semis=${semis%;}; done',
-  'sleep 0.5 && t send-keys -t "$pane" Enter && echo passed || echo failed',
+  'sleep 0.5',
+  `[ "$(t display-message -p -t "$pane" '#{pane_in_mode}' 2>/dev/null)" = 0 ] || { echo unsent; exit 0; }`,
+  't send-keys -t "$pane" Enter && echo passed || echo failed',
 ].join('\n')
 
 /**
@@ -187,6 +195,7 @@ export function passFailure(outcome: string): string | undefined {
   if (outcome === 'passed' || outcome === 'in-mode' || outcome === 'taken') return undefined
   if (outcome.startsWith('not-agent')) return `its pane runs ${outcome.slice(10) || 'something else'}, not the agent`
   if (outcome === 'gone') return 'its pane is gone'
+  if (outcome === 'unsent') return 'its pane was scrolled back (copy mode) as the line was typed, so the line waits in its input: leave copy mode (q) and press Enter there'
   return 'tmux could not type into its pane'
 }
 

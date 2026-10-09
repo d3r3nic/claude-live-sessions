@@ -315,6 +315,11 @@ if (process.argv.includes('--slow')) {
   check('checkout: with a separate git dir, the checkout, not the store', find(apart).checkout === apart)
   git('-C', apart, 'worktree', 'add', '-q', '-b', 'feat/s', join(scratch, 'apart-wt'))
   check('checkout: from a separate git dir\'s worktree, refused rather than guessed', find(join(scratch, 'apart-wt')).error?.includes('main checkout') === true)
+  // the projects the form offers: main checkouts only; never what is inside a .git, a hidden folder or a worktrees folder
+  const fakeHome = join(scratch, 'projects-home')
+  for (const d of ['dev/a/.git/inner/.git', 'dev/b/.git', 'dev/b-worktrees/feat/.git', '.hidden/c/.git', 'Library/d/.git']) mkdirSync(join(fakeHome, d), { recursive: true })
+  const offered = spawnSync('/bin/sh', ['-c', w.PROJECTS_SCRIPT, 'sh', fakeHome], { encoding: 'utf8' }).stdout.trim().split('\n').map(l => l.slice(fakeHome.length)).sort()
+  check('projects: the main checkouts, nothing inside a .git, hidden, Library or worktrees folder', JSON.stringify(offered) === '["/dev/a","/dev/b"]', offered.join(','))
   rmSync(scratch, { recursive: true, force: true })
 }
 
@@ -376,15 +381,33 @@ if (process.argv.includes('--slow')) {
     { type: 'assistant', uuid: 's2', timestamp: '2026-10-09T10:05:01Z', message: { id: 'msg_3', stop_reason: 'end_turn', content: [{ type: 'text', text: 'Anything else is for the next turn.' }] } },
   ].map(o => JSON.stringify(o)).join('\n') + '\n')
   const split = join(scratch, 'c-split.jsonl')
+  const skillTurn = [
+    ended,
+    { type: 'user', uuid: 'k0', timestamp: '2026-10-09T10:20:00Z', message: { content: '<command-message>peer-coding</command-message>\n<command-name>/peer-coding</command-name>' } },
+    { type: 'user', uuid: 'k1', isMeta: true, timestamp: '2026-10-09T10:20:00Z', message: { content: [{ type: 'text', text: 'Base directory for this skill: …' }] } },
+    { type: 'assistant', uuid: 'k2t', timestamp: '2026-10-09T10:20:05Z', message: { id: 'msg_k', stop_reason: 'tool_use', content: [{ type: 'tool_use' }] } },
+  ]
+  const skillBusy = jsonl('c-skill-busy.jsonl', skillTurn)
+  const skillDone = jsonl('c-skill-done.jsonl', [...skillTurn,
+    { type: 'user', uuid: 'k3', timestamp: '2026-10-09T10:20:06Z', message: { content: [{ type: 'tool_result' }] } },
+    { type: 'assistant', uuid: 'k2', timestamp: '2026-10-09T10:21:00Z', message: { id: 'msg_k2', stop_reason: 'end_turn', content: [{ type: 'text', text: 'Set up.' }] } },
+  ])
+  const apiError = jsonl('c-error.jsonl', [
+    ended,
+    { type: 'user', uuid: 'u5', timestamp: '2026-10-09T10:30:00Z', message: { content: 'again' } },
+    { type: 'assistant', uuid: 'err1', isApiErrorMessage: true, timestamp: '2026-10-09T10:30:02Z', message: { id: 'msg_e', model: '<synthetic>', stop_reason: 'stop_sequence', content: [{ type: 'text', text: 'API Error: overloaded' }] } },
+  ])
   const codexAborted = jsonl('x-aborted.jsonl', [
     { type: 'event_msg', timestamp: '2026-10-09T11:00:00Z', payload: { type: 'task_started', turn_id: 't-1' } },
     { type: 'event_msg', timestamp: '2026-10-09T11:00:09Z', payload: { type: 'turn_aborted', turn_id: 't-1', reason: 'interrupted' } },
   ])
-  const out = spawnSync('/bin/sh', ['-c', r.TURN_SCRIPT, 'sh', claudeDone, claudeBusy, codexDone, codexBusy, join(scratch, 'none.jsonl'), afterCommands, interrupted, midTurn, split, codexAborted], { encoding: 'utf8' })
+  const out = spawnSync('/bin/sh', ['-c', r.TURN_SCRIPT, 'sh', claudeDone, claudeBusy, codexDone, codexBusy, join(scratch, 'none.jsonl'), afterCommands, interrupted, midTurn, split, codexAborted, skillBusy, skillDone, apiError], { encoding: 'utf8' })
   const turns = r.parseTurns(out.stdout)
   check('turns: a command run in the session, its output, a compaction or a meta record starts no turn', turns.get(afterCommands)?.state === 'done' && turns.get(afterCommands)?.id === 'e1' && turns.get(afterCommands)?.cue?.line === cue, JSON.stringify(turns.get(afterCommands)))
   check('turns: an interrupt ends a turn, with no cue', turns.get(interrupted)?.state === 'done' && turns.get(interrupted)?.id === 'i1' && turns.get(interrupted)?.cue === undefined)
-  check('turns: a reply that stopped for a tool is a turn under way', turns.get(midTurn)?.state === 'busy' && turns.get(midTurn)?.id === 'u2')
+  check('turns: a reply that stopped for a tool is a turn under way', turns.get(midTurn)?.state === 'busy' && turns.get(midTurn)?.id === 'a3')
+  check('turns: a skill starts a turn: under way while it calls tools, finished with its reply', turns.get(skillBusy)?.state === 'busy' && turns.get(skillDone)?.state === 'done' && turns.get(skillDone)?.id === 'k2' && turns.get(skillDone)?.cue === undefined, `${turns.get(skillBusy)?.state} ${turns.get(skillDone)?.id}`)
+  check('turns: an error that ends the reply ends the turn', turns.get(apiError)?.state === 'done' && turns.get(apiError)?.id === 'err1')
   check('turns: one reply over two records is read whole, its first record\'s id; a line cut by tail skipped', turns.get(split)?.id === 's1' && turns.get(split)?.cue?.line === cue, JSON.stringify(turns.get(split)))
   check('turns: an aborted Codex task ends its turn, with no cue', turns.get(codexAborted)?.state === 'done' && turns.get(codexAborted)?.id === 't-1' && turns.get(codexAborted)?.cue === undefined)
   check('turns: Claude\'s last turn done, its cue without the code marks; a subagent\'s turn not counted', turns.get(claudeDone)?.id === 'a2' && turns.get(claudeDone)?.cue?.line === cue, JSON.stringify(turns.get(claudeDone)?.cue?.line))
@@ -426,6 +449,17 @@ if (process.argv.includes('--slow')) {
   check('relay: a pane in copy mode is left alone; the step stays untaken', scrolled === 'in-mode' && !existsSync(join(ledger, 'pass-t4')) && tmux('display-message', '-p', '-t', agentPane, '#{pane_in_mode}').stdout.trim() === '1', scrolled)
   tmux('send-keys', '-t', agentPane, '-X', 'cancel')
   check('relay: passed once the pane leaves copy mode', relay('pass-t4', agentPane, 'cat') === 'passed')
+  // copy mode entered while the line is typed: the Enter would go to tmux, so it is not sent, and said so
+  const racing = spawn('/bin/sh', ['-c', r.RELAY_SCRIPT, 'sh', 'pass', ledger, 'pass-t7', agentPane, 'cat', 'READY FOR CODEX · raced', socket, 'check'])
+  let raced = ''
+  racing.stdout.on('data', d => { raced += d })
+  await new Promise(res => setTimeout(res, 250))
+  tmux('copy-mode', '-t', agentPane)
+  await new Promise(res => racing.on('close', res))
+  tmux('send-keys', '-t', agentPane, '-X', 'cancel')
+  check('relay: copy mode entered as the line is typed: not sent, said so', raced.trim() === 'unsent', raced.trim())
+  // the unsent line waits in the stand-in's input: cleared, as the owner would before going on
+  tmux('send-keys', '-t', agentPane, 'C-u')
   // a line that ends in ; (tmux reads a trailing ; as the end of a command)
   const semis = `READY FOR CODEX · ends in semicolons;;`
   spawnSync('/bin/sh', ['-c', r.RELAY_SCRIPT, 'sh', 'pass', ledger, 'pass-t5', agentPane, 'cat', semis, socket, 'check'], { encoding: 'utf8' })

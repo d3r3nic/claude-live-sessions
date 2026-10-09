@@ -148,6 +148,8 @@ const world = {
   /** The relay's steps already taken (its ledger), and what each tmux pane runs. */
   ledger: new Set<string>(),
   paneCommands: {} as Record<string, string>,
+  /** Panes scrolled back (tmux copy mode). */
+  inMode: new Set<string>(),
   /** What /bin/rm was given. */
   removed: [] as string[],
   /** Paths that are not there, though the fixtures have them. */
@@ -171,6 +173,7 @@ const resetWorld = () => {
   world.ledger.clear()
   world.paneCommands = {}
   world.removed = []
+  world.inMode.clear()
   world.gone.clear()
 }
 const changed = (pid: number, line: string) => {
@@ -217,6 +220,8 @@ function machine(argv: readonly string[], env: unknown): Run {
         // the ledger takes each key once; a pass types only into a pane running an allowed command
         const [kind, , key = '', pane = '', allow = ''] = args
         if (world.ledger.has(key)) return ok('taken\n')
+        // scrolled back: the step is left untaken
+        if (kind === 'pass' && world.inMode.has(pane)) return ok('in-mode\n')
         world.ledger.add(key)
         if (kind === 'tell') return ok('told\n')
         const cmd = world.paneCommands[pane]
@@ -1690,6 +1695,7 @@ describe('relay', () => {
     expect(afterStep(relayOn({ streak: 3 }), pass, 'in-mode', NOW)).toEqual(relayOn({ streak: 3, status: 'waits: Codex\'s pane is scrolled back (copy mode; q leaves it)', at: NOW }))
     expect(['passed', 'in-mode', 'taken'].map(passFailure)).toEqual([undefined, undefined, undefined])
     expect(['not-agent zsh', 'gone', 'failed', ''].map(passFailure)).toEqual(['its pane runs zsh, not the agent', 'its pane is gone', 'tmux could not type into its pane', 'tmux could not type into its pane'])
+    expect(passFailure('unsent')).toMatch(/waits in its input: leave copy mode \(q\) and press Enter there$/)
     expect(afterStep(relayOn({ streak: 3 }), { kind: 'tell', key: 'tell-c2', text: '', isForOwner: true }, 'told', NOW)).toEqual(relayOn({ streak: 0, status: 'needs you', at: NOW }))
   })
 
@@ -1759,6 +1765,31 @@ describe('relay', () => {
     await collect()
     expect(runs.filter(r => r[0] === '/usr/bin/pgrep').length).toBe(collectedBefore + 1)
     expect(passes()).toEqual([])
+  })
+
+  test('a pane scrolled back (copy mode): the hand-off waits, said once, and passes later', async ($, on) => {
+    const { files, runs, clock } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, checkout: '/Users/u/dev/web-app', relay: relayOn() }] }))
+    world.tmuxPanes = 'ws-practice-rbac\tpeers\t/dev/ttys022\t%1\tclaude\nws-practice-rbac\tpeers\t/dev/ttys045\t%2\tcodex\n'
+    world.tmuxOwner = String(NOW)
+    world.paneCommands = { '%1': 'claude', '%2': 'codex' }
+    world.inMode.add('%2')
+    world.turns = { 'session-104': `done\tturn-c1\t${new Date(NOW - 60_000).toISOString()}\t${READY_CODEX}`, '/rollouts/a.jsonl': `done\tturn-x0\t${new Date(NOW - 120_000).toISOString()}\t` }
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const kept = () => JSON.parse(files.get(WORKSPACES)!).workspaces[0].relay
+    const first = kept()
+    expect(first.status).toBe('waits: Codex\'s pane is scrolled back (copy mode; q leaves it)')
+    // still scrolled back at the next collection: tried again, the same said once (its time unchanged), no notification
+    await clock.advance(4_000)
+    await $.command.run(SESSIONS)
+    expect(kept()).toEqual(first)
+    expect(runs.filter(r => r[2] === RELAY_SCRIPT).map(r => r[4])).toEqual(['pass', 'pass'])
+    // out of copy mode: passed
+    world.inMode.clear()
+    await clock.advance(4_000)
+    await $.command.run(SESSIONS)
+    expect(kept()).toMatchObject({ streak: 1, status: 'passed to Codex' })
   })
 
   test('a step already taken by another session changes nothing here', async ($, on) => {

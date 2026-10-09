@@ -57,7 +57,7 @@ The peer-coding rules end every turn with one cue line for the owner to pass on:
   - only while that agent is not at work (Claude idle; Codex with no task under way);
   - only while that pane is not scrolled back (copy mode, where the keys would go to tmux): the hand-off then waits, the workspace's row says why, and it is passed once you leave copy mode (`q`);
   - only for a turn that ended in the last 7 days.
-  A command you run in an agent (`/model`, `/compact`, `!ls`) starts no turn; an interrupt (Esc) or an aborted Codex task ends one. When a pass cannot be made (the pane runs a shell, is gone, or tmux cannot type), a notification says why and gives the line to paste.
+  A command that only changes a setting or shows output (`/model`, `/compact`, `!ls`) starts no turn; a skill or a prompt command (`/peer-coding …`) starts one like a prompt; Claude replying with a tool call is at work; an interrupt (Esc), an error that ends the reply, or an aborted Codex task ends a turn. If the pane goes into copy mode while the line is being typed, the line waits in the agent's input and a notification asks you to press Enter there. When a pass cannot be made (the pane runs a shell, is gone, or tmux cannot type), a notification says why and gives the line to paste.
 - `NEEDS USER` and `SCOPE CLOSED` are yours: a macOS notification says so, in any mode, and the count of hand-offs starts again.
 - After 10 hand-offs in a row it waits for you: a notification, and `continue` on the workspace's row.
 - `notify`: nothing is typed; a notification gives you the line to paste.
@@ -103,7 +103,7 @@ To change it, edit this folder, then run `/reload-plugins` in a session.
 
 ```sh
 claude plugin validate .
-claude plugin test .                                         # 82 tests
+claude plugin test .                                         # 83 tests
 npx -p typescript@5.6.3 tsc -p .                             # after one load, which lays down .claude-plugin/types
 node --experimental-strip-types tests/host-check.mjs [2d] [--slow]   # on this Mac: SQL, pipelines, a full collection, the move script on throwaway processes, workspaces and the relay on a private tmux server (reading no tmux.conf), the checkout script on throwaway repositories
 E2E_TRUSTED_DIR=<a trusted folder> node --experimental-strip-types tests/e2e-terminal.mjs    # a Terminal window: move a throwaway session to the background
