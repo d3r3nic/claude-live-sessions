@@ -8,7 +8,20 @@
 import { execFileSync, spawnSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
-import * as c from '../hooks/collect.ts'
+import { registerHooks } from 'node:module'
+// the plugin imports its own files without an extension, as its engine resolves them; Node needs `.ts`
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    try {
+      return nextResolve(specifier, context)
+    } catch (error) {
+      if (specifier.startsWith('.') && !/\.[cm]?[jt]sx?$/.test(specifier)) return nextResolve(`${specifier}.ts`, context)
+      throw error
+    }
+  },
+})
+const c = await import('../hooks/collect.ts')
+
 
 const HOME = process.env.HOME
 const WORK = mkdtempSync(join(process.env.E2E_TRUSTED_DIR ?? process.cwd(), 'live-sessions-e2e-'))

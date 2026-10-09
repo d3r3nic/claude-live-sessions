@@ -6,7 +6,21 @@ import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import * as c from '../hooks/collect.ts'
+import { registerHooks } from 'node:module'
+// the plugin imports its own files without an extension, as its engine resolves them; Node needs `.ts`
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    try {
+      return nextResolve(specifier, context)
+    } catch (error) {
+      if (specifier.startsWith('.') && !/\.[cm]?[jt]sx?$/.test(specifier)) return nextResolve(`${specifier}.ts`, context)
+      throw error
+    }
+  },
+})
+const c = await import('../hooks/collect.ts')
+const w = await import('../hooks/workspaces.ts')
+
 
 const home = process.env.HOME
 const run = (argv, env) =>
@@ -138,10 +152,16 @@ const recentOf = key => recent.get(fileOf.get(key) ?? '') ?? []
 const placedClaude = claude.map(s => ({ ...s, cwd: c.workDir(s.cwd, recentOf(`claude-${s.pid}`), known) }))
 const placedCodex = codex.map(s => ({ ...s, cwd: c.workDir(s.cwd, recentOf(`codex-${s.key}`), known) }))
 const places = Object.fromEntries([...placedClaude, ...placedCodex].map(s => [s.cwd, known[s.cwd] ?? { repo: '', name: '', tree: s.cwd, branch: '' }]))
-const snap = { claude: placedClaude, codex: placedCodex, places, checkedAt: now, problems: [] }
+const workspaces = w.workspacesFrom((() => { try { return JSON.parse(readFileSync(`${home}/Library/Application Support/live-sessions/workspaces.json`, 'utf8')) } catch { return null } })())
+const tmux = {
+  panes: w.parsePanes(runOk(['tmux', 'list-panes', '-a', '-F', w.PANES_FORMAT])),
+  clients: w.parseClients(runOk(['tmux', 'list-clients', '-F', w.CLIENTS_FORMAT])),
+}
+const snap = { claude: placedClaude, codex: placedCodex, places, workspaces, envs: [], tmux, checkedAt: now, problems: [] }
 const windowMs = c.windowFrom(process.argv.slice(2).find(a => !a.startsWith('--')) ?? 'all') ?? 0
 const view = c.viewOf(snap, { home, now, windowMs, selfId: '' })
-check('every session lands in exactly one tree', view.repos.flatMap(r => r.trees.flatMap(t => t.items)).length === view.shown)
+check('every session lands in exactly one tree or workspace', view.repos.flatMap(r => r.trees.flatMap(t => t.items)).length + view.workspaces.flatMap(x => x.items).length === view.shown)
+for (const x of view.workspaces) console.log(`workspace ${x.name} (${x.env || 'default'}) ${x.isRunning ? 'running' : 'stopped'}: ${x.items.map(i => `${i.tool}:${i.title}`).join(', ')}`)
 console.log(`\n${claude.length} Claude · ${codex.length} Codex · showing ${view.shown} of ${view.total} (${c.windowLabel(windowMs)})`)
 for (const repo of view.repos) {
   console.log(repo.label)
@@ -209,6 +229,37 @@ if (process.argv.includes('--slow')) {
   stubborn.kill('SIGKILL')
 } else {
   console.log('skip move exit 4 (20 s): run with --slow')
+}
+
+// 6. A workspace's tmux session, on a private tmux server (never the person's own): two windows in its
+// folder, each agent started under the workspace's environment without Claude Code's session markers.
+// Stand-ins record their environment where the agents would run.
+{
+  const socket = `live-sessions-check-${process.pid}`
+  const scratch = mkdtempSync(join(tmpdir(), 'live-sessions-ws-'))
+  const record = tool => `sh -c 'env > "${scratch}/${tool}.env"; pwd > "${scratch}/${tool}.pwd"; sleep 30'`
+  const ws = { id: 'check', env: 'checkenv', dir: scratch }
+  const line = w.openCommand(ws, home, { socket, attach: false, bins: { claude: record('claude'), codex: record('codex') } })
+  // run as a terminal would: by the person's shell, here carrying this session's own markers on purpose
+  spawnSync(process.env.SHELL ?? '/bin/zsh', ['-c', line], { encoding: 'utf8', env: { ...process.env, CLAUDECODE: '1', CLAUDE_CODE_CHILD_SESSION: '1' } })
+  for (let i = 0; i < 30 && !(existsSync(`${scratch}/claude.env`) && existsSync(`${scratch}/codex.env`)); i++) await new Promise(r => setTimeout(r, 200))
+  const panes = w.parsePanes(spawnSync('tmux', ['-L', socket, 'list-panes', '-a', '-F', w.PANES_FORMAT], { encoding: 'utf8' }).stdout)
+  const windows = Object.values(panes).filter(p => p.session === 'ws-check').map(p => p.window).sort()
+  check('workspace: a claude and a codex window in its tmux session', JSON.stringify(windows) === '["claude","codex"]', windows.join(','))
+  const env = tool => (existsSync(`${scratch}/${tool}.env`) ? readFileSync(`${scratch}/${tool}.env`, 'utf8') : '')
+  const pwd = tool => (existsSync(`${scratch}/${tool}.pwd`) ? readFileSync(`${scratch}/${tool}.pwd`, 'utf8').trim() : '')
+  check('workspace: both start in its folder', pwd('claude').endsWith(scratch.split('/').pop()) && pwd('codex').endsWith(scratch.split('/').pop()))
+  check('workspace: Claude under its environment\'s config directory', env('claude').includes(`CLAUDE_CONFIG_DIR=${home}/.claude-checkenv`))
+  check('workspace: Codex under its environment\'s home', env('codex').includes(`CODEX_HOME=${home}/.codex-checkenv`))
+  check('workspace: no Claude Code session markers reach the agents', !/^(CLAUDECODE|CLAUDE_CODE_CHILD_SESSION)=/m.test(env('claude') + env('codex')))
+  // opened again while it runs: nothing new is created
+  spawnSync(process.env.SHELL ?? '/bin/zsh', ['-c', line], { encoding: 'utf8' })
+  const again = Object.values(w.parsePanes(spawnSync('tmux', ['-L', socket, 'list-panes', '-a', '-F', w.PANES_FORMAT], { encoding: 'utf8' }).stdout)).length
+  check('workspace: opening it again creates nothing more', again === 2, `${again} panes`)
+  spawnSync('tmux', ['-L', socket, 'kill-server'])
+  // kill-server leaves its socket file behind
+  rmSync(join(process.env.TMUX_TMPDIR ?? '/tmp', `tmux-${process.getuid()}`, socket), { force: true })
+  rmSync(scratch, { recursive: true, force: true })
 }
 
 process.exitCode = failures > 0 ? 1 : 0

@@ -14,6 +14,21 @@ A Claude Code plugin (a function-hooks mod) that lists the live Claude Code and 
   - Before anything is touched, the mod checks that the session is still the same idle Claude process. It must also be in front of its terminal (not suspended with Ctrl+Z), started directly by a shell (so the shell takes the typed resume), and running in a Terminal.app tab, with a permission mode the mod knows. Otherwise it is not moved, and a toast says why.
   - Limits: only Terminal.app, not tmux, iTerm or VS Code. Only the permission mode carries over, not `--model` or `--add-dir`. A background task the session itself started ends when it is hung up.
 
+## Workspaces
+
+A workspace is a project with your own name. It has a folder, an environment, and one tmux session with Claude and Codex in it.
+
+- `/workspace new <folder> [<env>] <name>`, for example `/workspace new ~/code/app work Practice RBAC`. It saves the workspace, then opens a Terminal window on tmux session `ws-<name>`, with a `claude` window and a `codex` window in that folder.
+- `<env>` picks the accounts the agents start under:
+  - `default` (or no env given) uses `~/.claude` and `~/.codex`.
+  - `work` uses `~/.claude-work` and `~/.codex-work`, through `CLAUDE_CONFIG_DIR` and `CODEX_HOME`.
+  The environments offered are the ones found on this Mac.
+- Agents start without the variables a Claude Code session sets for its children, so their transcripts are kept. When an agent exits, its window leaves a shell.
+- Closing the window only detaches, and both agents keep running. `/workspace open <name>`, or `[open]` in the pane, brings it back: it focuses a Terminal tab already attached, or opens a new one.
+- The pane lists workspaces first, each with its agents (whatever runs in its tmux session) and a running or stopped state. Pressing an agent selects its tmux window.
+- `/workspace rm <name>` forgets a workspace. Its tmux session keeps running until `tmux kill-session -t ws-<name>`.
+- The list is kept in `~/Library/Application Support/live-sessions/workspaces.json`, which every profile's sessions read. Workspaces need tmux, and opening one from the pane needs Terminal.app; elsewhere the toast gives the command to run.
+
 ## Where it reads from
 
 Collecting is read-only. Nothing in Claude's or Codex's own files is written. The only writes are the mod's own shared snapshot and its kept settings. The only actions that act on a session are the ones you press: bringing a tab to the front, attaching, and `[ to bg ]`, which ends and relaunches the session you chose.
@@ -49,8 +64,9 @@ To change it, edit this folder, then run `/reload-plugins` in a session.
 
 ```sh
 claude plugin validate .
-claude plugin test .                                         # 52 tests
+claude plugin test .                                         # 59 tests
 npx -p typescript@5.6.3 tsc -p .                             # after one load, which lays down .claude-plugin/types
 node --experimental-strip-types tests/host-check.mjs [2d] [--slow]   # on this Mac: SQL, pipelines, a full collection, the move script on throwaway processes
-node --experimental-strip-types tests/e2e-terminal.mjs       # opens a Terminal window, moves a throwaway session to the background, cleans up
+E2E_TRUSTED_DIR=<a trusted folder> node --experimental-strip-types tests/e2e-terminal.mjs    # a Terminal window: move a throwaway session to the background
+E2E_TRUSTED_DIR=<a trusted folder> node --experimental-strip-types tests/e2e-workspace.mjs   # a Terminal window: open a throwaway workspace, close it, agents keep running
 ```

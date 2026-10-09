@@ -51,6 +51,18 @@ import {
 } from '../hooks/collect'
 import type { CodexProc, ThreadRow } from '../hooks/collect'
 import {
+  agentStart,
+  envsFrom,
+  findWorkspace,
+  openCommand,
+  parseClients,
+  parsePanes,
+  parseWorkspaceArgs,
+  slugOf,
+  words,
+  workspacesFrom,
+} from '../hooks/workspaces'
+import {
   ENV_LINES,
   GIT,
   HELD,
@@ -107,6 +119,9 @@ const world = {
   parent: 'Ss -zsh',
   /** PLACE_SCRIPT fails (exit 1, nothing printed). */
   placeFails: false,
+  /** What `tmux list-panes -a` and `tmux list-clients` print; empty: no tmux server. */
+  tmuxPanes: '',
+  tmuxClients: '',
 }
 const resetWorld = () => {
   world.stat.clear()
@@ -116,6 +131,8 @@ const resetWorld = () => {
   world.move = 0
   world.parent = 'Ss -zsh'
   world.placeFails = false
+  world.tmuxPanes = ''
+  world.tmuxClients = ''
 }
 const changed = (pid: number, line: string) => {
   const stat = world.stat.get(pid)
@@ -152,6 +169,11 @@ function machine(argv: readonly string[], env: unknown): Run {
       const pids = (args[0] ?? '').split(',').map(Number)
       return ok(`${pids.flatMap(pid => (ENV_LINES[pid] === undefined ? [] : [ENV_LINES[pid]!])).join('\n')}\n`)
     }
+    case 'tmux':
+      if (argv[1] === 'list-panes') return world.tmuxPanes === '' ? { exitCode: 1, stdout: '', stderr: 'no server running\n' } : ok(world.tmuxPanes)
+      if (argv[1] === 'list-clients') return ok(world.tmuxClients)
+      if (argv[1] === 'select-window') return ok('')
+      return { exitCode: 1, stdout: '', stderr: `unexpected tmux ${argv.join(' ')}` }
     case '/usr/sbin/lsof':
       return { exitCode: 1, stdout: LSOF, stderr: '' }
     case '/usr/bin/osascript':
@@ -245,6 +267,10 @@ function engine(
     const isListed = LISTINGS[e.path.slice(0, at)]?.some(entry => entry.name === e.path.slice(at + 1)) ?? false
     return { value: LISTINGS[e.path] !== undefined || isListed || files.has(e.path) }
   })
+  on('fs.stat', async ($, e) => {
+    const isDir = LISTINGS[e.path] !== undefined || GIT[e.path] !== undefined
+    return isDir ? { value: { kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false } } : { deny: `ENOENT ${e.path}` }
+  })
   on('fs.read', async ($, e) => {
     const text = files.get(e.path)
     return text === undefined ? { deny: `ENOENT ${e.path}` } : { value: text }
@@ -275,7 +301,7 @@ const snapshotOf = () => {
   }))
   const codex = codexSessions({ terminals: terminalsOf(), threads: threadsOf(), now: NOW })
   const places = Object.fromEntries([...claude.map(s => s.cwd), ...codex.map(s => s.cwd)].map(cwd => [cwd, placeFrom(cwd, GIT[cwd]?.rev ?? '', GIT[cwd]?.remotes)]))
-  return { claude, codex, places, checkedAt: NOW, problems: [] }
+  return { claude, codex, places, workspaces: [], envs: ['', 'work'], tmux: { panes: {}, clients: {} }, checkedAt: NOW, problems: [] }
 }
 const codexPids = () => new Set(PGREP.split('\n').filter(Boolean).map(Number))
 const threadsOf = () =>
@@ -603,7 +629,7 @@ describe('pane', () => {
     expect(placedAt('NIGHTLY')).toBe(':/Users/u')
     // the shared snapshot holds what is shown and nothing of the processes' arguments
     const shared = files.get(SHARED) ?? ''
-    expect(JSON.parse(shared).version).toBe(5)
+    expect(JSON.parse(shared).version).toBe(6)
     for (const leak of ['opt/homebrew', 'dangerously', '--cd', 'CODEX_HOME']) expect(shared).not.toContain(leak)
 
     for (const surface of ['terminal', 'desktop'] as const) {
@@ -986,10 +1012,13 @@ describe('pane', () => {
       claude: [{ pid: 5, sessionId: 's5', name: 'FROM ANOTHER SESSION', cwd: '/Users/u', status: 'busy', kind: 'interactive', profile: 'claude', tty: 'ttys009', since: NOW - 1_000 }],
       codex: [],
       places: {},
+      workspaces: [],
+      envs: [''],
+      tmux: { panes: {}, clients: {} },
       checkedAt: NOW - 10_000,
       problems: [],
     }
-    files.set(SHARED, JSON.stringify({ version: 5, snapshot: theirs }))
+    files.set(SHARED, JSON.stringify({ version: 6, snapshot: theirs }))
     await $.session.start(START)
     await clock.settle()
     expect(collections()).toBe(0)
@@ -1051,5 +1080,128 @@ describe('pane', () => {
     await $.session.start(START)
     await $.command.run(SESSIONS)
     expect((await shownOn($, 'terminal', 90)).join('\n')).toContain('! ps: ps: illegal option -- w')
+  })
+})
+
+const WORKSPACES = '/Users/u/Library/Application Support/live-sessions/workspaces.json'
+const MARKERS = '-u CLAUDECODE -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_BRIDGE_SESSION_ID -u CLAUDE_CODE_MESSAGING_SOCKET -u CLAUDE_CODE_MESSAGING_TOKEN -u CLAUDE_CODE_SESSION_ATTENDED -u CLAUDE_CODE_EXECPATH -u CLAUDE_PID -u CLAUDE_EFFORT'
+const practice = { id: 'practice-rbac', name: 'Practice RBAC', env: 'work', dir: '/Users/u/dev/web-app', createdAt: NOW }
+
+describe('workspaces', () => {
+  test('names, arguments, finding one', async () => {
+    expect(slugOf('Practice RBAC!')).toBe('practice-rbac')
+    expect(slugOf('Practice RBAC', ['practice-rbac', 'practice-rbac-2'])).toBe('practice-rbac-3')
+    expect(slugOf('***')).toBe('workspace')
+    expect(words(`new "~/my dir" work Practice 'R B'`)).toEqual(['new', '~/my dir', 'work', 'Practice', 'R B'])
+    expect(parseWorkspaceArgs('new ~/dev/web-app work Practice RBAC', ['work'], HOME)).toEqual({ action: 'new', dir: '/Users/u/dev/web-app', env: 'work', name: 'Practice RBAC' })
+    expect(parseWorkspaceArgs('new /x default Name', ['work'], HOME)).toEqual({ action: 'new', dir: '/x', env: '', name: 'Name' })
+    // a word that is no environment is part of the name
+    expect(parseWorkspaceArgs('new /x nope Name', ['work'], HOME)).toEqual({ action: 'new', dir: '/x', env: '', name: 'nope Name' })
+    expect(parseWorkspaceArgs('', [], HOME)).toEqual({ action: 'list' })
+    expect(parseWorkspaceArgs('open Practice RBAC', [], HOME)).toEqual({ action: 'open', ref: 'Practice RBAC' })
+    for (const bad of ['new', 'new /x', 'new relative/dir Name', 'rm', 'launch x']) expect(parseWorkspaceArgs(bad, ['work'], HOME).action).toBe('help')
+    expect(findWorkspace([practice], 'practice rbac')?.id).toBe('practice-rbac')
+    expect(findWorkspace([practice], 'practice-rbac')?.id).toBe('practice-rbac')
+    expect(workspacesFrom({ workspaces: [practice, { ...practice, id: 'BAD ID' }, { name: 'x' }] })).toEqual([practice])
+  })
+
+  test('the tmux command: a claude and a codex window in its folder, under its environment, then attach', async () => {
+    expect(agentStart('claude', '', HOME)).toBe(`env ${MARKERS} claude`)
+    expect(agentStart('claude', 'work', HOME)).toBe(`env ${MARKERS} CLAUDE_CONFIG_DIR='/Users/u/.claude-work' claude`)
+    expect(agentStart('codex', 'work', HOME)).toBe(`env ${MARKERS} CODEX_HOME='/Users/u/.codex-work' codex`)
+    expect(openCommand(practice, HOME)).toBe([
+      "tmux has-session -t '=ws-practice-rbac' 2>/dev/null ||",
+      `tmux new-session -d -s 'ws-practice-rbac' -c '/Users/u/dev/web-app' -n claude 'env ${MARKERS} CLAUDE_CONFIG_DIR='\\''/Users/u/.claude-work'\\'' claude; exec "$SHELL" -l'`,
+      `\\; new-window -t '=ws-practice-rbac:' -c '/Users/u/dev/web-app' -n codex 'env ${MARKERS} CODEX_HOME='\\''/Users/u/.codex-work'\\'' codex; exec "$SHELL" -l';`,
+      "tmux attach -t '=ws-practice-rbac'",
+    ].join(' '))
+    expect(openCommand({ ...practice, env: '', dir: "/Users/u/it's" }, HOME, { attach: false })).toContain(`-c '/Users/u/it'\\''s'`)
+    expect(openCommand(practice, HOME, { attach: false })).not.toContain('attach')
+  })
+
+  test('tmux panes and clients; the environments on disk', async () => {
+    expect(parsePanes('ws-a\tclaude\t/dev/ttys050\nws-a\tcodex\t/dev/ttys051\nauth\tzsh\t/dev/ttys052\n')).toEqual({
+      ttys050: { session: 'ws-a', window: 'claude' }, ttys051: { session: 'ws-a', window: 'codex' }, ttys052: { session: 'auth', window: 'zsh' },
+    })
+    expect(parseClients('ws-a\t/dev/ttys060\n')).toEqual({ 'ws-a': ['ttys060'] })
+    const profiles = new Set(['.claude', '.claude-work', '.codex', '.codex-work', '.codex-only'])
+    expect(envsFrom(['.claude', '.claude-profiles', '.claude-work', '.codex', '.codex-work', '.codex-only', '.codexbar'], n => profiles.has(n))).toEqual(['', 'only', 'work'])
+  })
+
+  test('sessions in a workspace tmux session group under it; clicking one goes to its window', async () => {
+    const base = snapshotOf()
+    // WEB CONSOLE (ttys004) and the Codex terminal on ttys045 run in the workspace's tmux panes
+    const snap = {
+      ...base,
+      workspaces: [practice],
+      tmux: {
+        panes: { ttys004: { session: 'ws-practice-rbac', window: 'claude' }, ttys045: { session: 'ws-practice-rbac', window: 'codex' }, ttys022: { session: 'other', window: 'zsh' } },
+        clients: { 'ws-practice-rbac': ['ttys070'] },
+      },
+    }
+    const view = viewOf(snap, { home: HOME, now: NOW, windowMs: 0, selfId: '' })
+    expect(view.workspaces.map(w => [w.name, w.env, w.dir, w.isRunning, w.isAttached, w.items.map(i => `${i.tool}:${i.title}`)])).toEqual([
+      ['Practice RBAC', 'work', '~/dev/web-app', true, true, ['claude:WEB CONSOLE', 'codex:Find the report writer']],
+    ])
+    const inRepos = view.repos.flatMap(r => r.trees.flatMap(t => t.items.map(i => i.title)))
+    expect(inRepos).not.toContain('WEB CONSOLE')
+    expect(view.workspaces[0]!.items.map(i => i.target)).toEqual([
+      { workspace: 'ws-practice-rbac', window: 'claude' }, { workspace: 'ws-practice-rbac', window: 'codex' },
+    ])
+    // in any tmux pane, a session is not offered the move to the background: tmux already keeps it running
+    expect(view.repos.flatMap(r => r.trees.flatMap(t => t.items)).find(i => i.title === 'WORKER')?.move).toBeUndefined()
+    // a workspace with nothing running is still listed
+    const stopped = viewOf({ ...base, workspaces: [practice] }, { home: HOME, now: NOW, windowMs: 0, selfId: '' })
+    expect(stopped.workspaces.map(w => [w.isRunning, w.items.length])).toEqual([[false, 0]])
+  })
+
+  test('/workspace new saves it and opens Claude and Codex in its tmux session', async ($, on) => {
+    const { runs, files } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    await $.session.start(START)
+    const text = (await $.command.run({ ...SESSIONS, command: 'workspace', args: 'new ~/dev/web-app work Practice RBAC' })).text
+    expect(text).toMatch(/^Created Practice RBAC \(work, \/Users\/u\/dev\/web-app\)/)
+    expect(JSON.parse(files.get(WORKSPACES)!).workspaces).toEqual([{ ...practice, createdAt: expect.any(Number) }])
+    const opened = runs.filter(r => r[0] === '/usr/bin/osascript' && r[4] === OPEN_SCRIPT).map(r => r[5])
+    expect(opened).toEqual([openCommand(practice, HOME)])
+    // listed in the pane, stopped until tmux reports its session
+    await $.command.run(SESSIONS)
+    const shown = (await shownOn($, 'terminal', 110)).join('\n')
+    expect(shown).toContain('Practice RBAC')
+    expect(shown).toContain('stopped')
+  })
+
+  test('/workspace open focuses the terminal already attached, else opens one; rm forgets it', async ($, on) => {
+    const { runs, files } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [practice] }))
+    world.tmuxPanes = 'ws-practice-rbac\tclaude\t/dev/ttys004\nws-practice-rbac\tcodex\t/dev/ttys045\n'
+    world.tmuxClients = 'ws-practice-rbac\t/dev/ttys001\n'
+    await $.session.start(START)
+    await $.command.run({ ...SESSIONS, command: 'workspace', args: 'open practice rbac' })
+    const osa = () => runs.filter(r => r[0] === '/usr/bin/osascript' && r[4] !== BACKGROUND_SCRIPT).map(r => [r[4] === FOCUS_SCRIPT ? 'focus' : 'open', r[5]])
+    expect(osa()).toEqual([['focus', 'ttys001']])
+    // the pane groups its agents under it; pressing one selects its window and brings the terminal up
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    const shown = (await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')
+    expect(shown).toContain('Practice RBAC')
+    expect(shown).toContain('open')
+    await ui.press({ key: 'open codex-' + RESUMED_A })
+    expect(runs.find(r => r[0] === 'tmux' && r[1] === 'select-window')).toEqual(['tmux', 'select-window', '-t', '=ws-practice-rbac:codex'])
+    await ui.unmount()
+    // with no terminal attached it opens one
+    world.tmuxClients = ''
+    await $.command.run({ ...SESSIONS, command: 'workspace', args: 'rm practice-rbac' })
+    expect(JSON.parse(files.get(WORKSPACES)!).workspaces).toEqual([])
+  })
+
+  test('/workspace refuses what it cannot make', async ($, on) => {
+    const { files } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    await $.session.start(START)
+    const run = async (args: string) => (await $.command.run({ ...SESSIONS, command: 'workspace', args })).text
+    expect(await run('new ~/nowhere work Name')).toBe('Not done: /Users/u/nowhere is not a folder.')
+    expect(await run('new ~/dev/web-app')).toMatch(/^Not done: new needs a folder and a name\. Usage: \/workspace new <folder> \[default \| work\] <name>/)
+    expect(await run('open nothing')).toBe('No workspace named "nothing".')
+    expect(files.has(WORKSPACES)).toBe(false)
+    expect(await run('')).toMatch(/^No workspaces yet/)
   })
 })

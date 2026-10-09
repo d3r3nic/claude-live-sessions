@@ -1,5 +1,6 @@
 // Pure parsing and matching: no `$`, so the tests drive it directly.
 import type { ClaudeSession, CodexSession, Place, Snapshot } from '../types'
+import { tmuxName } from './workspaces'
 
 /** A Codex thread counts as active this long after its last write. */
 export const ACTIVE_MS = 30 * 60_000
@@ -865,12 +866,27 @@ export type Item = {
   /** The terminal, `detached`, or where a Codex thread runs: `app`, `cli`, `exec`. */
   where: string
   lastActive: number
-  /** What a press opens: the terminal tab it runs in, or a background Claude session to attach. */
-  target?: { tty: string } | { attach: string; profile: string }
+  /**
+   * What a press opens: the terminal tab it runs in, a background Claude
+   * session to attach, or the workspace window it runs in.
+   */
+  target?: { tty: string } | { attach: string; profile: string } | { workspace: string; window: string }
   /** For an idle Claude session in a terminal tab: what moving it to the background starts from. */
   move?: { pid: number; tty: string; profile: string; sessionId: string; startCwd: string }
 }
 export type TreeView = { key: string; label: string; path: string; items: Item[] }
+export type WorkspaceView = {
+  key: string
+  name: string
+  /** The environment's name; '' for the default. */
+  env: string
+  dir: string
+  /** Its tmux session is running; a terminal is attached to it. */
+  isRunning: boolean
+  isAttached: boolean
+  items: Item[]
+}
+export const WORKSPACES_SCOPE = 'workspaces'
 export type RepoView = { key: string; label: string; trees: TreeView[] }
 
 /**
@@ -882,15 +898,23 @@ export type RepoView = { key: string; label: string; trees: TreeView[] }
 export function viewOf(
   snap: Snapshot,
   o: { home: string; now: number; windowMs: number; selfId: string; order?: Order },
-): { repos: RepoView[]; shown: number; total: number } {
+): { workspaces: WorkspaceView[]; repos: RepoView[]; shown: number; total: number } {
   const order = o.order ?? {}
-  const items: (Item & { cwd: string })[] = [
+  // a session runs in a workspace when its terminal is a pane of that workspace's tmux session
+  const workspaceOf = new Map(snap.workspaces.map(ws => [tmuxName(ws), ws] as const))
+  const paneOf = (tty: string) => snap.tmux.panes[tty]
+  const inWorkspace = (tty: string) => {
+    const pane = paneOf(tty)
+    return pane !== undefined && workspaceOf.has(pane.session) ? pane : undefined
+  }
+  const items: (Item & { cwd: string; tty: string })[] = [
     ...snap.claude.map(s => {
       const isSelf = s.sessionId === o.selfId
       return {
         key: `claude-${s.pid}`,
         tool: 'claude' as const,
         cwd: s.cwd,
+        tty: s.tty,
         title: s.name,
         tags: [
           s.kind === 'bg' ? 'bg' : '',
@@ -901,13 +925,16 @@ export function viewOf(
         where: s.tty === '??' ? 'detached' : s.tty,
         lastActive: s.since,
         ...(!isSelf && s.kind !== 'bg' && s.isForeground && claudeState(s, o.now) === 'idle' && /^ttys\d+$/.test(s.tty) &&
+        paneOf(s.tty) === undefined &&
         backgroundCommand(s, o.home, []) !== undefined
           ? { move: { pid: s.pid, tty: s.tty, profile: s.profile, sessionId: s.sessionId, startCwd: s.startCwd } }
           : {}),
         // a background session's own pty is no terminal tab: it is attached to; this one is already here
         ...(isSelf
           ? {}
-          : s.kind === 'bg'
+          : inWorkspace(s.tty) !== undefined
+            ? { target: { workspace: inWorkspace(s.tty)!.session, window: inWorkspace(s.tty)!.window } }
+            : s.kind === 'bg'
             ? { target: { attach: s.jobId || s.sessionId.slice(0, 8), profile: s.profile } }
             : /^ttys\d+$/.test(s.tty)
               ? { target: { tty: s.tty } }
@@ -918,6 +945,7 @@ export function viewOf(
       key: `codex-${s.key}`,
       tool: 'codex' as const,
       cwd: s.cwd,
+      tty: s.surface === 'terminal' ? s.tty : '',
       title: s.title,
       tags: [
         s.profile === 'codex' ? '' : s.profile.replace(/^codex-/, ''),
@@ -926,7 +954,11 @@ export function viewOf(
       state: s.updatedAt > 0 && o.now - s.updatedAt < WORKING_MS ? 'working' : 'idle',
       where: s.surface === 'terminal' ? s.tty : s.surface,
       lastActive: s.lastActive,
-      ...(s.surface === 'terminal' && /^ttys\d+$/.test(s.tty) ? { target: { tty: s.tty } } : {}),
+      ...(s.surface !== 'terminal' || !/^ttys\d+$/.test(s.tty)
+        ? {}
+        : inWorkspace(s.tty) !== undefined
+          ? { target: { workspace: inWorkspace(s.tty)!.session, window: inWorkspace(s.tty)!.window } }
+          : { target: { tty: s.tty } }),
     })),
   ]
   const shown = items.filter(i => o.windowMs === 0 || i.state === 'working' || o.now - i.lastActive <= o.windowMs)
@@ -936,8 +968,14 @@ export function viewOf(
   const byActivity = (a: Item, b: Item) => rank(b) - rank(a) || b.lastActive - a.lastActive
   const lead = (list: readonly Item[]) => [...list].sort(byActivity)[0]
 
+  const inWorkspaces = new Map<string, Item[]>()
   const repos = new Map<string, RepoView>()
-  for (const { cwd, ...item } of shown) {
+  for (const { cwd, tty, ...item } of shown) {
+    const pane = inWorkspace(tty)
+    if (pane !== undefined) {
+      inWorkspaces.set(pane.session, [...(inWorkspaces.get(pane.session) ?? []), item])
+      continue
+    }
     const place = snap.places[cwd] ?? { repo: '', name: '', tree: cwd, branch: '' }
     let repo = repos.get(place.repo)
     if (repo === undefined) {
@@ -961,7 +999,23 @@ export function viewOf(
   const repoAuto = (a: RepoView, b: RepoView) =>
     Number(a.key === '') - Number(b.key === '') ||
     byActivity(lead(a.trees.flatMap(t => t.items))!, lead(b.trees.flatMap(t => t.items))!)
-  return { repos: arrange(ordered, r => r.key, order[REPOS_SCOPE], repoAuto), shown: shown.length, total: items.length }
+  const sessionsRunning = new Set(Object.values(snap.tmux.panes).map(p => p.session))
+  const workspaces: WorkspaceView[] = snap.workspaces.map(ws => ({
+    key: ws.id,
+    name: ws.name,
+    env: ws.env,
+    dir: tilde(ws.dir, o.home),
+    isRunning: sessionsRunning.has(tmuxName(ws)),
+    isAttached: (snap.tmux.clients[tmuxName(ws)]?.length ?? 0) > 0,
+    items: arrange(inWorkspaces.get(tmuxName(ws)) ?? [], i => i.key, order[itemsScope(`ws:${ws.id}`)], byActivity),
+  }))
+  const created = (w: WorkspaceView) => snap.workspaces.findIndex(ws => ws.id === w.key)
+  return {
+    workspaces: arrange(workspaces, w => w.key, order[WORKSPACES_SCOPE], (a, b) => created(a) - created(b)),
+    repos: arrange(ordered, r => r.key, order[REPOS_SCOPE], repoAuto),
+    shown: shown.length,
+    total: items.length,
+  }
 }
 
 /** `1m`, `3h`: how long ago, compactly. */

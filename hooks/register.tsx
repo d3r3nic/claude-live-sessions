@@ -1,7 +1,20 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { ClaudeSession, Place, Snapshot } from '../types'
+import type { ClaudeSession, Place, Snapshot, Workspace } from '../types'
+import {
+  CLIENTS_FORMAT,
+  PANES_FORMAT,
+  envsFrom,
+  findWorkspace,
+  openCommand,
+  parseClients,
+  parsePanes,
+  parseWorkspaceArgs,
+  slugOf,
+  tmuxName,
+  workspacesFrom,
+} from './workspaces'
 import {
   ACTIVE_MS,
   AGENT_MS,
@@ -29,6 +42,7 @@ import {
   PLACE_SCRIPT,
   RECENT_SCRIPT,
   REPOS_SCOPE,
+  WORKSPACES_SCOPE,
   itemsScope,
   moved,
   orderFrom,
@@ -82,10 +96,14 @@ const PS_ENV = { LC_ALL: 'C', TZ: 'UTC' }
  * One snapshot shared by every session on the machine, so the processes run
  * once per interval however many sessions show it.
  */
-const SHARED_VERSION = 5
+const SHARED_VERSION = 6
 const sharedPath = (home: string) => `${home}/Library/Caches/live-sessions/snapshot.json`
 
-const EMPTY: Snapshot = { claude: [], codex: [], places: {}, checkedAt: 0, problems: [] }
+const EMPTY: Snapshot = {
+  claude: [], codex: [], places: {}, workspaces: [], envs: [], tmux: { panes: {}, clients: {} }, checkedAt: 0, problems: [],
+}
+/** The workspaces, kept where every profile's sessions read them. */
+const workspacesPath = (home: string) => `${home}/Library/Application Support/live-sessions/workspaces.json`
 const snapshot = atom({ plugin: 'live-sessions', key: 'snapshot' } as const, EMPTY)
 /**
  * The pane is painted in the terminal's own background: the engine fills a
@@ -319,15 +337,52 @@ async function collect($: EngineInterface, home: string, now: number): Promise<S
     [...claude, ...codex].map(s => [s.cwd, known[s.cwd] ?? { repo: '', name: '', tree: s.cwd, branch: '' }] as const),
   )
 
-  return { claude, codex, places, checkedAt: now, problems }
+  const candidates = homeEntries.filter(d => d.kind === 'dir' && /^\.(claude|codex)(-[a-z0-9][a-z0-9_.-]*)?$/i.test(d.name)).map(d => d.name)
+  const profiles = await profileDirs($, home, candidates)
+  const envs = envsFrom(candidates, name => profiles.has(name))
+  const [workspaces, tmux] = await Promise.all([readWorkspaces($, home), tmuxState($)])
+
+  return { claude, codex, places, workspaces, envs, tmux, checkedAt: now, problems }
 }
 
 const isSnapshot = (v: unknown): v is Snapshot => {
   const o = v as Partial<Snapshot> | null
   return (
     typeof o === 'object' && o !== null && Array.isArray(o.claude) && Array.isArray(o.codex) &&
-    typeof o.places === 'object' && o.places !== null && Array.isArray(o.problems) && typeof o.checkedAt === 'number'
+    typeof o.places === 'object' && o.places !== null && Array.isArray(o.problems) && typeof o.checkedAt === 'number' &&
+    Array.isArray(o.workspaces) && Array.isArray(o.envs) && typeof o.tmux === 'object' && o.tmux !== null
   )
+}
+
+async function readWorkspaces($: EngineInterface, home: string): Promise<Workspace[]> {
+  return workspacesFrom(await $.fs.read(workspacesPath(home)).then(text => JSON.parse(text) as unknown).catch(() => null))
+}
+
+async function writeWorkspaces($: EngineInterface, home: string, workspaces: readonly Workspace[]) {
+  await $.fs.write(workspacesPath(home), `${JSON.stringify({ version: 1, workspaces }, null, 2)}\n`)
+}
+
+/** tmux's panes and attached terminals; none when no tmux server runs. */
+async function tmuxState($: EngineInterface): Promise<Snapshot['tmux']> {
+  const run = (args: string[]) =>
+    $.process.run(['tmux', ...args], { timeoutMs: 10_000 }).then(out => (out.exitCode === 0 ? out.stdout : '')).catch(() => '')
+  const [panes, clients] = await Promise.all([run(['list-panes', '-a', '-F', PANES_FORMAT]), run(['list-clients', '-F', CLIENTS_FORMAT])])
+  return { panes: parsePanes(panes), clients: parseClients(clients) }
+}
+
+/** A Claude config directory has sessions or settings; a Codex home has its config or its login. */
+async function profileDirs($: EngineInterface, home: string, names: readonly string[]) {
+  const found = new Set<string>()
+  for (const name of names) {
+    const marks = name.startsWith('.claude') ? ['sessions', 'settings.json'] : ['config.toml', 'auth.json']
+    for (const mark of marks) {
+      if (await $.fs.exists(`${home}/${name}/${mark}`)) {
+        found.add(name)
+        break
+      }
+    }
+  }
+  return found
 }
 
 /** Another session's snapshot, when it is younger than `maxAgeMs`. */
@@ -398,9 +453,37 @@ async function move($: EngineInterface, scope: string, shown: readonly string[],
 }
 
 /** Brings a session's Terminal tab to the front, or opens a background session in a new window. */
+/**
+ * Brings a workspace up: the Terminal tab already attached to its tmux
+ * session to the front, else a new window that creates the session (if it
+ * is not running) and attaches. `window` is selected first.
+ */
+async function openWorkspace($: EngineInterface, ws: Workspace, window?: string) {
+  const home = (await $.env.get('HOME')) ?? ''
+  if (window !== undefined) {
+    await $.process.run(['tmux', 'select-window', '-t', `=${tmuxName(ws)}:${window}`], { timeoutMs: 10_000 }).catch(() => undefined)
+  }
+  const command = openCommand(ws, home)
+  if ((await $.env.get('TERM_PROGRAM')) !== 'Apple_Terminal') {
+    $.ui.toast(`Open it in a terminal: ${command}`, { timeoutMs: 20_000 })
+    return
+  }
+  const osascript = (script: string, arg: string) =>
+    $.process.run(['/usr/bin/osascript', '-l', 'JavaScript', '-e', script, arg], { timeoutMs: 10_000 })
+  for (const tty of (await read($, snapshot)).tmux.clients[tmuxName(ws)] ?? []) {
+    if ((await osascript(FOCUS_SCRIPT, tty)).stdout.trim() === 'shown') return
+  }
+  await osascript(OPEN_SCRIPT, command)
+}
+
 async function openSession($: EngineInterface, target: NonNullable<Item['target']>) {
   const osascript = (script: string, arg: string) =>
     $.process.run(['/usr/bin/osascript', '-l', 'JavaScript', '-e', script, arg], { timeoutMs: 10_000 })
+  if ('workspace' in target) {
+    const ws = (await read($, snapshot)).workspaces.find(w => tmuxName(w) === target.workspace)
+    if (ws !== undefined) await openWorkspace($, ws, target.window)
+    return
+  }
   if ('tty' in target) {
     const out = await osascript(FOCUS_SCRIPT, target.tty)
     if (out.stdout.trim() !== 'shown') $.ui.toast(`No Terminal tab runs on ${target.tty}.`)
@@ -496,6 +579,11 @@ async function moveChecked($: EngineInterface, move: NonNullable<Item['move']>) 
   )
 }
 
+async function openWorkspaceById($: EngineInterface, id: string) {
+  const ws = (await read($, snapshot)).workspaces.find(w => w.id === id)
+  if (ws !== undefined) await openWorkspace($, ws)
+}
+
 async function resetOrder($: EngineInterface) {
   await update($, manualOrder, () => ({}))
   await $.store.set('order', {})
@@ -521,6 +609,11 @@ export const register: Register = on => {
       description: 'Show or hide the live Claude Code and Codex sessions on this Mac',
       argumentHint: '[2d | 12h | all | reset]',
     })
+    await $.command.register({
+      name: 'workspace',
+      description: 'Named workspaces: a folder, an environment, Claude and Codex in one tmux session',
+      argumentHint: 'new <folder> [<env>] <name> | open <name> | rm <name>',
+    })
     const kept = await $.store.get('windowMs')
     if (typeof kept === 'number' && kept >= 0) await update($, activeWindow, () => kept)
     const keptOrder = orderFrom(await $.store.get('order'))
@@ -537,6 +630,46 @@ export const register: Register = on => {
       void tick($, hasStatusLine).catch(() => undefined)
     })
     return started
+  })
+
+  on('command.run', { command: 'workspace' }, async ($, e) => {
+    const home = (await $.env.get('HOME')) ?? ''
+    await refresh($, VISIBLE_MAX_AGE_MS)
+    const snap = await read($, snapshot)
+    const named = snap.envs.filter(env => env !== '')
+    const usage = `Usage: /workspace new <folder> [${['default', ...named].join(' | ')}] <name>; /workspace open <name>; /workspace rm <name>`
+    const command = parseWorkspaceArgs(e.args, named, home)
+    const list = await readWorkspaces($, home)
+    const label = (ws: Workspace) => `${ws.name} (${ws.env || 'default'}, ${ws.dir})`
+    switch (command.action) {
+      case 'help':
+        return { text: `${command.error === undefined ? '' : `Not done: ${command.error}. `}${usage}` }
+      case 'list':
+        return { text: list.length === 0 ? `No workspaces yet. ${usage}` : `Workspaces: ${list.map(label).join('; ')}. ${usage}` }
+      case 'open': {
+        const ws = findWorkspace(list, command.ref)
+        if (ws === undefined) return { text: `No workspace named "${command.ref}".` }
+        await openWorkspace($, ws)
+        return { text: `Opening ${label(ws)}.` }
+      }
+      case 'rm': {
+        const ws = findWorkspace(list, command.ref)
+        if (ws === undefined) return { text: `No workspace named "${command.ref}".` }
+        await writeWorkspaces($, home, list.filter(w => w.id !== ws.id))
+        await refresh($, 0)
+        return { text: `Removed ${label(ws)}. Its agents keep running in tmux session ${tmuxName(ws)} (end it: tmux kill-session -t ${tmuxName(ws)}).` }
+      }
+      case 'new': {
+        const isDir = await $.fs.stat(command.dir).then(s => s.kind === 'dir').catch(() => false)
+        if (!isDir) return { text: `Not done: ${command.dir} is not a folder.` }
+        if (!snap.envs.includes(command.env)) return { text: `Not done: no environment "${command.env}". ${usage}` }
+        const ws: Workspace = { id: slugOf(command.name, list.map(w => w.id)), name: command.name, env: command.env, dir: command.dir, createdAt: await $.clock.now() }
+        await writeWorkspaces($, home, [...list, ws])
+        await refresh($, 0)
+        await openWorkspace($, ws)
+        return { text: `Created ${label(ws)}: Claude and Codex start in tmux session ${tmuxName(ws)}. Closing its window leaves them running; /workspace open ${ws.id} brings it back.` }
+      }
+    }
   })
 
   on('command.run', { command: 'sessions' }, async ($, e) => {
@@ -693,6 +826,31 @@ export const register: Register = on => {
           {Object.keys(order).length > 0 && (
             <Button key="reset-order" label="reset order" onPress={() => void resetOrder($)} />
           )}
+        </Box>
+        <Box key="workspaces" flexDirection="column" width={width} marginTop={1}>
+          <Text bold>Workspaces</Text>
+          {view.workspaces.length === 0 && (
+            <Text dimColor wrap="truncate-end">{'  none yet: /workspace new <folder> [env] <name>'}</Text>
+          )}
+          {view.workspaces.map(ws => (
+            <Box key={`ws-${ws.key}`} flexDirection="column" width={width}>
+              <Box flexDirection="row" width={width}>
+                <Box flexGrow={1} flexShrink={1} flexDirection="row">
+                  <Text bold wrap="truncate-end">{`  ${ws.name}`}</Text>
+                  <Text color="permission">{`  ${ws.env || 'default'}`}</Text>
+                  <Text dimColor wrap="truncate-end">{`  ${ws.dir}`}</Text>
+                </Box>
+                <Box flexShrink={0} marginLeft={1}>
+                  <Text dimColor>{ws.isAttached ? 'open' : ws.isRunning ? 'running' : 'stopped'}</Text>
+                </Box>
+                <Box flexShrink={0} marginLeft={1}>
+                  <Button key={`wsopen ${ws.key}`} label="open" onPress={() => void openWorkspaceById($, ws.key)} />
+                </Box>
+                {arrows(WORKSPACES_SCOPE, view.workspaces.map(w => w.key), ws.key)}
+              </Box>
+              {ws.items.map(i => itemRow(i, ws.items.map(x => x.key), itemsScope(`ws:${ws.key}`)))}
+            </Box>
+          ))}
         </Box>
         {view.shown === 0 && (
           <Box marginTop={1}>

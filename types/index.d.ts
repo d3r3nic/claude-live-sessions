@@ -54,12 +54,32 @@ export type Place = {
   branch: string
 }
 
+/**
+ * A named project: a folder, the environment its agents start under, and
+ * the tmux session (`ws-<id>`) they run in.
+ */
+export type Workspace = {
+  /** Lowercase letters, digits and dashes, from the name. */
+  id: string
+  name: string
+  /** '' for the default environment, else its name: `work` for ~/.claude-work and ~/.codex-work. */
+  env: string
+  dir: string
+  createdAt: number
+}
+
 export type Snapshot = {
   /** Each session's `cwd` is where it has been working, which may not be where it started. */
   claude: ClaudeSession[]
   codex: CodexSession[]
   /** Each working directory above, placed. */
   places: Record<string, Place>
+  /** The workspaces, as kept in their file. */
+  workspaces: Workspace[]
+  /** The environments on this machine: '' (the default) and each other's name. */
+  envs: string[]
+  /** tmux: which session and window each tty is, and the terminals attached to each session. */
+  tmux: { panes: Record<string, { session: string; window: string }>; clients: Record<string, string[]> }
   /** When this snapshot was taken; 0 before the first. */
   checkedAt: number
   /** What could not be read, one line each. */

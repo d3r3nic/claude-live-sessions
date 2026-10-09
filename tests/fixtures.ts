@@ -168,6 +168,6 @@ export const LISTINGS: Record<string, FsEntry[]> = {
   '/Users/u': [dir('.claude'), dir('.claude-work'), dir('.claude-profiles'), dir('.codex'), dir('.codex-work'), dir('projects'), file('.zshrc')],
   '/Users/u/.claude/sessions': [file('101.json'), file('102.json'), file('103.json'), file('999.json'), file('101.json.key'), dir('nested')],
   '/Users/u/.claude-work/sessions': [file('104.json')],
-  '/Users/u/.codex': [file('state_4.sqlite'), file('state_5.sqlite'), file('state_5.sqlite-shm'), file('state_5.sqlite-wal'), dir('sessions')],
-  '/Users/u/.codex-work': [file('state_5.sqlite')],
+  '/Users/u/.codex': [file('state_4.sqlite'), file('state_5.sqlite'), file('state_5.sqlite-shm'), file('state_5.sqlite-wal'), file('config.toml'), dir('sessions')],
+  '/Users/u/.codex-work': [file('state_5.sqlite'), file('auth.json')],
 }
