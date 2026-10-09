@@ -66,7 +66,15 @@ try {
   try { process.kill(bgPid, 0); alive = true } catch {}
   check('it keeps running after its tab closes', alive)
 } finally {
-  if (tty) jxa(`function run(a) { const t = Application('Terminal'); for (const w of t.windows()) if (w.tabs().some(x => x.tty() === '/dev/' + a[0])) w.close() }`, tty)
+  if (tty) {
+    // end whatever still runs in that tab first, so closing it never stops at "terminate running processes?"
+    for (const line of spawnSync('/bin/ps', ['-t', tty, '-o', 'pid=,comm='], { encoding: 'utf8' }).stdout.split('\n')) {
+      const [pid, comm = ''] = line.trim().split(/\s+/)
+      if (pid && !/(^|\/)-?(zsh|bash|sh|login)$/.test(comm)) try { process.kill(Number(pid), 'SIGHUP') } catch {}
+    }
+    await sleep(2000)
+    jxa(`function run(a) { const t = Application('Terminal'); for (const w of t.windows()) if (w.tabs().some(x => x.tty() === '/dev/' + a[0])) w.close() }`, tty)
+  }
   const id = bg?.id ?? s?.sessionId.slice(0, 8)
   if (id) { spawnSync('claude', ['stop', id], { cwd: WORK, env: CLEAN }); spawnSync('claude', ['rm', id], { cwd: WORK, env: CLEAN }) }
   const project = `${HOME}/.claude/projects/${WORK.replace(/[^A-Za-z0-9]/g, '-')}`
