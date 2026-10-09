@@ -871,6 +871,8 @@ export type Item = {
    * session to attach, or the workspace window it runs in.
    */
   target?: { tty: string } | { attach: string; profile: string } | { workspace: string; window: string }
+  /** Its lasting id for assigning it to a workspace: `claude:<session id>` or `codex:<thread id>`. */
+  memberId?: string
   /** For an idle Claude session in a terminal tab: what moving it to the background starts from. */
   move?: { pid: number; tty: string; profile: string; sessionId: string; startCwd: string }
 }
@@ -915,6 +917,7 @@ export function viewOf(
         tool: 'claude' as const,
         cwd: s.cwd,
         tty: s.tty,
+        ...(/^[A-Za-z0-9-]{1,64}$/.test(s.sessionId) ? { memberId: `claude:${s.sessionId}` } : {}),
         title: s.name,
         tags: [
           s.kind === 'bg' ? 'bg' : '',
@@ -946,6 +949,8 @@ export function viewOf(
       tool: 'codex' as const,
       cwd: s.cwd,
       tty: s.surface === 'terminal' ? s.tty : '',
+      // a terminal with no thread found has no lasting id
+      ...(/^[A-Za-z0-9-]{1,64}$/.test(s.key) && !s.key.startsWith('pid-') ? { memberId: `codex:${s.key}` } : {}),
       title: s.title,
       tags: [
         s.profile === 'codex' ? '' : s.profile.replace(/^codex-/, ''),
@@ -968,12 +973,17 @@ export function viewOf(
   const byActivity = (a: Item, b: Item) => rank(b) - rank(a) || b.lastActive - a.lastActive
   const lead = (list: readonly Item[]) => [...list].sort(byActivity)[0]
 
+  // a session belongs to a workspace by running in its tmux session, or by being assigned to it
+  const assignedTo = new Map(snap.workspaces.flatMap(ws => (ws.members ?? []).map(m => [m, tmuxName(ws)] as const)))
   const inWorkspaces = new Map<string, Item[]>()
   const repos = new Map<string, RepoView>()
   for (const { cwd, tty, ...item } of shown) {
     const pane = inWorkspace(tty)
-    if (pane !== undefined) {
-      inWorkspaces.set(pane.session, [...(inWorkspaces.get(pane.session) ?? []), item])
+    const assignedName = pane === undefined && item.memberId !== undefined ? assignedTo.get(item.memberId) : undefined
+    const session = pane?.session ?? assignedName
+    if (session !== undefined) {
+      const placed = assignedName === undefined ? item : { ...item, tags: [...item.tags, 'assigned'] }
+      inWorkspaces.set(session, [...(inWorkspaces.get(session) ?? []), placed])
       continue
     }
     const place = snap.places[cwd] ?? { repo: '', name: '', tree: cwd, branch: '' }

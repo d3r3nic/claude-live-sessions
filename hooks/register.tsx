@@ -5,6 +5,7 @@ import type { ClaudeSession, Place, Snapshot, Workspace } from '../types'
 import {
   CLIENTS_FORMAT,
   PANES_FORMAT,
+  assigned,
   envsFrom,
   findWorkspace,
   OWNER_OPTION,
@@ -15,6 +16,7 @@ import {
   slugOf,
   tmuxName,
   workspacesFrom,
+  worktreeDir,
 } from './workspaces'
 import {
   ACTIVE_MS,
@@ -123,6 +125,12 @@ const activeWindow = atom({ plugin: 'live-sessions', key: 'window' } as const, 0
 /** A move to the background asked for once: the row, and when. A second press within CONFIRM_MS makes it. */
 const pendingMove = atom({ plugin: 'live-sessions', key: 'pendingMove' } as const, { key: '', at: 0 })
 const CONFIRM_MS = 6_000
+
+const NO_DRAFT = { isOpen: false, name: '', dir: '', env: '', branch: '', error: '' }
+/** The new-workspace form. */
+const draft = atom({ plugin: 'live-sessions', key: 'draft' } as const, NO_DRAFT)
+/** The session whose workspace is being chosen. */
+const assigning = atom({ plugin: 'live-sessions', key: 'assigning' } as const, { key: '', member: '' })
 
 /** The person's own order of repositories, worktrees and sessions; kept in `$.store` as `order`. */
 const manualOrder = atom({ plugin: 'live-sessions', key: 'order' } as const, {} as Record<string, string[]>)
@@ -629,6 +637,79 @@ async function moveChecked($: EngineInterface, move: NonNullable<Item['move']>) 
   )
 }
 
+/**
+ * Makes a workspace, from the command or the pane's form alike: checks the
+ * folder (or, with a branch, makes that branch's worktree beside its
+ * repository), saves it under an id no running tmux session has, opens it.
+ */
+async function createWorkspace(
+  $: EngineInterface,
+  w: { dir: string; env: string; name: string; branch: string },
+): Promise<{ isCreated: boolean; text: string }> {
+  const home = (await $.env.get('HOME')) ?? ''
+  const fail = (why: string) => ({ isCreated: false, text: `Not done: ${why}.` })
+  await refresh($, VISIBLE_MAX_AGE_MS)
+  const snap = await read($, snapshot)
+  if (w.name.trim() === '') return fail('a workspace needs a name')
+  if (!snap.envs.includes(w.env)) return fail(`there is no environment "${w.env}"`)
+  if (!(await readWorkspaces($, home)).isReadable) return fail(UNREADABLE)
+  const isDir = await $.fs.stat(w.dir).then(s => s.kind === 'dir').catch(() => false)
+  if (!isDir) return fail(`${w.dir} is not a folder`)
+  let dir = w.dir
+  if (w.branch !== '') {
+    const git = (args: string[]) =>
+      $.process.run(['git', ...args], { timeoutMs: 30_000 }).catch((error: unknown) => ({ exitCode: -1, stdout: '', stderr: message(error) }))
+    if ((await git(['check-ref-format', '--branch', w.branch])).exitCode !== 0) return fail(`"${w.branch}" is not a branch name git takes`)
+    const top = await git(['-C', w.dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'])
+    const common = top.stdout.trim()
+    if (top.exitCode !== 0 || !common.startsWith('/')) return fail(`${w.dir} is not in a git repository, so it has no branches`)
+    // the main checkout holds the shared .git: worktrees go beside it
+    const root = common.endsWith('/.git') ? common.slice(0, -'/.git'.length) : common
+    dir = worktreeDir(root, w.branch)
+    if (await $.fs.exists(dir)) return fail(`${dir} is already there`)
+    const isBranch = (await git(['-C', root, 'rev-parse', '--verify', '--quiet', `refs/heads/${w.branch}`])).exitCode === 0
+    const added = await git(['-C', root, 'worktree', 'add', ...(isBranch ? [dir, w.branch] : ['-b', w.branch, dir])])
+    if (added.exitCode !== 0) return fail(`git could not make the worktree (${firstLine(added.stderr) || `exit ${added.exitCode}`})`)
+  }
+  // never the name of a tmux session already running: a new workspace never takes over an old one
+  const running = Object.values(snap.tmux.panes).map(p => p.session).filter(s => s.startsWith('ws-')).map(s => s.slice(3))
+  let ws: Workspace | undefined
+  const createdAt = await $.clock.now()
+  const saved = await changeWorkspaces($, home, now => {
+    ws = { id: slugOf(w.name, [...now.map(x => x.id), ...running]), name: w.name.trim(), env: w.env, dir, createdAt }
+    return [...now, ws]
+  })
+  if (!saved || ws === undefined) return fail(UNREADABLE)
+  await refresh($, 0)
+  const label = `${ws.name} (${ws.env || 'default'}, ${ws.dir})`
+  const opened = await openWorkspace($, ws)
+  return {
+    isCreated: true,
+    text: opened.isOpen
+      ? `Created ${label}: Claude and Codex start in tmux session ${tmuxName(ws)}. Closing its window leaves them running; /workspace open ${ws.id} brings it back. ${opened.text}`
+      : `Created ${label}, but it was not opened: ${opened.text}`,
+  }
+}
+
+async function submitDraft($: EngineInterface) {
+  const d = await read($, draft)
+  const made = await createWorkspace($, { name: d.name, dir: d.dir.startsWith('~') ? `${(await $.env.get('HOME')) ?? ''}${d.dir.slice(1)}` : d.dir, env: d.env, branch: d.branch.trim() })
+  if (made.isCreated) {
+    await update($, draft, () => NO_DRAFT)
+    $.ui.toast(made.text, { timeoutMs: 15_000 })
+  } else {
+    await update($, draft, now => ({ ...now, error: made.text }))
+  }
+}
+
+async function assignTo($: EngineInterface, member: string, id: string) {
+  const home = (await $.env.get('HOME')) ?? ''
+  const isSaved = await changeWorkspaces($, home, list => assigned(list, member, id))
+  await update($, assigning, () => ({ key: '', member: '' }))
+  if (!isSaved) $.ui.toast(`Not assigned: ${UNREADABLE}.`)
+  await refresh($, 0)
+}
+
 async function openWorkspaceById($: EngineInterface, id: string) {
   const ws = (await read($, snapshot)).workspaces.find(w => w.id === id)
   if (ws === undefined) return
@@ -664,7 +745,7 @@ export const register: Register = on => {
     await $.command.register({
       name: 'workspace',
       description: 'Named workspaces: a folder, an environment, Claude and Codex in one tmux session',
-      argumentHint: 'new <folder> [<env>] <name> | open <name> | rm <name>',
+      argumentHint: 'new <folder> <env> <name> [--branch <b>] | open <name> | rm <name>',
     })
     const kept = await $.store.get('windowMs')
     if (typeof kept === 'number' && kept >= 0) await update($, activeWindow, () => kept)
@@ -689,7 +770,7 @@ export const register: Register = on => {
     await refresh($, VISIBLE_MAX_AGE_MS)
     const snap = await read($, snapshot)
     const named = snap.envs.filter(env => env !== '')
-    const usage = `Usage: /workspace new <folder> <${['default', ...named].join(' | ')}> <name>; /workspace open <name>; /workspace rm <name>`
+    const usage = `Usage: /workspace new <folder> <${['default', ...named].join(' | ')}> <name> [--branch <new or existing branch>]; /workspace open <name>; /workspace rm <name>`
     const command = parseWorkspaceArgs(e.args, named, home)
     const { list, isReadable } = await readWorkspaces($, home)
     const label = (ws: Workspace) => `${ws.name} (${ws.env || 'default'}, ${ws.dir})`
@@ -715,27 +796,9 @@ export const register: Register = on => {
         await refresh($, 0)
         return { text: `Removed ${label(ws)}. Its agents keep running in tmux session ${tmuxName(ws)} (end it: tmux kill-session -t ${tmuxName(ws)}).` }
       }
-      case 'new': {
+      case 'new':
         if (!isReadable) return { text: `Not done: ${UNREADABLE}.` }
-        const isDir = await $.fs.stat(command.dir).then(s => s.kind === 'dir').catch(() => false)
-        if (!isDir) return { text: `Not done: ${command.dir} is not a folder.` }
-        // never the name of a tmux session already running: a new workspace never takes over an old one
-        const running = Object.values(snap.tmux.panes).map(p => p.session).filter(s => s.startsWith('ws-')).map(s => s.slice(3))
-        let ws: Workspace | undefined
-        const createdAt = await $.clock.now()
-        const saved = await changeWorkspaces($, home, now => {
-          ws = { id: slugOf(command.name, [...now.map(w => w.id), ...running]), name: command.name, env: command.env, dir: command.dir, createdAt }
-          return [...now, ws]
-        })
-        if (!saved || ws === undefined) return { text: `Not done: ${UNREADABLE}.` }
-        await refresh($, 0)
-        const opened = await openWorkspace($, ws)
-        return {
-          text: opened.isOpen
-            ? `Created ${label(ws)}: Claude and Codex start in tmux session ${tmuxName(ws)}. Closing its window leaves them running; /workspace open ${ws.id} brings it back. ${opened.text}`
-            : `Created ${label(ws)}, but it was not opened: ${opened.text}`,
-        }
-      }
+        return { text: (await createWorkspace($, command)).text }
     }
   })
 
@@ -778,7 +841,14 @@ export const register: Register = on => {
     // a press reaches another Terminal tab or window, so only inside Terminal.app
     const canOpen = (await $.env.get('TERM_PROGRAM')) === 'Apple_Terminal'
     const hasMove = hasWhere && canOpen
-    const titleWidth = Math.max(8, width - (6 + 7 + 10 + (hasWhere ? 9 : 0) + 5 + 4 + (hasMove ? 11 : 0)))
+    const titleWidth = Math.max(8, width - (6 + 7 + 10 + (hasWhere ? 9 : 0) + 5 + 4 + 3 + (hasMove ? 11 : 0)))
+    const elements = $.ui.resolve(e)
+    const Input = 'Input' in elements ? elements.Input : undefined
+    const Select = 'Select' in elements ? elements.Select : undefined
+    const form = await read($, draft)
+    const choosing = await read($, assigning)
+    const openForm = (dir: string) => () => void update($, draft, () => ({ ...NO_DRAFT, isOpen: true, dir }))
+    const setForm = (field: 'name' | 'dir' | 'branch') => (value: string) => void update($, draft, d => ({ ...d, [field]: value, error: '' }))
     const pending = await read($, pendingMove)
     const isPending = (key: string) => pending.key === key && now - pending.at < CONFIRM_MS
     const pressMove = (key: string, move: NonNullable<Item['move']>) => async () => {
@@ -853,10 +923,31 @@ export const register: Register = on => {
               )}
             </Box>
           )}
+          <Box width={2} flexShrink={0} marginLeft={1}>
+            {i.memberId !== undefined && (
+              <Button key={`assign ${i.key}`} label="⊕" plain onPress={() => void update($, assigning, () => ({ key: i.key, member: i.memberId! }))} />
+            )}
+          </Box>
           {arrows(scope, siblings, i.key)}
         </Box>
       )
     }
+    // a session's row, and under it, while it is being assigned, the workspaces to choose from
+    const sessionRow = (i: Item, siblings: readonly string[], scope: string) => (
+      <Box key={`row ${i.key}`} flexDirection="column" width={width}>
+        {itemRow(i, siblings, scope)}
+        {choosing.key === i.key && (
+          <Box flexDirection="row" width={width} columnGap={1} marginLeft={6}>
+            <Text dimColor>assign to:</Text>
+            {snap.workspaces.map(ws => (
+              <Button key={`assign-to ${i.key} ${ws.id}`} label={ws.name} onPress={() => void assignTo($, choosing.member, ws.id)} />
+            ))}
+            <Button key={`assign-to ${i.key} -`} label="none" onPress={() => void assignTo($, choosing.member, '')} />
+            <Button key={`assign-cancel ${i.key}`} label="cancel" onPress={() => void update($, assigning, () => ({ key: '', member: '' }))} />
+          </Box>
+        )}
+      </Box>
+    )
     const repoKeys = view.repos.map(r => r.key)
 
     const problems = snap.problems.map(p => (
@@ -896,9 +987,31 @@ export const register: Register = on => {
           )}
         </Box>
         <Box key="workspaces" flexDirection="column" width={width} marginTop={1}>
-          <Text bold>Workspaces</Text>
-          {view.workspaces.length === 0 && (
-            <Text dimColor wrap="truncate-end">{'  none yet: /workspace new <folder> [env] <name>'}</Text>
+          <Box flexDirection="row" width={width} columnGap={1}>
+            <Text bold>Workspaces</Text>
+            {Input !== undefined && !form.isOpen && <Button key="ws-new" label="+ workspace" plain onPress={openForm('')} />}
+          </Box>
+          {view.workspaces.length === 0 && !form.isOpen && (
+            <Text dimColor wrap="truncate-end">{'  none yet: + workspace, or /workspace new <folder> <env> <name>'}</Text>
+          )}
+          {form.isOpen && Input !== undefined && Select !== undefined && (
+            <Box key="ws-form" flexDirection="column" width={width - 2} marginLeft={2}>
+              <Input key="ws-form-name" label="name" value={form.name} placeholder="Practice RBAC" onInput={setForm('name')} onSubmit={() => void submitDraft($)} />
+              <Input key="ws-form-dir" label="folder" value={form.dir} placeholder="~/code/app" onInput={setForm('dir')} onSubmit={() => void submitDraft($)} />
+              <Select
+                key="ws-form-env"
+                label="environment"
+                options={snap.envs.map(env => ({ value: env || 'default', label: env || 'default' }))}
+                value={form.env || 'default'}
+                onSelect={value => void update($, draft, d => ({ ...d, env: value === 'default' ? '' : value, error: '' }))}
+              />
+              <Input key="ws-form-branch" label="new branch (optional)" value={form.branch} placeholder="feat/x" onInput={setForm('branch')} onSubmit={() => void submitDraft($)} />
+              <Box flexDirection="row" columnGap={1}>
+                <Button key="ws-form-create" label="create" variant="primary" onPress={() => void submitDraft($)} />
+                <Button key="ws-form-cancel" label="cancel" onPress={() => void update($, draft, () => NO_DRAFT)} />
+              </Box>
+              {form.error !== '' && <Text color="error" wrap="wrap">{form.error}</Text>}
+            </Box>
           )}
           {view.workspaces.map(ws => (
             <Box key={`ws-${ws.key}`} flexDirection="column" width={width}>
@@ -916,7 +1029,7 @@ export const register: Register = on => {
                 </Box>
                 {arrows(WORKSPACES_SCOPE, view.workspaces.map(w => w.key), ws.key)}
               </Box>
-              {ws.items.map(i => itemRow(i, ws.items.map(x => x.key), itemsScope(`ws:${ws.key}`)))}
+              {ws.items.map(i => sessionRow(i, ws.items.map(x => x.key), itemsScope(`ws:${ws.key}`)))}
             </Box>
           ))}
         </Box>
@@ -940,9 +1053,14 @@ export const register: Register = on => {
                     <Text wrap="truncate-end">{`  ${tree.label}`}</Text>
                     {tree.path !== '' && <Text dimColor wrap="truncate-end">{`  ${tree.path}`}</Text>}
                   </Box>
+                  {Input !== undefined && (
+                    <Box flexShrink={0} marginLeft={1}>
+                      <Button key={`ws-from ${tree.key}`} label="+ ws" plain onPress={openForm(tree.key)} />
+                    </Box>
+                  )}
                   {arrows(treesScope(repo.key), repo.trees.map(t => t.key), tree.key)}
                 </Box>
-                {tree.items.map(i => itemRow(i, tree.items.map(x => x.key), itemsScope(tree.key)))}
+                {tree.items.map(i => sessionRow(i, tree.items.map(x => x.key), itemsScope(tree.key)))}
               </Box>
             ))}
           </Box>

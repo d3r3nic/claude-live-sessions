@@ -23,7 +23,7 @@ export function words(args: string): string[] {
 
 export type WorkspaceCommand =
   | { action: 'list' }
-  | { action: 'new'; dir: string; env: string; name: string }
+  | { action: 'new'; dir: string; env: string; name: string; branch: string }
   | { action: 'open' | 'rm'; ref: string }
   | { action: 'help'; error?: string }
 
@@ -40,14 +40,19 @@ export function parseWorkspaceArgs(args: string, envs: readonly string[], home: 
     return rest.length > 0 ? { action: verb, ref: rest.join(' ') } : { action: 'help', error: `say which workspace to ${verb}` }
   }
   if (verb !== 'new') return { action: 'help', error: `"${verb}" is not one of new, open, rm, list` }
-  const [folder = '', envWord = '', ...after] = rest
+  const [folder = '', envWord = '', ...afterEnv] = rest
+  // `--branch <name>` anywhere after the environment: a new worktree for it
+  const at = afterEnv.indexOf('--branch')
+  const branch = at >= 0 ? (afterEnv[at + 1] ?? '') : ''
+  if (at >= 0 && branch === '') return { action: 'help', error: '--branch needs a branch name' }
+  const after = at >= 0 ? [...afterEnv.slice(0, at), ...afterEnv.slice(at + 2)] : afterEnv
   const name = after.join(' ').trim()
   if (folder === '' || envWord === '' || name === '') return { action: 'help', error: 'new needs a folder, an environment and a name' }
   if (envWord !== 'default' && !envs.includes(envWord)) return { action: 'help', error: `there is no environment "${envWord}"` }
   const env = envWord === 'default' ? '' : envWord
   const dir = folder === '~' ? home : folder.startsWith('~/') ? `${home}${folder.slice(1)}` : folder
   if (!dir.startsWith('/')) return { action: 'help', error: 'the folder must be absolute or start with ~' }
-  return { action: 'new', dir: dir.replace(/\/+$/, '') || '/', env, name }
+  return { action: 'new', dir: dir.replace(/\/+$/, '') || '/', env, name, branch }
 }
 
 /** The workspace `ref` names: its id, or its name in any case. */
@@ -148,6 +153,9 @@ export function envsFrom(dirNames: readonly string[], isProfile: (dirName: strin
   return ['', ...named.sort((a, b) => a.localeCompare(b))]
 }
 
+/** A session's lasting id for assigning it: `claude:<session id>` or `codex:<thread id>`. */
+export const MEMBER_ID = /^(claude|codex):[A-Za-z0-9-]{1,64}$/
+
 /** The workspaces file, if it is one. */
 export function workspacesFrom(raw: unknown): Workspace[] {
   const list = (raw as { workspaces?: unknown } | null)?.workspaces
@@ -156,6 +164,28 @@ export function workspacesFrom(raw: unknown): Workspace[] {
     const o = ws as Partial<Workspace> | null
     return typeof o === 'object' && o !== null && typeof o.id === 'string' && /^[a-z0-9-]{1,40}$/.test(o.id) &&
       typeof o.name === 'string' && typeof o.env === 'string' && typeof o.dir === 'string' && o.dir.startsWith('/') &&
-      typeof o.createdAt === 'number'
+      typeof o.createdAt === 'number' &&
+      (o.members === undefined || (Array.isArray(o.members) && o.members.every(m => typeof m === 'string' && MEMBER_ID.test(m))))
   })
+}
+
+/** The list with `member` assigned to the workspace `id` only, or to none when `id` is ''. */
+export function assigned(list: readonly Workspace[], member: string, id: string): Workspace[] {
+  return list.map(ws => {
+    const others = (ws.members ?? []).filter(m => m !== member)
+    const members = ws.id === id ? [...others, member] : others
+    const { members: _, ...rest } = ws
+    return members.length > 0 ? { ...rest, members } : rest
+  })
+}
+
+/**
+ * Where a new branch's worktree goes: beside the repository, in one folder
+ * per repository, `<parent>/<repo>-worktrees/<branch>`, each `/` in the
+ * branch a `-`.
+ */
+export function worktreeDir(repoRoot: string, branch: string): string {
+  const root = repoRoot.replace(/\/+$/, '')
+  const at = root.lastIndexOf('/')
+  return `${root.slice(0, at)}/${root.slice(at + 1)}-worktrees/${branch.replace(/\//g, '-')}`
 }

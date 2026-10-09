@@ -66,6 +66,11 @@ export type Workspace = {
   env: string
   dir: string
   createdAt: number
+  /**
+   * Sessions assigned to it that run outside its tmux session, by a lasting
+   * id: `claude:<session id>` or `codex:<thread id>`.
+   */
+  members?: string[]
 }
 
 export type Snapshot = {
@@ -98,6 +103,10 @@ declare module 'claude-code' {
       order: Record<string, string[]>
       /** A move to the background pressed once: the row's key and when; a second press confirms it. */
       pendingMove: { key: string; at: number }
+      /** The new-workspace form, while open. */
+      draft: { isOpen: boolean; name: string; dir: string; env: string; branch: string; error: string }
+      /** The session whose workspace is being chosen: its row's key and lasting id; '' when none. */
+      assigning: { key: string; member: string }
     }
   }
 }

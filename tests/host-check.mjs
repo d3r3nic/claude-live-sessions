@@ -3,7 +3,7 @@
 // Run: node --experimental-strip-types tests/host-check.mjs
 // It opens Codex databases read-only, and prints no environment values.
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { registerHooks } from 'node:module'
@@ -274,6 +274,32 @@ if (process.argv.includes('--slow')) {
   spawnSync('tmux', ['-L', socket, 'kill-server'])
   // kill-server leaves its socket file behind
   rmSync(join(process.env.TMUX_TMPDIR ?? '/tmp', `tmux-${process.getuid()}`, socket), { force: true })
+  rmSync(scratch, { recursive: true, force: true })
+}
+
+// 7. A workspace on a new branch: the git steps createWorkspace runs, on a throwaway repository
+{
+  const scratch = mkdtempSync(join(tmpdir(), 'live-sessions-git-'))
+  const repo = join(scratch, 'app')
+  const git = (...args) => spawnSync('git', args, { encoding: 'utf8', env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1' } })
+  mkdirSync(repo)
+  git('-C', repo, 'init', '-q', '-b', 'main')
+  git('-C', repo, '-c', 'user.email=check@example.invalid', '-c', 'user.name=check', '-c', 'commit.gpgsign=false', 'commit', '-q', '--allow-empty', '-m', 'start')
+  git('-C', repo, 'branch', 'feat/old')
+  check('git: a bad branch name is refused', git('check-ref-format', '--branch', 'a..b').status !== 0 && git('check-ref-format', '--branch', 'feat/new').status === 0)
+  // asked from inside a subfolder, the shared .git names the repository
+  mkdirSync(join(repo, 'sub'))
+  const common = git('-C', join(repo, 'sub'), 'rev-parse', '--path-format=absolute', '--git-common-dir').stdout.trim()
+  const root = common.endsWith('/.git') ? common.slice(0, -5) : common
+  check('git: the repository found from a subfolder', realpathSync(root) === realpathSync(repo), root.split('/').pop())
+  const fresh = w.worktreeDir(root, 'feat/new')
+  const isNew = git('-C', root, 'rev-parse', '--verify', '--quiet', 'refs/heads/feat/new').status !== 0
+  const added = git('-C', root, 'worktree', 'add', '-b', 'feat/new', fresh)
+  check('git: a new branch\'s worktree beside the repository', isNew && added.status === 0 && git('-C', fresh, 'branch', '--show-current').stdout.trim() === 'feat/new', fresh.split('/').slice(-2).join('/'))
+  const old = w.worktreeDir(root, 'feat/old')
+  const isOld = git('-C', root, 'rev-parse', '--verify', '--quiet', 'refs/heads/feat/old').status === 0
+  const addedOld = git('-C', root, 'worktree', 'add', old, 'feat/old')
+  check('git: a branch already there checked out in its worktree', isOld && addedOld.status === 0 && git('-C', old, 'branch', '--show-current').stdout.trim() === 'feat/old')
   rmSync(scratch, { recursive: true, force: true })
 }
 

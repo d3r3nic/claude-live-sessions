@@ -18,7 +18,10 @@ A Claude Code plugin (a function-hooks mod) that lists the live Claude Code and 
 
 A workspace is a project with your own name. It has a folder, an environment, and one tmux session with Claude and Codex in it.
 
-- `/workspace new <folder> <env> <name>`, for example `/workspace new ~/code/app work Practice RBAC`. It saves the workspace, then opens a Terminal window on tmux session `ws-<id>` (`<id>` is the name in lowercase with dashes, e.g. `ws-practice-rbac`), with a `claude` window and a `codex` window in that folder.
+- In the pane, `+ workspace` opens a form: a name, a folder, the environment (a list of the ones on this Mac) and, optionally, a new branch. `+ ws` on any branch or folder row opens it with that folder filled in.
+- `/workspace new <folder> <env> <name> [--branch <branch>]` does the same from the prompt, for example `/workspace new ~/code/app work Practice RBAC`.
+- With a branch, the workspace gets that branch's own worktree beside its repository, `<repo>-worktrees/<branch>` (each `/` a `-`). A new branch starts from the repository's current commit; a branch already there is checked out.
+- What the form or the command makes: it saves the workspace, then opens a Terminal window on tmux session `ws-<id>` (`<id>` is the name in lowercase with dashes, e.g. `ws-practice-rbac`), with a `claude` window and a `codex` window in that folder.
 - `<env>` is required, and picks the accounts the agents start under:
   - `default` uses `~/.claude` and `~/.codex`.
   - `work` uses `~/.claude-work` and `~/.codex-work`, through `CLAUDE_CONFIG_DIR` and `CODEX_HOME`.
@@ -30,6 +33,7 @@ A workspace is a project with your own name. It has a folder, an environment, an
   - In another terminal app, it gives the command to run.
   It refuses a folder that is gone, and a running `ws-<id>` session that was not started for this workspace. A new workspace never reuses the name of a session already running.
 - The pane lists workspaces first, each with its agents (whatever runs in its tmux session) and a running or stopped state. Pressing an agent selects its tmux window.
+- `⊕` on any session assigns it to a workspace (or to none). A running session cannot move into tmux, but an assigned one is listed under the workspace, tagged `assigned`. Assignment is by the session's lasting id: its Claude session id, or its Codex thread id.
 - `/workspace rm <name>` forgets a workspace. Its tmux session keeps running until `tmux kill-session -t ws-<id>`.
 - The list is kept in `~/Library/Application Support/live-sessions/workspaces.json`, which every profile's sessions read. If that file can't be read, it is reported and never overwritten. Workspaces need tmux.
 
@@ -68,7 +72,7 @@ To change it, edit this folder, then run `/reload-plugins` in a session.
 
 ```sh
 claude plugin validate .
-claude plugin test .                                         # 66 tests
+claude plugin test .                                         # 72 tests
 npx -p typescript@5.6.3 tsc -p .                             # after one load, which lays down .claude-plugin/types
 node --experimental-strip-types tests/host-check.mjs [2d] [--slow]   # on this Mac: SQL, pipelines, a full collection, the move script on throwaway processes
 E2E_TRUSTED_DIR=<a trusted folder> node --experimental-strip-types tests/e2e-terminal.mjs    # a Terminal window: move a throwaway session to the background
