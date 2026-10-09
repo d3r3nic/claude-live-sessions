@@ -25,8 +25,8 @@ A workspace is a project with your own name: a repository, an environment, and C
   - **what it is for** (optional): a sentence or two.
   `+ ws` on any branch or folder row opens the form with that folder as the project.
 - `/workspace new <folder> <env> <name> [--for <what it is for>]` does the same from the prompt; every word after `--for` is the purpose.
-- Create opens a Terminal window on tmux session `ws-<id>` (`<id>` is the name in lowercase with dashes), with one window: Claude on the left and Codex on the right, both in the project's folder. Each may also work in `<checkout>-worktrees/`, beside the repository's main checkout (made if it is not there), where branches' worktrees go. Create is taken once: a second press, or Enter, while one is being made, does not make another.
-- With a purpose (it needs a git repository), each agent starts with a first prompt, taken once (a restart never sends it again):
+- Create opens a Terminal window on tmux session `ws-<id>` (the window runs `/bin/sh <file>`, the file in `~/Library/Application Support/live-sessions/open/` holding the command line, so any login shell works) (`<id>` is the name in lowercase with dashes), with one window: Claude on the left and Codex on the right, both in the project's folder. Each may also work in `<checkout>-worktrees/`, beside the repository's main checkout (made if it is not there), where branches' worktrees go. Create is taken once: a second press, or Enter, while one is being made, does not make another.
+- With a purpose (it needs a git repository), each agent starts with a first prompt, taken once (a restart never sends it again; `/workspace rm` deletes one never taken):
   - Claude gets peer coding ready under the peer-coding rules (the peer-coding skill): sets the repository up for it if it is not, starts a branch named for the purpose in its own worktree, makes its alignment move and ends its turn with the rules' cue line.
   - Codex is told it is the peer and that Claude's hand-off will come; it answers that it is ready.
   - The relay is on (below), so Claude's hand-off reaches Codex without copy and paste.
@@ -34,7 +34,7 @@ A workspace is a project with your own name: a repository, an environment, and C
   - `default` uses `~/.claude` and `~/.codex`.
   - `work` uses `~/.claude-work` and `~/.codex-work`, through `CLAUDE_CONFIG_DIR` and `CODEX_HOME`.
   An environment is offered only when both its Claude and Codex profiles exist, and a misspelt one is an error, never another account.
-- Each agent starts with Claude Code's session variables and any inherited `CLAUDE_CONFIG_DIR` or `CODEX_HOME` cleared, so its transcript is kept and it runs on its own environment's account. Codex starts without its update offer (whose default answer, on Enter, installs a new version) and in the sandbox it uses for a trusted project, `workspace-write`, so it can write in the project and its worktrees folder; its approvals stay as you set them. When an agent exits, its pane leaves a shell.
+- Each agent starts with Claude Code's session variables and any inherited `CLAUDE_CONFIG_DIR` or `CODEX_HOME` cleared, so its transcript is kept and it runs on its own environment's account. Codex starts without its update offer (whose default answer, on Enter, installs a new version) and always in the `workspace-write` sandbox, whatever your Codex config says, so it can write in the project and its worktrees folder: the sandbox Codex itself uses for a trusted project, and more than its read-only default for a folder it does not trust (where it would refuse the worktrees folder and exit). Its approvals stay as you set them. When an agent exits, its pane leaves a shell.
 - Closing the window only detaches, and both agents keep running. `/workspace open <name>`, or `[open]` in the pane, brings it back:
   - It focuses a Terminal tab already attached, or opens a new one.
   - From inside tmux, it switches that terminal to the workspace.
@@ -54,17 +54,20 @@ The peer-coding rules end every turn with one cue line for the owner to pass on:
   - once, whichever session sees it first (each step is a folder made in `~/Library/Application Support/live-sessions/relayed/`);
   - only while one of that pane's foreground processes is the agent (`claude`, `codex`), never into a shell;
   - only once that agent has finished a turn of its own (its first prompt), so it is past any question it asks at its start, which Enter would answer; until then it tells you once;
-  - only while that agent is not at work (Claude idle; Codex with no task under way).
+  - only while that agent is not at work (Claude idle; Codex with no task under way);
+  - only while that pane is not scrolled back (copy mode, where the keys would go to tmux): the hand-off then waits, the workspace's row says why, and it is passed once you leave copy mode (`q`);
+  - only for a turn that ended in the last 7 days.
+  A command you run in an agent (`/model`, `/compact`, `!ls`) starts no turn; an interrupt (Esc) or an aborted Codex task ends one. When a pass cannot be made (the pane runs a shell, is gone, or tmux cannot type), a notification says why and gives the line to paste.
 - `NEEDS USER` and `SCOPE CLOSED` are yours: a macOS notification says so, in any mode, and the count of hand-offs starts again.
 - After 10 hand-offs in a row it waits for you: a notification, and `continue` on the workspace's row.
 - `notify`: nothing is typed; a notification gives you the line to paste.
-- What it reads: from each agent's own records (its Claude transcript or Codex rollout, the last 600 lines), only how its last turn stands: finished or under way, its id and time, and the last cue line of its final reply. Nothing else of what was said leaves that pipeline (`jq`, macOS's own).
+- What it reads: for a workspace with the relay on, from each agent's own records (its Claude transcript or Codex rollout, the last 600 lines), only how its last turn stands: finished or under way, its id and time, and the last cue line of its final reply. Nothing else of what was said leaves that pipeline (`jq`, macOS's own).
 - It runs in whichever Claude Code session collects (every 30 s, or 4 s while a pane is shown), so a hand-off reaches the other agent within about half a minute, as long as some Claude Code session with this plugin is open (the workspace's own Claude counts).
 - The peer-coding rules (Archetype's playbook) say the relay stays with the owner: this is that, done by your own tool, which you switch on per workspace; it passes only the agents' own cue lines, unchanged.
 
 ## Where it reads from
 
-Collecting is read-only. Nothing in Claude's or Codex's own files is written. The only writes are the mod's own shared snapshot and its kept settings. The only actions that act on a session are the ones you press: bringing a tab to the front, attaching, and `[ to bg ]`, which ends and relaunches the session you chose.
+Nothing in Claude's or Codex's own files is ever written. Collecting reads, and writes only the mod's own shared snapshot, with one exception: for a workspace whose relay you turned on, it also types each hand-off into the other agent's pane and records that in the workspaces file and the relay's own folder (The relay, above). Otherwise the only actions on a session are the ones you press: bringing a tab to the front, attaching, `[ to bg ]` (which ends and relaunches the session you chose), and opening a workspace.
 
 | What | From |
 | --- | --- |
@@ -73,6 +76,9 @@ Collecting is read-only. Nothing in Claude's or Codex's own files is written. Th
 | Where a session works | The last 40 `"cwd"` values in its transcript or rollout. Only those strings leave the pipeline. |
 | Repository, worktree, branch | `git rev-parse` and the remote URLs, with any user or token removed in the pipeline |
 | Terminal background, focusing tabs | Terminal.app scripting (JXA) |
+| Workspaces, their agents and panes | `~/Library/Application Support/live-sessions/workspaces.json`; `tmux list-panes` and `list-clients` |
+| The relay (workspaces with it on) | each agent's last 600 transcript or rollout lines, through `jq`: only how its last turn stands and its cue line; `ps -t` on its pane's terminal |
+| Projects for the form (only while it is open) | `find` in your home folder, five folders down (skipping Library, hidden folders, `node_modules`, `*-worktrees`, and what is inside a `.git`): the paths of folders holding a `.git` folder |
 
 One snapshot, `~/Library/Caches/live-sessions/snapshot.json`, is shared by every session. Collection therefore runs about once every 30 s for the whole machine, or every 4 s while some pane is in view, however many sessions are open.
 
@@ -97,7 +103,7 @@ To change it, edit this folder, then run `/reload-plugins` in a session.
 
 ```sh
 claude plugin validate .
-claude plugin test .                                         # 80 tests
+claude plugin test .                                         # 82 tests
 npx -p typescript@5.6.3 tsc -p .                             # after one load, which lays down .claude-plugin/types
 node --experimental-strip-types tests/host-check.mjs [2d] [--slow]   # on this Mac: SQL, pipelines, a full collection, the move script on throwaway processes, workspaces and the relay on a private tmux server (reading no tmux.conf), the checkout script on throwaway repositories
 E2E_TRUSTED_DIR=<a trusted folder> node --experimental-strip-types tests/e2e-terminal.mjs    # a Terminal window: move a throwaway session to the background

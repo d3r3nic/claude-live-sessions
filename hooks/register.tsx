@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { ClaudeSession, CodexSession, Place, Relay, Snapshot, Workspace } from '../types'
-import { AGENT_COMMANDS, afterStep, parseTurns, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_SCRIPT } from './relay'
+import { AGENT_COMMANDS, afterStep, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_SCRIPT } from './relay'
 import type { Side } from './relay'
 import {
   CHECKOUT_SCRIPT,
@@ -23,8 +23,10 @@ import {
   absoluteDir,
   checkoutResult,
   peerPrompt,
+  openScriptPath,
   promptPath,
   rankProjects,
+  shellQuote,
   setupPrompt,
 } from './workspaces'
 import {
@@ -537,7 +539,10 @@ async function openWorkspace($: EngineInterface, ws: Workspace, at?: { window: s
       await tmux(['select-window', '-t', `=${name}:${at.window}`])
     }
   }
-  const command = openCommand(ws, home)
+  // a terminal's login shell may be any shell: it is only given `/bin/sh <file>`, the file holding the command
+  const file = openScriptPath(home, ws.id)
+  await $.fs.write(file, `${openCommand(ws, home)}\n`)
+  const command = `/bin/sh ${shellQuote(file)}`
   const term = await $.env.get('TERM_PROGRAM')
   if (term === 'tmux') {
     // from inside tmux: create it if need be, then switch this terminal to it
@@ -735,6 +740,9 @@ async function makeWorkspace(
   if (purpose !== '') {
     await $.fs.write(promptPath(home, made.id, 'claude'), setupPrompt(made))
     await $.fs.write(promptPath(home, made.id, 'codex'), peerPrompt(made))
+  } else {
+    // one left by a removed workspace of the same id never reaches this one's agents
+    await removePrompts($, home, made.id)
   }
   await refresh($, 0)
   const label = `${made.name} (${made.env || 'default'}, ${made.dir})`
@@ -759,6 +767,11 @@ async function submitDraft($: EngineInterface) {
   } else {
     await update($, draft, now => ({ ...now, error: made.text }))
   }
+}
+
+/** A workspace's first-prompt files, gone. */
+async function removePrompts($: EngineInterface, home: string, id: string) {
+  await $.process.run(['/bin/rm', '-f', promptPath(home, id, 'claude'), promptPath(home, id, 'codex')], { timeoutMs: 10_000 }).catch(() => undefined)
 }
 
 /** Opens the form, with `dir` filled in when given, and looks for the projects to offer. */
@@ -828,16 +841,19 @@ async function passCues(
       const turn = known?.file === undefined ? undefined : turns.get(known.file)
       sides[tool] = { tool, pane: p.pane!, isBusy: (known?.isBusy ?? false) || turn?.state === 'busy', ...(turn === undefined ? {} : { turn }) }
     }
-    for (const step of relaySteps(ws, sides)) {
+    for (const step of relaySteps(ws, sides, now)) {
       const args = step.kind === 'pass' ? ['pass', step.pane, AGENT_COMMANDS[step.to], step.line] : ['tell', '', '', step.text]
       const out = await $.process
         .run(['/bin/sh', '-c', RELAY_SCRIPT, 'sh', args[0]!, ledgerPath(home), step.key, args[1]!, args[2]!, args[3]!, '', 'Workspace relay'], { timeoutMs: 20_000 })
         .catch(() => ({ stdout: 'failed' }))
       const outcome = out.stdout.trim()
       if (outcome === 'taken') continue
+      const next = ws.relay === undefined ? undefined : afterStep(ws.relay, step, outcome, now)
+      // a pass waiting on a scrolled-back pane says so once, not at every collection
+      if (outcome === 'in-mode' && next?.status === ws.relay?.status) continue
       await changeWorkspaces($, home, list => list.map(w => (w.id === ws.id && w.relay !== undefined ? { ...w, relay: afterStep(w.relay, step, outcome, now) } : w)))
-      if (step.kind === 'pass' && outcome !== 'passed') {
-        const why = outcome.startsWith('not-agent') ? `its pane runs ${outcome.slice(10) || 'something else'}, not the agent` : 'its pane is gone'
+      const why = step.kind === 'pass' ? passFailure(outcome) : undefined
+      if (step.kind === 'pass' && why !== undefined) {
         await $.process
           .run(['/bin/sh', '-c', RELAY_SCRIPT, 'sh', 'tell', ledgerPath(home), `failed-${step.key}`, '', '', `${ws.name}: the relay did not pass the hand-off to ${step.to === 'claude' ? 'Claude' : 'Codex'}: ${why}. Paste: ${step.line}`, '', 'Workspace relay'], { timeoutMs: 20_000 })
           .catch(() => undefined)
@@ -939,6 +955,7 @@ export const register: Register = on => {
         const ws = findWorkspace(list, command.ref)
         if (ws === undefined) return { text: `No workspace named "${command.ref}".` }
         if (!(await changeWorkspaces($, home, now => now.filter(w => w.id !== ws.id)))) return { text: `Not done: ${UNREADABLE}.` }
+        await removePrompts($, home, ws.id)
         await refresh($, 0)
         return { text: `Removed ${label(ws)}. Its agents keep running in tmux session ${tmuxName(ws)} (end it: tmux kill-session -t ${tmuxName(ws)}).` }
       }

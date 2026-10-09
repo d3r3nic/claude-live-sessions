@@ -70,6 +70,10 @@ export const findWorkspace = (list: readonly Workspace[], ref: string) =>
 
 /** A string as one shell word. */
 const shellWord = (text: string) => `'${text.replace(/'/g, `'\\''`)}'`
+export const shellQuote = shellWord
+
+/** The file a terminal runs (`/bin/sh <file>`) to open a workspace: its command line, in POSIX sh whatever the login shell. */
+export const openScriptPath = (home: string, id: string) => `${home}/Library/Application Support/live-sessions/open/${id}.sh`
 
 /**
  * The variables Claude Code sets in what it starts. An agent started from
@@ -309,7 +313,8 @@ export function peerPrompt(ws: Pick<Workspace, 'name' | 'purpose'>): string {
  */
 export const PROJECTS_SCRIPT = [
   'find "$1" -maxdepth 5 \\( -name Library -o -name node_modules -o -name .Trash -o -name "*-worktrees" -o \\( -name ".*" ! -name .git \\) \\) -prune',
-  '  -o -type d -name .git -print 2>/dev/null | sed "s#/\\.git\\$##"',
+  // a .git folder is printed, never gone into
+  '  -o -type d -name .git -print -prune 2>/dev/null | sed "s#/\\.git\\$##"',
 ].join(' ')
 
 /**

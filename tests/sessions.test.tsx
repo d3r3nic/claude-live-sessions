@@ -51,7 +51,7 @@ import {
 } from '../hooks/collect'
 import type { CodexProc, ThreadRow } from '../hooks/collect'
 import type { Workspace } from '../types'
-import { afterStep, cueOf, parseTurns, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_SCRIPT } from '../hooks/relay'
+import { afterStep, cueOf, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_MAX_AGE_MS, TURN_SCRIPT } from '../hooks/relay'
 import type { Side } from '../hooks/relay'
 import {
   absoluteDir,
@@ -59,6 +59,7 @@ import {
   assigned,
   checkoutResult,
   CHECKOUT_SCRIPT,
+  openScriptPath,
   promptPath,
   PROJECTS_SCRIPT,
   peerPrompt,
@@ -147,6 +148,8 @@ const world = {
   /** The relay's steps already taken (its ledger), and what each tmux pane runs. */
   ledger: new Set<string>(),
   paneCommands: {} as Record<string, string>,
+  /** What /bin/rm was given. */
+  removed: [] as string[],
   /** Paths that are not there, though the fixtures have them. */
   gone: new Set<string>(),
 }
@@ -167,6 +170,7 @@ const resetWorld = () => {
   world.turns = {}
   world.ledger.clear()
   world.paneCommands = {}
+  world.removed = []
   world.gone.clear()
 }
 const changed = (pid: number, line: string) => {
@@ -224,6 +228,9 @@ function machine(argv: readonly string[], env: unknown): Run {
       const pids = (args[0] ?? '').split(',').map(Number)
       return ok(`${pids.flatMap(pid => (ENV_LINES[pid] === undefined ? [] : [ENV_LINES[pid]!])).join('\n')}\n`)
     }
+    case '/bin/rm':
+      world.removed.push(...argv.slice(2))
+      return ok('')
     case 'tmux':
       if (argv[1] === 'list-panes') return world.tmuxPanes === '' ? { exitCode: 1, stdout: '', stderr: 'no server running\n' } : ok(world.tmuxPanes)
       if (argv[1] === 'list-clients') return ok(world.tmuxClients)
@@ -1263,10 +1270,13 @@ describe('workspaces', () => {
     // its repository's main checkout is kept: the agents may work in the worktrees folder beside it
     expect(JSON.parse(files.get(WORKSPACES)!).workspaces).toEqual([{ ...practice, checkout: '/Users/u/dev/web-app', createdAt: expect.any(Number) }])
     expect(runs.find(r => r[2] === CHECKOUT_SCRIPT)?.slice(4)).toEqual(['/Users/u/dev/web-app'])
+    // Terminal's login shell is given only `/bin/sh <file>`; the file holds the command line
     const opened = runs.filter(r => r[0] === '/usr/bin/osascript' && r[4] === OPEN_SCRIPT).map(r => r[5])
-    expect(opened).toEqual([openCommand(JSON.parse(files.get(WORKSPACES)!).workspaces[0], HOME)])
-    // no purpose: no first prompt, and no relay
+    expect(opened).toEqual([`/bin/sh '${openScriptPath(HOME, 'practice-rbac')}'`])
+    expect(files.get(openScriptPath(HOME, 'practice-rbac'))).toBe(`${openCommand(JSON.parse(files.get(WORKSPACES)!).workspaces[0], HOME)}\n`)
+    // no purpose: no first prompt (one a removed workspace of the same id left is removed), and no relay
     expect(files.has(promptPath(HOME, 'practice-rbac', 'claude')) || files.has(promptPath(HOME, 'practice-rbac', 'codex'))).toBe(false)
+    expect(world.removed).toEqual([promptPath(HOME, 'practice-rbac', 'claude'), promptPath(HOME, 'practice-rbac', 'codex')])
     // listed in the pane, stopped until tmux reports its session
     await $.command.run(SESSIONS)
     const shown = (await shownOn($, 'terminal', 110)).join('\n')
@@ -1299,9 +1309,12 @@ describe('workspaces', () => {
     await $.command.run(SESSIONS)
     await $.command.run(SESSIONS)
     expect((await $.command.run({ ...SESSIONS, command: 'workspace', args: 'open practice-rbac' })).text).toBe('Opened ws-practice-rbac in a new Terminal window.')
-    expect(osa().at(-1)).toEqual(['open', openCommand(practice, HOME)])
+    expect(osa().at(-1)).toEqual(['open', `/bin/sh '${openScriptPath(HOME, 'practice-rbac')}'`])
+    expect(files.get(openScriptPath(HOME, 'practice-rbac'))).toBe(`${openCommand(practice, HOME)}\n`)
     await $.command.run({ ...SESSIONS, command: 'workspace', args: 'rm practice-rbac' })
     expect(JSON.parse(files.get(WORKSPACES)!).workspaces).toEqual([])
+    // its first prompts go with it: a later workspace of the same name never starts on them
+    expect(world.removed).toEqual([promptPath(HOME, 'practice-rbac', 'claude'), promptPath(HOME, 'practice-rbac', 'codex')])
   })
 
   test('/workspace refuses what it cannot make', async ($, on) => {
@@ -1336,7 +1349,7 @@ describe('workspaces', () => {
     expect(await run('open gone')).toBe('Not opened: its folder /Users/u/dev/gone is not there any more.')
     world.tmuxPanes = ''
     world.openFails = true
-    expect(await run('open practice-rbac')).toMatch(/^Not opened \(execution error: Not authorized.*\)\. Run: tmux has-session/)
+    expect(await run('open practice-rbac')).toBe(`Not opened (execution error: Not authorized to send Apple events to Terminal. (-1743)). Run: /bin/sh '${openScriptPath(HOME, 'practice-rbac')}'`)
     expect(runs.filter(r => r[0] === '/usr/bin/osascript' && r[4] === OPEN_SCRIPT)).toHaveLength(1)
   })
 
@@ -1354,7 +1367,8 @@ describe('workspaces', () => {
     const { files, runs } = engine(on, machine, { termProgram: 'iTerm.app' })
     files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [practice] }))
     await $.session.start(START)
-    expect((await $.command.run({ ...SESSIONS, command: 'workspace', args: 'open practice-rbac' })).text).toBe(`Open it in a terminal: ${openCommand(practice, HOME)}`)
+    expect((await $.command.run({ ...SESSIONS, command: 'workspace', args: 'open practice-rbac' })).text).toBe(`Open it in a terminal: /bin/sh '${openScriptPath(HOME, 'practice-rbac')}'`)
+    expect(files.get(openScriptPath(HOME, 'practice-rbac'))).toBe(`${openCommand(practice, HOME)}\n`)
     expect(runs.some(r => r[0] === '/usr/bin/osascript' && (r[4] === OPEN_SCRIPT || r[4] === FOCUS_SCRIPT))).toBe(false)
   })
 
@@ -1480,7 +1494,7 @@ describe('workspaces, from the pane', () => {
     // each agent's first prompt waits in its file; the window opens with Claude and Codex side by side
     expect(files.get(promptPath(HOME, 'practice-rbac', 'claude'))).toBe(setupPrompt(saved[0]))
     expect(files.get(promptPath(HOME, 'practice-rbac', 'codex'))).toBe(peerPrompt(saved[0]))
-    expect(runs.filter(r => r[0] === '/usr/bin/osascript' && r[4] === OPEN_SCRIPT).map(r => r[5])).toEqual([openCommand(saved[0], HOME)])
+    expect(files.get(openScriptPath(HOME, 'practice-rbac'))).toBe(`${openCommand(saved[0], HOME)}\n`)
     // the form closes once it is made
     expect(await ui.find({ key: 'form:name' })).toBeUndefined()
     await ui.unmount()
@@ -1637,43 +1651,50 @@ describe('relay', () => {
     // null: no turn finished yet
     const claude = (turn: ReturnType<typeof done> | null = done('c0', 'Ready.'), isBusy = false): Side => ({ tool: 'claude', pane: '%1', isBusy, ...(turn === null ? {} : { turn }) })
     const codex = (turn: ReturnType<typeof done> | null = done('x0', 'Ready.'), isBusy = false): Side => ({ tool: 'codex', pane: '%2', isBusy, ...(turn === null ? {} : { turn }) })
-    expect(relaySteps(ws, { claude: claude(done('c1', READY_CODEX)), codex: codex() })).toEqual([{ kind: 'pass', key: 'pass-c1', to: 'codex', pane: '%2', line: READY_CODEX }])
-    expect(relaySteps(ws, { claude: claude(), codex: codex(done('x1', READY_CLAUDE)) })).toEqual([{ kind: 'pass', key: 'pass-x1', to: 'claude', pane: '%1', line: READY_CLAUDE }])
+    expect(relaySteps(ws, { claude: claude(done('c1', READY_CODEX)), codex: codex() }, NOW)).toEqual([{ kind: 'pass', key: 'pass-c1', to: 'codex', pane: '%2', line: READY_CODEX }])
+    expect(relaySteps(ws, { claude: claude(), codex: codex(done('x1', READY_CLAUDE)) }, NOW)).toEqual([{ kind: 'pass', key: 'pass-x1', to: 'claude', pane: '%1', line: READY_CLAUDE }])
     // the other is at work: it waits; the sender still at work, or its turn under way: nothing yet
-    expect(relaySteps(ws, { claude: claude(done('c1', READY_CODEX)), codex: codex(done('x0', 'Ready.'), true) })).toEqual([])
+    expect(relaySteps(ws, { claude: claude(done('c1', READY_CODEX)), codex: codex(done('x0', 'Ready.'), true) }, NOW)).toEqual([])
     // the other has not finished a turn: it may be at a question of its own (trust, an update) that Enter
     // would answer, so nothing is typed; the owner is told once
-    expect(relaySteps(ws, { claude: claude(done('c1', READY_CODEX)), codex: codex(null) })).toEqual([
+    expect(relaySteps(ws, { claude: claude(done('c1', READY_CODEX)), codex: codex(null) }, NOW)).toEqual([
       { kind: 'tell', key: 'wait-c1', text: 'RBAC: Claude handed over; the relay passes it once Codex has finished a turn. If Codex is waiting at a question in its pane, answer it.', isForOwner: false },
     ])
-    expect(relaySteps(ws, { claude: claude(done('c1', READY_CODEX), true), codex: codex() })).toEqual([])
+    expect(relaySteps(ws, { claude: claude(done('c1', READY_CODEX), true), codex: codex() }, NOW)).toEqual([])
     // a turn that ended before the relay was turned on, no cue, or a cue for itself: nothing
-    expect(relaySteps({ ...ws, relay: relayOn({ since: NOW }) }, { claude: claude(done('c1', READY_CODEX)), codex: codex() })).toEqual([])
-    expect(relaySteps(ws, { claude: claude(done('c1', 'All done.')), codex: codex() })).toEqual([])
-    expect(relaySteps(ws, { claude: claude(done('c1', READY_CLAUDE)), codex: codex() })).toEqual([])
+    expect(relaySteps({ ...ws, relay: relayOn({ since: NOW }) }, { claude: claude(done('c1', READY_CODEX)), codex: codex() }, NOW)).toEqual([])
+    expect(relaySteps(ws, { claude: claude(done('c1', 'All done.')), codex: codex() }, NOW)).toEqual([])
+    expect(relaySteps(ws, { claude: claude(done('c1', READY_CLAUDE)), codex: codex() }, NOW)).toEqual([])
     // off: nothing; notify: the owner is told instead, with the line to paste
-    expect(relaySteps({ ...ws, relay: relayOn({ mode: 'off' }) }, { claude: claude(done('c1', READY_CODEX)), codex: codex() })).toEqual([])
-    expect(relaySteps({ name: 'RBAC' }, { claude: claude(done('c1', READY_CODEX)), codex: codex() })).toEqual([])
-    expect(relaySteps({ ...ws, relay: relayOn({ mode: 'notify' }) }, { claude: claude(done('c1', READY_CODEX)), codex: codex() }))
+    expect(relaySteps({ ...ws, relay: relayOn({ mode: 'off' }) }, { claude: claude(done('c1', READY_CODEX)), codex: codex() }, NOW)).toEqual([])
+    expect(relaySteps({ name: 'RBAC' }, { claude: claude(done('c1', READY_CODEX)), codex: codex() }, NOW)).toEqual([])
+    expect(relaySteps({ ...ws, relay: relayOn({ mode: 'notify' }) }, { claude: claude(done('c1', READY_CODEX)), codex: codex() }, NOW))
       .toEqual([{ kind: 'tell', key: 'tell-c1', text: `RBAC: Claude handed over to Codex. Paste: ${READY_CODEX}`, isForOwner: false }])
     // NEEDS USER and SCOPE CLOSED are the owner's, in either mode
     const needs = 'NEEDS USER · peer-coding/feat-rbac · feat/rbac@abc1234'
-    expect(relaySteps(ws, { claude: claude(done('c2', needs)), codex: codex() })).toEqual([{ kind: 'tell', key: 'tell-c2', text: `RBAC: Claude needs you. ${needs}`, isForOwner: true }])
+    expect(relaySteps(ws, { claude: claude(done('c2', needs)), codex: codex() }, NOW)).toEqual([{ kind: 'tell', key: 'tell-c2', text: `RBAC: Claude needs you. ${needs}`, isForOwner: true }])
     // the other agent is not running in the workspace: the owner is told
-    expect(relaySteps(ws, { claude: claude(done('c1', READY_CODEX)) })).toEqual([
+    expect(relaySteps(ws, { claude: claude(done('c1', READY_CODEX)) }, NOW)).toEqual([
       { kind: 'tell', key: 'tell-c1', text: `RBAC: Claude handed over, but Codex is not running in the workspace. Paste: ${READY_CODEX}`, isForOwner: true },
     ])
     // after RELAY_CAP passes in a row it waits for the owner
-    expect(relaySteps({ ...ws, relay: relayOn({ streak: RELAY_CAP }) }, { claude: claude(done('c1', READY_CODEX)), codex: codex() }).map(s => s.key)).toEqual(['cap-c1'])
+    expect(relaySteps({ ...ws, relay: relayOn({ streak: RELAY_CAP }) }, { claude: claude(done('c1', READY_CODEX)), codex: codex() }, NOW).map(s => s.key)).toEqual(['cap-c1'])
+    // a turn older than TURN_MAX_AGE_MS is never acted on (the ledger forgets steps after 30 days)
+    expect(relaySteps({ ...ws, relay: relayOn({ since: 0 }) }, { claude: claude(done('c1', READY_CODEX, NOW - TURN_MAX_AGE_MS - 1)), codex: codex() }, NOW)).toEqual([])
+    expect(TURN_MAX_AGE_MS).toBeLessThan(30 * 24 * 3600_000)
     // the count: a pass adds one; a cue for the owner starts it again
     const pass = { kind: 'pass' as const, key: 'pass-c1', to: 'codex' as const, pane: '%2', line: READY_CODEX }
     expect(afterStep(relayOn({ streak: 3 }), pass, 'passed', NOW)).toEqual(relayOn({ streak: 4, status: 'passed to Codex', at: NOW }))
     expect(afterStep(relayOn({ streak: 3 }), pass, 'not-agent zsh', NOW)).toEqual(relayOn({ streak: 3, status: 'could not pass to Codex', at: NOW }))
+    // a scrolled-back pane: it waits, and says so
+    expect(afterStep(relayOn({ streak: 3 }), pass, 'in-mode', NOW)).toEqual(relayOn({ streak: 3, status: 'waits: Codex\'s pane is scrolled back (copy mode; q leaves it)', at: NOW }))
+    expect(['passed', 'in-mode', 'taken'].map(passFailure)).toEqual([undefined, undefined, undefined])
+    expect(['not-agent zsh', 'gone', 'failed', ''].map(passFailure)).toEqual(['its pane runs zsh, not the agent', 'its pane is gone', 'tmux could not type into its pane', 'tmux could not type into its pane'])
     expect(afterStep(relayOn({ streak: 3 }), { kind: 'tell', key: 'tell-c2', text: '', isForOwner: true }, 'told', NOW)).toEqual(relayOn({ streak: 0, status: 'needs you', at: NOW }))
   })
 
   test('the collecting session passes Claude\'s hand-off into Codex\'s pane, once, and shows it', async ($, on) => {
-    const { files, runs } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    const { files, runs, clock } = engine(on, machine, { termProgram: 'Apple_Terminal' })
     files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, checkout: '/Users/u/dev/web-app', purpose: 'RBAC', relay: relayOn() }] }))
     // WORKER (claude, idle) on the left, the Codex terminal resumed on ttys045 on the right
     world.tmuxPanes = 'ws-practice-rbac\tpeers\t/dev/ttys022\t%1\tclaude\nws-practice-rbac\tpeers\t/dev/ttys045\t%2\tcodex\n'
@@ -1698,11 +1719,60 @@ describe('relay', () => {
     expect(shown).toMatch(/relay: passed to Codex/)
     expect((await ui.find({ key: 'relay practice-rbac' }))?.props.label).toBe('relay auto')
     // the next collection (here or in any session) finds the step taken
-    await $.command.run({ ...SESSIONS, args: 'reset' })
+    await clock.advance(4_000)
     await $.command.run(SESSIONS)
-    await $.command.run(SESSIONS)
+    expect(runs.filter(r => r[2] === RELAY_SCRIPT)).toHaveLength(2)
     expect(JSON.parse(files.get(WORKSPACES)!).workspaces[0].relay.streak).toBe(1)
     await ui.unmount()
+  })
+
+  test('nothing passes while an agent is at work, by its own records or Claude\'s registry, nor from another workspace\'s panes', async ($, on) => {
+    const { files, runs, clock } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    // each step collects anew: the snapshot is taken again once it is older than 3.5 s
+    const collect = async () => {
+      await clock.advance(4_000)
+      await $.command.run(SESSIONS)
+    }
+    const relaying = { ...practice, checkout: '/Users/u/dev/web-app', relay: relayOn() }
+    const at = (ms: number) => new Date(NOW - ms).toISOString()
+    world.tmuxOwner = String(NOW)
+    world.paneCommands = { '%1': 'claude', '%2': 'codex', '%3': 'claude', '%4': 'codex' }
+    const passes = () => runs.filter(r => r[2] === RELAY_SCRIPT)
+    // Codex's own records say a task is under way: Claude's hand-off waits
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [relaying] }))
+    world.tmuxPanes = 'ws-practice-rbac\tpeers\t/dev/ttys022\t%1\tclaude\nws-practice-rbac\tpeers\t/dev/ttys045\t%2\tcodex\n'
+    world.turns = { 'session-104': `done\tturn-c1\t${at(60_000)}\t${READY_CODEX}`, '/rollouts/a.jsonl': `busy\tturn-x1\t${at(30_000)}\t` }
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    expect(passes()).toEqual([])
+    // Claude's registry says it is working (WEB CONSOLE, ttys004), though its transcript's last turn ended with a cue
+    world.tmuxPanes = 'ws-practice-rbac\tpeers\t/dev/ttys004\t%1\tclaude\nws-practice-rbac\tpeers\t/dev/ttys045\t%2\tcodex\n'
+    world.turns = { 'session-101': `done\tturn-c2\t${at(60_000)}\t${READY_CODEX}`, '/rollouts/a.jsonl': `done\tturn-x0\t${at(120_000)}\t` }
+    await collect()
+    expect(runs.filter(r => r[2] === TURN_SCRIPT).at(-1)!.some(f => f.includes('session-101'))).toBe(true)
+    expect(passes()).toEqual([])
+    // the agents of another workspace (its relay off) are never this one's
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [relaying, { ...practice, id: 'other', name: 'Other', createdAt: NOW }] }))
+    world.tmuxPanes = 'ws-other\tpeers\t/dev/ttys022\t%3\tclaude\nws-other\tpeers\t/dev/ttys045\t%4\tcodex\n'
+    world.turns = { 'session-104': `done\tturn-c3\t${at(60_000)}\t${READY_CODEX}`, '/rollouts/a.jsonl': `done\tturn-x0\t${at(120_000)}\t` }
+    const collectedBefore = runs.filter(r => r[0] === '/usr/bin/pgrep').length
+    await collect()
+    expect(runs.filter(r => r[0] === '/usr/bin/pgrep').length).toBe(collectedBefore + 1)
+    expect(passes()).toEqual([])
+  })
+
+  test('a step already taken by another session changes nothing here', async ($, on) => {
+    const { files } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    const before = relayOn({ streak: 2, status: 'passed to Claude', at: NOW - 5_000 })
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, checkout: '/Users/u/dev/web-app', relay: before }] }))
+    world.tmuxPanes = 'ws-practice-rbac\tpeers\t/dev/ttys022\t%1\tclaude\nws-practice-rbac\tpeers\t/dev/ttys045\t%2\tcodex\n'
+    world.tmuxOwner = String(NOW)
+    world.paneCommands = { '%1': 'claude', '%2': 'codex' }
+    world.turns = { 'session-104': `done\tturn-c1\t${new Date(NOW - 60_000).toISOString()}\t${READY_CODEX}`, '/rollouts/a.jsonl': `done\tturn-x0\t${new Date(NOW - 120_000).toISOString()}\t` }
+    world.ledger.add('pass-turn-c1')
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    expect(JSON.parse(files.get(WORKSPACES)!).workspaces[0].relay).toEqual(before)
   })
 
   test('never types into a pane that runs a shell; tells the owner instead', async ($, on) => {
@@ -1738,6 +1808,9 @@ describe('relay', () => {
     // turned on, it counts cues from now: an earlier hand-off is never passed
     await ui.press({ key: 'relay plain' })
     expect(kept()[1]).toEqual({ mode: 'auto', since: expect.any(Number), streak: 0 })
+    await ui.press({ key: 'relay practice-rbac' })
+    expect(kept()[0]).toEqual({ mode: 'auto', since: kept()[1].since, streak: 0 })
+    expect(kept()[0].since).toBeGreaterThan(NOW - 1)
     expect((await ui.find({ key: 'relay plain' }))?.props.label).toBe('relay auto')
     await ui.unmount()
   })

@@ -5,6 +5,11 @@ import type { Relay, Workspace } from '../types'
 
 /** Cues passed on in a row before the relay waits for the owner. */
 export const RELAY_CAP = 10
+/**
+ * A turn older than this is never acted on: the ledger forgets steps after
+ * 30 days, and an agent idle that long still has its last cue in its records.
+ */
+export const TURN_MAX_AGE_MS = 7 * 24 * 3600_000
 
 type Tool = 'claude' | 'codex'
 const NAME: Record<Tool, string> = { claude: 'Claude', codex: 'Codex' }
@@ -29,26 +34,36 @@ export function cueOf(line: string): Cue | undefined {
  * For each transcript ("$@"), only how its last turn stands, as `==> <file>`
  * then `done|busy <tab> <turn id> <tab> <ISO time> <tab> <cue line>`: a
  * finished turn's id, when it ended and its last cue line, or a turn under
- * way. Claude's transcript ends a turn with an `end_turn` reply and starts one
- * with a prompt; a Codex rollout with `task_complete` and `task_started`.
- * Nothing else of what was said leaves the pipeline.
+ * way. Nothing else of what was said leaves the pipeline.
+ * - Claude's transcript: a turn ends with an `end_turn` reply (one reply can
+ *   take several records, read together) or an interrupt, and starts with a
+ *   prompt. A command run in the session (`/model`, `/compact`, `!ls`), its
+ *   output, a compaction's summary and meta records start nothing.
+ * - A Codex rollout: `task_complete` or `turn_aborted` ends a turn,
+ *   `task_started` starts one.
+ * A subagent's records, and a line cut by `tail`, are skipped.
  */
 export const TURN_SCRIPT = [
   'for f in "$@"; do',
   `  printf '==> %s\\n' "$f"`,
-  '  tail -n 600 "$f" 2>/dev/null | /usr/bin/jq -r -c \'',
+  "  tail -n 600 \"$f\" 2>/dev/null | /usr/bin/jq -R -n -r '",
   '    def cue: split("\\n") | map(select(test("^\\\\s*(?:[0-9]+\\\\.|[-*>])?\\\\s*[`*_]*(READY FOR (CLAUDE|CODEX)|NEEDS USER|SCOPE CLOSED) · "))) | (last // "") | gsub("[\\t\\r]"; " ");',
-  '    if .isSidechain == true then empty',
-  '    elif .type == "assistant" and .message.stop_reason == "end_turn" then',
-  '      ["done", .uuid, .timestamp, ([.message.content[]? | select(.type == "text") | .text] | join("\\n") | cue)]',
-  '    elif .type == "user" and .isMeta != true and ((.message.content | type) == "string" or ([.message.content[]?.type] | index("tool_result") | not)) then',
-  '      ["busy", .uuid, .timestamp, ""]',
-  '    elif .type == "event_msg" and .payload.type == "task_complete" then',
-  '      ["done", .payload.turn_id, .timestamp, ((.payload.last_agent_message // "") | cue)]',
-  '    elif .type == "event_msg" and .payload.type == "task_started" then ["busy", .payload.turn_id, .timestamp, ""]',
-  '    else empty end',
-  '    | map(. // "" | tostring) | join("\\t")',
-  "  ' 2>/dev/null | tail -n 1",
+  '    def said: if (.message.content | type) == "string" then .message.content else ([.message.content[]? | select(.type == "text") | .text] | join("\\n")) end;',
+  '    reduce (inputs | fromjson? | select(type == "object" and .isSidechain != true)) as $o (null;',
+  '      if $o.type == "assistant" and $o.message.stop_reason == "end_turn" then',
+  '        if . != null and .state == "done" and .mid != null and .mid == $o.message.id then .text += "\\n" + ($o | said)',
+  '        else {state: "done", id: $o.uuid, at: $o.timestamp, mid: $o.message.id, text: ($o | said)} end',
+  '      elif $o.type == "user" and $o.isMeta != true and $o.isCompactSummary != true and ([$o.message.content[]?.type] | index("tool_result") | not) then',
+  '        ($o | said) as $s',
+  '        | if ($s | test("^\\\\[Request interrupted")) then {state: "done", id: $o.uuid, at: $o.timestamp, text: ""}',
+  '          elif ($s | test("^\\\\s*<(command-name|command-message|local-command-|bash-input|bash-stdout|bash-stderr)")) then .',
+  '          else {state: "busy", id: $o.uuid, at: $o.timestamp, text: ""} end',
+  '      elif $o.type == "event_msg" and $o.payload.type == "task_complete" then {state: "done", id: $o.payload.turn_id, at: $o.timestamp, text: ($o.payload.last_agent_message // "")}',
+  '      elif $o.type == "event_msg" and $o.payload.type == "turn_aborted" then {state: "done", id: $o.payload.turn_id, at: $o.timestamp, text: ""}',
+  '      elif $o.type == "event_msg" and $o.payload.type == "task_started" then {state: "busy", id: $o.payload.turn_id, at: $o.timestamp, text: ""}',
+  '      else . end)',
+  '    | select(. != null) | [.state, .id, .at, ((.text // "") | cue)] | map(. // "" | tostring) | join("\\t")',
+  "  ' 2>/dev/null",
   'done',
 ].join('\n')
 
@@ -93,14 +108,14 @@ export type Step =
  * RELAY_CAP passes in a row, the owner is told instead. A NEEDS USER or SCOPE CLOSED cue is the
  * owner's: they are told.
  */
-export function relaySteps(ws: Pick<Workspace, 'name' | 'relay'>, sides: Partial<Record<Tool, Side>>, cap = RELAY_CAP): Step[] {
+export function relaySteps(ws: Pick<Workspace, 'name' | 'relay'>, sides: Partial<Record<Tool, Side>>, now: number, cap = RELAY_CAP): Step[] {
   const relay: Relay | undefined = ws.relay
   if (relay === undefined || relay.mode === 'off') return []
   const steps: Step[] = []
   for (const tool of ['claude', 'codex'] as const) {
     const side = sides[tool]
     const turn = side?.turn
-    if (side === undefined || side.isBusy || turn?.state !== 'done' || turn.cue === undefined || turn.at < relay.since) continue
+    if (side === undefined || side.isBusy || turn?.state !== 'done' || turn.cue === undefined || turn.at < relay.since || now - turn.at > TURN_MAX_AGE_MS) continue
     const cue = turn.cue
     if (cue.kind !== 'ready') {
       const what = cue.kind === 'needs-user' ? 'needs you' : 'closed its scope and waits for you'
@@ -135,8 +150,12 @@ export const AGENT_COMMANDS: Record<Tool, string> = { claude: 'claude', codex: '
  * line or the text, "$7" a tmux socket name (tests: a private server that
  * reads no tmux.conf), "$8" the notification's title. A pass types the line
  * only while one of the pane's foreground processes is the agent (tmux
- * names only the group's leader, the shell that started it), and answers
- * `passed`, `taken`, `gone` or `not-agent <the foreground commands>`.
+ * names only the group's leader, the shell that started it) and the pane is
+ * not scrolled back (copy mode, where keys would go to tmux, not the agent),
+ * and answers `passed`, `taken`, `gone`, `not-agent <the foreground
+ * commands>`, `failed`, or `in-mode` (the step is left untaken, to pass
+ * later). A `;` that ends the line goes as its key code: tmux takes an
+ * argument ending in `;` as the end of a command and drops it.
  */
 export const RELAY_SCRIPT = [
   'kind=$1; ledger=$2; key=$3; pane=$4; allow=$5; text=$6; sock=$7; title=$8',
@@ -152,12 +171,29 @@ export const RELAY_SCRIPT = [
   `cmds=$(ps -t "\${tty#/dev/}" -o stat=,comm= 2>/dev/null | awk '$1 ~ /[+]/ { n = $2; sub(".*/", "", n); print n }' | sort -u)`,
   'ok=; for c in $cmds; do case "|$allow|" in *"|$c|"*) ok=1;; esac; done',
   '[ -n "$ok" ] || { printf \'not-agent %s\\n\' "$(echo $cmds)"; exit 0; }',
-  't send-keys -t "$pane" -l -- "$text" && sleep 0.5 && t send-keys -t "$pane" Enter && echo passed',
+  `[ "$(t display-message -p -t "$pane" '#{pane_in_mode}' 2>/dev/null)" = 0 ] || { rmdir "$ledger/$key"; echo in-mode; exit 0; }`,
+  'body=$text; semis=',
+  'while [ "${body%;}" != "$body" ]; do body=${body%;}; semis="$semis;"; done',
+  't send-keys -t "$pane" -l -- "$body" || { echo failed; exit 0; }',
+  'while [ -n "$semis" ]; do t send-keys -t "$pane" -H 3b || { echo failed; exit 0; }; semis=${semis%;}; done',
+  'sleep 0.5 && t send-keys -t "$pane" Enter && echo passed || echo failed',
 ].join('\n')
+
+/**
+ * Why a pass was not made, said for the owner; undefined when it was, or
+ * will be (`in-mode`: it is passed once the pane leaves copy mode).
+ */
+export function passFailure(outcome: string): string | undefined {
+  if (outcome === 'passed' || outcome === 'in-mode' || outcome === 'taken') return undefined
+  if (outcome.startsWith('not-agent')) return `its pane runs ${outcome.slice(10) || 'something else'}, not the agent`
+  if (outcome === 'gone') return 'its pane is gone'
+  return 'tmux could not type into its pane'
+}
 
 /** The relay's state after a step: a pass counts toward the cap; a cue for the owner starts the count again. */
 export function afterStep(relay: Relay, step: Step, outcome: string, now: number): Relay {
   if (step.kind === 'pass' && outcome === 'passed') return { ...relay, streak: relay.streak + 1, status: `passed to ${NAME[step.to]}`, at: now }
+  if (step.kind === 'pass' && outcome === 'in-mode') return { ...relay, status: `waits: ${NAME[step.to]}'s pane is scrolled back (copy mode; q leaves it)`, at: now }
   if (step.kind === 'pass') return { ...relay, status: `could not pass to ${NAME[step.to]}`, at: now }
   if (step.key.startsWith('cap-')) return { ...relay, status: 'waits for you', at: now }
   if (step.key.startsWith('wait-')) return { ...relay, status: 'waits for the other agent\'s first turn', at: now }
