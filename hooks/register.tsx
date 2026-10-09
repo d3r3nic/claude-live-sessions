@@ -16,7 +16,9 @@ import {
   slugOf,
   tmuxName,
   workspacesFrom,
-  worktreeDir,
+  worktreeResult,
+  absoluteDir,
+  WORKTREE_SCRIPT,
 } from './workspaces'
 import {
   ACTIVE_MS,
@@ -131,6 +133,8 @@ const NO_DRAFT = { isOpen: false, name: '', dir: '', env: '', branch: '', error:
 const draft = atom({ plugin: 'live-sessions', key: 'draft' } as const, NO_DRAFT)
 /** The session whose workspace is being chosen. */
 const assigning = atom({ plugin: 'live-sessions', key: 'assigning' } as const, { key: '', member: '' })
+/** A workspace is being made in this session. */
+const creating = atom({ plugin: 'live-sessions', key: 'creating' } as const, false)
 
 /** The person's own order of repositories, worktrees and sessions; kept in `$.store` as `order`. */
 const manualOrder = atom({ plugin: 'live-sessions', key: 'order' } as const, {} as Record<string, string[]>)
@@ -347,9 +351,7 @@ async function collect($: EngineInterface, home: string, now: number): Promise<S
     [...claude, ...codex].map(s => [s.cwd, known[s.cwd] ?? { repo: '', name: '', tree: s.cwd, branch: '' }] as const),
   )
 
-  const candidates = homeEntries.filter(d => d.kind === 'dir' && /^\.(claude|codex)(-[a-z0-9][a-z0-9_.-]*)?$/i.test(d.name)).map(d => d.name)
-  const profiles = await profileDirs($, home, candidates)
-  const envs = envsFrom(candidates, name => profiles.has(name))
+  const envs = await envsOf($, home, homeEntries)
   const [kept, tmux] = await Promise.all([readWorkspaces($, home), tmuxState($)])
   if (!kept.isReadable) problems.push(`workspaces: ${UNREADABLE}`)
   const workspaces = kept.list
@@ -398,6 +400,14 @@ async function tmuxState($: EngineInterface): Promise<Snapshot['tmux']> {
     $.process.run(['tmux', ...args], { timeoutMs: 10_000 }).then(out => (out.exitCode === 0 ? out.stdout : '')).catch(() => '')
   const [panes, clients] = await Promise.all([run(['list-panes', '-a', '-F', PANES_FORMAT]), run(['list-clients', '-F', CLIENTS_FORMAT])])
   return { panes: parsePanes(panes), clients: parseClients(clients) }
+}
+
+/** The environments on this Mac: '' for the default accounts, then each named pair of profiles. */
+async function envsOf($: EngineInterface, home: string, homeEntries?: readonly { name: string; kind: string }[]) {
+  const entries = homeEntries ?? (await $.fs.list(home))
+  const candidates = entries.filter(d => d.kind === 'dir' && /^\.(claude|codex)(-[a-z0-9][a-z0-9_.-]*)?$/i.test(d.name)).map(d => d.name)
+  const profiles = await profileDirs($, home, candidates)
+  return envsFrom(candidates, name => profiles.has(name))
 }
 
 /** A Claude config directory has sessions or settings; a Codex home has its config or its login. */
@@ -646,31 +656,45 @@ async function createWorkspace(
   $: EngineInterface,
   w: { dir: string; env: string; name: string; branch: string },
 ): Promise<{ isCreated: boolean; text: string }> {
+  // one at a time: a second press of create, or Enter then create, never makes a second workspace
+  let isMine = false
+  await update($, creating, now => {
+    isMine = !now
+    return true
+  })
+  if (!isMine) return { isCreated: false, text: 'Not done: a workspace is already being made.' }
+  try {
+    return await makeWorkspace($, w)
+  } finally {
+    await update($, creating, () => false)
+  }
+}
+
+async function makeWorkspace(
+  $: EngineInterface,
+  w: { dir: string; env: string; name: string; branch: string },
+): Promise<{ isCreated: boolean; text: string }> {
   const home = (await $.env.get('HOME')) ?? ''
   const fail = (why: string) => ({ isCreated: false, text: `Not done: ${why}.` })
+  if (w.name.trim() === '') return fail('a workspace needs a name')
+  const typed = absoluteDir(w.dir, home)
+  if (typed === undefined) return fail(`the folder must be absolute or start with ~/ ("${w.dir}" is neither)`)
+  if (!(await envsOf($, home)).includes(w.env)) return fail(`there is no environment "${w.env}"`)
+  if (!(await readWorkspaces($, home)).isReadable) return fail(UNREADABLE)
+  const isDir = await $.fs.stat(typed).then(s => s.kind === 'dir').catch(() => false)
+  if (!isDir) return fail(`${typed} is not a folder`)
+  let dir = typed
+  if (w.branch !== '') {
+    // checking out a large repository can take a while; a cut-off checkout leaves a half-made worktree
+    const made = await $.process
+      .run(['/bin/sh', '-c', WORKTREE_SCRIPT, 'sh', typed, w.branch], { timeoutMs: 600_000 })
+      .catch((error: unknown) => ({ exitCode: -1, stdout: `error: git ${firstLine(message(error))}`, stderr: '' }))
+    const result = worktreeResult(made.stdout, w.branch)
+    if ('error' in result) return fail(result.error)
+    dir = result.dir
+  }
   await refresh($, VISIBLE_MAX_AGE_MS)
   const snap = await read($, snapshot)
-  if (w.name.trim() === '') return fail('a workspace needs a name')
-  if (!snap.envs.includes(w.env)) return fail(`there is no environment "${w.env}"`)
-  if (!(await readWorkspaces($, home)).isReadable) return fail(UNREADABLE)
-  const isDir = await $.fs.stat(w.dir).then(s => s.kind === 'dir').catch(() => false)
-  if (!isDir) return fail(`${w.dir} is not a folder`)
-  let dir = w.dir
-  if (w.branch !== '') {
-    const git = (args: string[]) =>
-      $.process.run(['git', ...args], { timeoutMs: 30_000 }).catch((error: unknown) => ({ exitCode: -1, stdout: '', stderr: message(error) }))
-    if ((await git(['check-ref-format', '--branch', w.branch])).exitCode !== 0) return fail(`"${w.branch}" is not a branch name git takes`)
-    const top = await git(['-C', w.dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'])
-    const common = top.stdout.trim()
-    if (top.exitCode !== 0 || !common.startsWith('/')) return fail(`${w.dir} is not in a git repository, so it has no branches`)
-    // the main checkout holds the shared .git: worktrees go beside it
-    const root = common.endsWith('/.git') ? common.slice(0, -'/.git'.length) : common
-    dir = worktreeDir(root, w.branch)
-    if (await $.fs.exists(dir)) return fail(`${dir} is already there`)
-    const isBranch = (await git(['-C', root, 'rev-parse', '--verify', '--quiet', `refs/heads/${w.branch}`])).exitCode === 0
-    const added = await git(['-C', root, 'worktree', 'add', ...(isBranch ? [dir, w.branch] : ['-b', w.branch, dir])])
-    if (added.exitCode !== 0) return fail(`git could not make the worktree (${firstLine(added.stderr) || `exit ${added.exitCode}`})`)
-  }
   // never the name of a tmux session already running: a new workspace never takes over an old one
   const running = Object.values(snap.tmux.panes).map(p => p.session).filter(s => s.startsWith('ws-')).map(s => s.slice(3))
   let ws: Workspace | undefined
@@ -693,7 +717,7 @@ async function createWorkspace(
 
 async function submitDraft($: EngineInterface) {
   const d = await read($, draft)
-  const made = await createWorkspace($, { name: d.name, dir: d.dir.startsWith('~') ? `${(await $.env.get('HOME')) ?? ''}${d.dir.slice(1)}` : d.dir, env: d.env, branch: d.branch.trim() })
+  const made = await createWorkspace($, { name: d.name, dir: d.dir, env: d.env, branch: d.branch.trim() })
   if (made.isCreated) {
     await update($, draft, () => NO_DRAFT)
     $.ui.toast(made.text, { timeoutMs: 15_000 })
@@ -847,6 +871,7 @@ export const register: Register = on => {
     const Select = 'Select' in elements ? elements.Select : undefined
     const form = await read($, draft)
     const choosing = await read($, assigning)
+    const isCreating = await read($, creating)
     const openForm = (dir: string) => () => void update($, draft, () => ({ ...NO_DRAFT, isOpen: true, dir }))
     const setForm = (field: 'name' | 'dir' | 'branch') => (value: string) => void update($, draft, d => ({ ...d, [field]: value, error: '' }))
     const pending = await read($, pendingMove)
@@ -937,7 +962,7 @@ export const register: Register = on => {
       <Box key={`row ${i.key}`} flexDirection="column" width={width}>
         {itemRow(i, siblings, scope)}
         {choosing.key === i.key && (
-          <Box flexDirection="row" width={width} columnGap={1} marginLeft={6}>
+          <Box flexDirection="row" flexWrap="wrap" width={width - 6} columnGap={1} marginLeft={6}>
             <Text dimColor>assign to:</Text>
             {snap.workspaces.map(ws => (
               <Button key={`assign-to ${i.key} ${ws.id}`} label={ws.name} onPress={() => void assignTo($, choosing.member, ws.id)} />
@@ -989,26 +1014,26 @@ export const register: Register = on => {
         <Box key="workspaces" flexDirection="column" width={width} marginTop={1}>
           <Box flexDirection="row" width={width} columnGap={1}>
             <Text bold>Workspaces</Text>
-            {Input !== undefined && !form.isOpen && <Button key="ws-new" label="+ workspace" plain onPress={openForm('')} />}
+            {Input !== undefined && !form.isOpen && <Button key="workspace:new" label="+ workspace" plain onPress={openForm('')} />}
           </Box>
           {view.workspaces.length === 0 && !form.isOpen && (
             <Text dimColor wrap="truncate-end">{'  none yet: + workspace, or /workspace new <folder> <env> <name>'}</Text>
           )}
           {form.isOpen && Input !== undefined && Select !== undefined && (
-            <Box key="ws-form" flexDirection="column" width={width - 2} marginLeft={2}>
-              <Input key="ws-form-name" label="name" value={form.name} placeholder="Practice RBAC" onInput={setForm('name')} onSubmit={() => void submitDraft($)} />
-              <Input key="ws-form-dir" label="folder" value={form.dir} placeholder="~/code/app" onInput={setForm('dir')} onSubmit={() => void submitDraft($)} />
+            <Box key="form" flexDirection="column" width={width - 2} marginLeft={2}>
+              <Input key="form:name" label="name" value={form.name} placeholder="Practice RBAC" onInput={setForm('name')} onSubmit={() => void submitDraft($)} />
+              <Input key="form:dir" label="folder" value={form.dir} placeholder="~/code/app" onInput={setForm('dir')} onSubmit={() => void submitDraft($)} />
               <Select
-                key="ws-form-env"
+                key="form:env"
                 label="environment"
                 options={snap.envs.map(env => ({ value: env || 'default', label: env || 'default' }))}
                 value={form.env || 'default'}
                 onSelect={value => void update($, draft, d => ({ ...d, env: value === 'default' ? '' : value, error: '' }))}
               />
-              <Input key="ws-form-branch" label="new branch (optional)" value={form.branch} placeholder="feat/x" onInput={setForm('branch')} onSubmit={() => void submitDraft($)} />
+              <Input key="form:branch" label="new branch (optional)" value={form.branch} placeholder="feat/x" onInput={setForm('branch')} onSubmit={() => void submitDraft($)} />
               <Box flexDirection="row" columnGap={1}>
-                <Button key="ws-form-create" label="create" variant="primary" onPress={() => void submitDraft($)} />
-                <Button key="ws-form-cancel" label="cancel" onPress={() => void update($, draft, () => NO_DRAFT)} />
+                <Button key="form:create" label={isCreating ? 'creating…' : 'create'} variant="primary" onPress={() => void submitDraft($)} />
+                <Button key="form:cancel" label="cancel" onPress={() => void update($, draft, () => NO_DRAFT)} />
               </Box>
               {form.error !== '' && <Text color="error" wrap="wrap">{form.error}</Text>}
             </Box>
@@ -1055,7 +1080,7 @@ export const register: Register = on => {
                   </Box>
                   {Input !== undefined && (
                     <Box flexShrink={0} marginLeft={1}>
-                      <Button key={`ws-from ${tree.key}`} label="+ ws" plain onPress={openForm(tree.key)} />
+                      <Button key={`new-from:${tree.key}`} label="+ ws" plain onPress={openForm(tree.key)} />
                     </Box>
                   )}
                   {arrows(treesScope(repo.key), repo.trees.map(t => t.key), tree.key)}

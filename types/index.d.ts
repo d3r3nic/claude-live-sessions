@@ -107,6 +107,8 @@ declare module 'claude-code' {
       draft: { isOpen: boolean; name: string; dir: string; env: string; branch: string; error: string }
       /** The session whose workspace is being chosen: its row's key and lasting id; '' when none. */
       assigning: { key: string; member: string }
+      /** A workspace is being made: a second create waits for it instead of making another. */
+      creating: boolean
     }
   }
 }

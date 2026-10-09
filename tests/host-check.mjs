@@ -277,29 +277,67 @@ if (process.argv.includes('--slow')) {
   rmSync(scratch, { recursive: true, force: true })
 }
 
-// 7. A workspace on a new branch: the git steps createWorkspace runs, on a throwaway repository
+// 7. A workspace on a branch: the plugin's own WORKTREE_SCRIPT, on throwaway repositories
 {
-  const scratch = mkdtempSync(join(tmpdir(), 'live-sessions-git-'))
+  const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'live-sessions-git-')))
+  const env = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_AUTHOR_NAME: 'check', GIT_AUTHOR_EMAIL: 'check@example.invalid', GIT_COMMITTER_NAME: 'check', GIT_COMMITTER_EMAIL: 'check@example.invalid' }
+  const git = (...args) => spawnSync('git', args, { encoding: 'utf8', env })
+  const make = (dir, branch) => {
+    const out = spawnSync('/bin/sh', ['-c', w.WORKTREE_SCRIPT, 'sh', dir, branch], { encoding: 'utf8', env })
+    return { code: out.status, result: w.worktreeResult(out.stdout, branch) }
+  }
+  const head = (dir, ref = 'HEAD') => git('-C', dir, 'rev-parse', ref).stdout.trim()
+  const branchOf = dir => git('-C', dir, 'branch', '--show-current').stdout.trim()
+  const newRepo = path => {
+    mkdirSync(path, { recursive: true })
+    git('-C', path, 'init', '-q', '-b', 'main')
+    git('-C', path, 'commit', '-q', '--allow-empty', '-m', 'base')
+    return path
+  }
+  // a remote with a branch the clone has only as origin/feat/pr
+  const remote = newRepo(join(scratch, 'remote'))
+  git('-C', remote, 'checkout', '-q', '-b', 'feat/pr')
+  git('-C', remote, 'commit', '-q', '--allow-empty', '-m', 'PR work')
+  git('-C', remote, 'checkout', '-q', 'main')
   const repo = join(scratch, 'app')
-  const git = (...args) => spawnSync('git', args, { encoding: 'utf8', env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1' } })
-  mkdirSync(repo)
-  git('-C', repo, 'init', '-q', '-b', 'main')
-  git('-C', repo, '-c', 'user.email=check@example.invalid', '-c', 'user.name=check', '-c', 'commit.gpgsign=false', 'commit', '-q', '--allow-empty', '-m', 'start')
+  git('clone', '-q', remote, repo)
   git('-C', repo, 'branch', 'feat/old')
-  check('git: a bad branch name is refused', git('check-ref-format', '--branch', 'a..b').status !== 0 && git('check-ref-format', '--branch', 'feat/new').status === 0)
-  // asked from inside a subfolder, the shared .git names the repository
   mkdirSync(join(repo, 'sub'))
-  const common = git('-C', join(repo, 'sub'), 'rev-parse', '--path-format=absolute', '--git-common-dir').stdout.trim()
-  const root = common.endsWith('/.git') ? common.slice(0, -5) : common
-  check('git: the repository found from a subfolder', realpathSync(root) === realpathSync(repo), root.split('/').pop())
-  const fresh = w.worktreeDir(root, 'feat/new')
-  const isNew = git('-C', root, 'rev-parse', '--verify', '--quiet', 'refs/heads/feat/new').status !== 0
-  const added = git('-C', root, 'worktree', 'add', '-b', 'feat/new', fresh)
-  check('git: a new branch\'s worktree beside the repository', isNew && added.status === 0 && git('-C', fresh, 'branch', '--show-current').stdout.trim() === 'feat/new', fresh.split('/').slice(-2).join('/'))
-  const old = w.worktreeDir(root, 'feat/old')
-  const isOld = git('-C', root, 'rev-parse', '--verify', '--quiet', 'refs/heads/feat/old').status === 0
-  const addedOld = git('-C', root, 'worktree', 'add', old, 'feat/old')
-  check('git: a branch already there checked out in its worktree', isOld && addedOld.status === 0 && git('-C', old, 'branch', '--show-current').stdout.trim() === 'feat/old')
+
+  check('worktree: a bad branch name, refused', ['a..b', '-x', '--orphan', 'HEAD', 'a b'].every(b => make(repo, b).result.error?.includes('not a branch name')))
+  check('worktree: a folder outside git, refused', make(scratch, 'feat/x').result.error?.includes('not in a git repository'))
+  const fresh = make(join(repo, 'sub'), 'feat/new')
+  check('worktree: a new branch, from a subfolder, beside the main checkout', fresh.result.dir === `${scratch}/app-worktrees/feat-new` && branchOf(fresh.result.dir) === 'feat/new' && head(fresh.result.dir) === head(repo), fresh.result.dir?.slice(scratch.length) ?? fresh.result.error)
+  const old = make(repo, 'feat/old')
+  check('worktree: a local branch already there, checked out', branchOf(old.result.dir ?? scratch) === 'feat/old')
+  const pr = make(repo, 'feat/pr')
+  const upstream = git('-C', pr.result.dir ?? scratch, 'rev-parse', '--abbrev-ref', '@{upstream}').stdout.trim()
+  check('worktree: a branch only on the remote, checked out at its commit and tracking it', head(pr.result.dir ?? scratch) === head(remote, 'feat/pr') && upstream === 'origin/feat/pr', upstream || pr.result.error)
+  // from a worktree on its own branch: the new branch starts there, and still goes beside the main checkout
+  git('-C', old.result.dir, 'commit', '-q', '--allow-empty', '-m', 'old work')
+  const stacked = make(old.result.dir, 'feat/stacked')
+  check('worktree: a new branch from a worktree starts at that worktree\'s commit', stacked.result.dir === `${scratch}/app-worktrees/feat-stacked` && head(stacked.result.dir) === head(old.result.dir))
+  check('worktree: one already there, refused', make(repo, 'feat/old').result.error === `${scratch}/app-worktrees/feat-old is already there`)
+  const busy = make(repo, 'main')
+  check('worktree: git\'s own refusal reads as its fatal line', busy.code !== 0 && /^git could not make the worktree \((fatal|error): /.test(busy.result.error ?? ''), busy.result.error)
+  // a submodule: its worktrees go beside its checkout, never inside the parent's .git
+  const parent = newRepo(join(scratch, 'parent'))
+  const lib = newRepo(join(scratch, 'lib'))
+  git('-C', parent, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', lib, 'vendor/lib')
+  const sub = make(join(parent, 'vendor/lib'), 'feat/s')
+  check('worktree: in a submodule, beside its checkout', sub.result.dir === `${parent}/vendor/lib-worktrees/feat-s`, sub.result.dir?.slice(scratch.length) ?? sub.result.error)
+  const subAgain = make(sub.result.dir ?? scratch, 'feat/s2')
+  check('worktree: from a submodule\'s worktree, beside the submodule\'s checkout', subAgain.result.dir === `${parent}/vendor/lib-worktrees/feat-s2`, subAgain.result.dir?.slice(scratch.length) ?? subAgain.result.error)
+  // a repository whose .git is kept elsewhere
+  const apart = join(scratch, 'apart')
+  mkdirSync(apart)
+  git('-C', apart, 'init', '-q', '-b', 'main', '--separate-git-dir', join(scratch, 'store.git'))
+  git('-C', apart, 'commit', '-q', '--allow-empty', '-m', 'base')
+  const sep = make(apart, 'feat/sep')
+  check('worktree: with a separate git dir, beside the checkout', sep.result.dir === `${scratch}/apart-worktrees/feat-sep`, sep.result.dir?.slice(scratch.length) ?? sep.result.error)
+  // from its linked worktree git cannot say where the checkout is: refused, never put by the git store
+  const sepAgain = make(sep.result.dir ?? scratch, 'feat/sep2')
+  check('worktree: from a separate git dir\'s worktree, refused', sepAgain.result.error?.includes('main checkout') === true, sepAgain.result.error)
   rmSync(scratch, { recursive: true, force: true })
 }
 

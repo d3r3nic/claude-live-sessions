@@ -52,9 +52,11 @@ import {
 import type { CodexProc, ThreadRow } from '../hooks/collect'
 import type { Workspace } from '../types'
 import {
+  absoluteDir,
   agentStart,
   assigned,
-  worktreeDir,
+  worktreeResult,
+  WORKTREE_SCRIPT,
   envsFrom,
   findWorkspace,
   openCommand,
@@ -135,6 +137,8 @@ const world = {
   unreadable: '',
   /** Folders made while the test runs (a new worktree). */
   made: new Set<string>(),
+  /** Paths that are not there, though the fixtures have them. */
+  gone: new Set<string>(),
 }
 const resetWorld = () => {
   world.stat.clear()
@@ -151,6 +155,7 @@ const resetWorld = () => {
   world.spoilsAfterRead = ''
   world.unreadable = ''
   world.made.clear()
+  world.gone.clear()
 }
 const changed = (pid: number, line: string) => {
   const stat = world.stat.get(pid)
@@ -183,22 +188,20 @@ function machine(argv: readonly string[], env: unknown): Run {
       if (argv[2]?.startsWith('tmux has-session')) return ok('')
       if (argv[2] === MOVE_SCRIPT) return world.move === 0 ? ok('typed') : { exitCode: Number(world.move), stdout: '', stderr: '' }
       if (argv[2] === MODE_SCRIPT) return ok(world.mode)
+      if (argv[2] === WORKTREE_SCRIPT) {
+        // the script, as it answers for a repository whose main checkout is /Users/u/dev/web-app (tested for real in host-check)
+        const [dir = '', branch = ''] = args
+        if (!/^[\w./-]+$/.test(branch) || branch.startsWith('-') || branch.includes('..')) return { exitCode: 10, stdout: 'error: bad-name\n', stderr: '' }
+        if (!dir.startsWith('/Users/u/dev/web-app')) return { exitCode: 11, stdout: 'error: not-a-repo\n', stderr: '' }
+        const target = `/Users/u/dev/web-app-worktrees/${branch.replace(/\//g, '-')}`
+        if (world.made.has(target)) return { exitCode: 12, stdout: `error: exists ${target}\n`, stderr: '' }
+        world.made.add(target)
+        return ok(`ok ${target}\n`)
+      }
       if (argv[2] === RECENT_SCRIPT) return ok(args.map(f => `==> ${f}\n${(RECENT[f] ?? []).map(l => `${l}\n`).join('')}`).join(''))
       if (argv[2] !== ENV_SCRIPT) return { exitCode: 2, stdout: '', stderr: 'unexpected script' }
       const pids = (args[0] ?? '').split(',').map(Number)
       return ok(`${pids.flatMap(pid => (ENV_LINES[pid] === undefined ? [] : [ENV_LINES[pid]!])).join('\n')}\n`)
-    }
-    case 'git': {
-      // a repository at /Users/u/dev/web-app; branches other than feat/old are new
-      if (argv[1] === 'check-ref-format') return /^[\w./-]+$/.test(argv[3] ?? '') && !(argv[3] ?? '').includes('..') ? ok('') : { exitCode: 1, stdout: '', stderr: '' }
-      const repo = argv[2]?.startsWith('/Users/u/dev/web-app') ? '/Users/u/dev/web-app' : ''
-      if (argv[3] === 'rev-parse' && argv.includes('--git-common-dir')) return repo ? ok(`${repo}/.git\n`) : { exitCode: 128, stdout: '', stderr: 'fatal: not a git repository\n' }
-      if (argv[3] === 'rev-parse' && argv.includes('--verify')) return argv.at(-1) === 'refs/heads/feat/old' ? ok('abc\n') : { exitCode: 1, stdout: '', stderr: '' }
-      if (argv[3] === 'worktree' && argv[4] === 'add') {
-        world.made.add(argv[5] === '-b' ? argv[7]! : argv[5]!)
-        return ok('')
-      }
-      return { exitCode: 1, stdout: '', stderr: `unexpected git ${argv.join(' ')}` }
     }
     case 'tmux':
       if (argv[1] === 'list-panes') return world.tmuxPanes === '' ? { exitCode: 1, stdout: '', stderr: 'no server running\n' } : ok(world.tmuxPanes)
@@ -244,7 +247,8 @@ function engine(
     selfId = 'session-elsewhere',
     termProgram,
     moveTakesMs = 0,
-  }: { canWrite?: boolean; selfId?: string; termProgram?: string; moveTakesMs?: number } = {},
+    worktreeTakesMs = 0,
+  }: { canWrite?: boolean; selfId?: string; termProgram?: string; moveTakesMs?: number; worktreeTakesMs?: number } = {},
 ) {
   resetWorld()
   on('session.start', async ($, e) => ({ cwd: e.cwd }))
@@ -287,6 +291,7 @@ function engine(
     runs.push([...e.argv])
     const isMove = e.argv[0] === '/bin/sh' && e.argv[2] === MOVE_SCRIPT
     if (isMove && moveTakesMs > 0) await clock.sleep(moveTakesMs)
+    if (e.argv[2] === WORKTREE_SCRIPT && worktreeTakesMs > 0) await clock.sleep(worktreeTakesMs)
     if (isMove && world.move === 'reject') return { deny: 'timed out after 40000 ms' }
     return { value: { ...run(e.argv, e.init?.env), isStdoutTruncated: false, isStderrTruncated: false } }
   })
@@ -296,6 +301,7 @@ function engine(
     return entries === undefined ? { deny: `ENOENT ${e.path}` } : { value: entries }
   })
   on('fs.exists', async ($, e) => {
+    if (world.gone.has(e.path)) return { value: false }
     const at = e.path.lastIndexOf('/')
     const isListed = LISTINGS[e.path.slice(0, at)]?.some(entry => entry.name === e.path.slice(at + 1)) ?? false
     return { value: LISTINGS[e.path] !== undefined || isListed || files.has(e.path) || world.made.has(e.path) }
@@ -1135,13 +1141,22 @@ describe('workspaces', () => {
     expect(parseWorkspaceArgs('new /x default Name', ['work'], HOME)).toEqual({ action: 'new', dir: '/x', env: '', name: 'Name', branch: '' })
     expect(parseWorkspaceArgs('new /x work Practice --branch feat/rbac RBAC', ['work'], HOME)).toEqual({ action: 'new', dir: '/x', env: 'work', name: 'Practice RBAC', branch: 'feat/rbac' })
     expect(parseWorkspaceArgs('new /x work Name --branch', ['work'], HOME)).toEqual({ action: 'help', error: '--branch needs a branch name' })
+    expect(parseWorkspaceArgs('new /x work Name --branch=feat/a', ['work'], HOME)).toMatchObject({ name: 'Name', branch: 'feat/a' })
+    expect(parseWorkspaceArgs('new /x work -b feat/a Name', ['work'], HOME)).toMatchObject({ name: 'Name', branch: 'feat/a' })
+    expect(parseWorkspaceArgs('new /x work Name --brnach feat/a', ['work'], HOME)).toEqual({ action: 'help', error: '"--brnach" is not an option /workspace takes' })
+    // a folder is absolute or starts with ~/; ~name (another person's home) is neither
+    for (const folder of ['dev/web-app', '~u/web-app', './web-app']) {
+      expect(parseWorkspaceArgs(`new ${folder} work Name`, ['work'], HOME)).toEqual({ action: 'help', error: 'the folder must be absolute or start with ~/' })
+    }
+    expect([absoluteDir('~', HOME), absoluteDir(' ~/dev/x/ ', HOME), absoluteDir('/x//', HOME), absoluteDir('/', HOME)]).toEqual([HOME, '/Users/u/dev/x', '/x', '/'])
+    expect([absoluteDir('~foo', HOME), absoluteDir('dev/x', HOME), absoluteDir('', HOME)]).toEqual([undefined, undefined, undefined])
     // the environment is required: a misspelt one is an error, never the default account
     expect(parseWorkspaceArgs('new /x wrok Name', ['work'], HOME)).toEqual({ action: 'help', error: 'there is no environment "wrok"' })
     expect(parseWorkspaceArgs('new /x Name', ['work'], HOME).action).toBe('help')
     expect(parseWorkspaceArgs('', [], HOME)).toEqual({ action: 'list' })
     expect(parseWorkspaceArgs('open Practice RBAC', [], HOME)).toEqual({ action: 'open', ref: 'Practice RBAC' })
     for (const bad of ['new', 'new /x', 'new /x work', 'rm', 'launch x']) expect(parseWorkspaceArgs(bad, ['work'], HOME).action).toBe('help')
-    expect(parseWorkspaceArgs('new relative/dir work Name', ['work'], HOME)).toEqual({ action: 'help', error: 'the folder must be absolute or start with ~' })
+    expect(parseWorkspaceArgs('new relative/dir work Name', ['work'], HOME)).toEqual({ action: 'help', error: 'the folder must be absolute or start with ~/' })
     expect(findWorkspace([practice], 'practice rbac')?.id).toBe('practice-rbac')
     expect(findWorkspace([practice], 'practice-rbac')?.id).toBe('practice-rbac')
     expect(workspacesFrom({ workspaces: [practice, { ...practice, id: 'BAD ID' }, { name: 'x' }] })).toEqual([practice])
@@ -1347,8 +1362,14 @@ describe('workspaces', () => {
 })
 
 describe('workspaces, from the pane', () => {
-  test('helpers: a new branch\'s worktree beside its repository; assigning a session to one workspace', async () => {
-    expect(worktreeDir('/Users/u/dev/web-app', 'feat/rbac/v2')).toBe('/Users/u/dev/web-app-worktrees/feat-rbac-v2')
+  test('helpers: the worktree script\'s answers; assigning a session to one workspace; members kept', async () => {
+    expect(worktreeResult('ok /Users/u/dev/web-app-worktrees/feat-rbac-v2\n', 'feat/rbac/v2')).toEqual({ dir: '/Users/u/dev/web-app-worktrees/feat-rbac-v2' })
+    expect(worktreeResult('error: bad-name\n', 'a..b')).toEqual({ error: '"a..b" is not a branch name git takes' })
+    expect(worktreeResult('error: exists /r-worktrees/x\n', 'x')).toEqual({ error: '/r-worktrees/x is already there' })
+    expect(worktreeResult("error: git fatal: 'feat/a' is already used by worktree at '/r'\n", 'feat/a')).toEqual({ error: "git could not make the worktree (fatal: 'feat/a' is already used by worktree at '/r')" })
+    expect(worktreeResult('', 'x')).toEqual({ error: 'git could not make the worktree' })
+    // a profile pair named `default` would mean two things
+    expect(envsFrom(['.claude-default', '.codex-default', '.claude-work', '.codex-work'], () => true)).toEqual(['', 'work'])
     const two = [practice, { ...practice, id: 'other', name: 'Other' }]
     const once = assigned(two, 'claude:session-104', 'practice-rbac')
     expect(once.map(w => w.members ?? [])).toEqual([['claude:session-104'], []])
@@ -1356,7 +1377,9 @@ describe('workspaces, from the pane', () => {
     const moved = assigned(once, 'claude:session-104', 'other')
     expect(moved.map(w => w.members ?? [])).toEqual([[], ['claude:session-104']])
     expect(assigned(moved, 'claude:session-104', '')).toEqual(two)
-    expect(workspacesFrom({ workspaces: [{ ...practice, members: ['claude:x'] }, { ...practice, id: 'bad', members: ['rm -rf'] }] })).toEqual([{ ...practice, members: ['claude:x'] }])
+    // a member this does not read is kept, and never costs the workspace
+    expect(workspacesFrom({ workspaces: [{ ...practice, members: ['claude:x', 'gemini:abc', 5] }, { ...practice, id: 'empty', members: [] }] }))
+      .toEqual([{ ...practice, members: ['claude:x', 'gemini:abc'] }, { ...practice, id: 'empty' }])
   })
 
   test('an assigned session groups under its workspace, tagged; running in its tmux session wins', async () => {
@@ -1364,6 +1387,13 @@ describe('workspaces, from the pane', () => {
     const view = viewOf(snap, { home: HOME, now: NOW, windowMs: 0, selfId: '' })
     expect(view.workspaces[0]!.items.map(i => `${i.title}:${i.tags.join('+')}`)).toEqual(['Find the report writer:+2 agents+assigned', 'WORKER:work+assigned'])
     expect(view.repos.flatMap(r => r.trees.flatMap(t => t.items.map(i => i.title)))).not.toContain('WORKER')
+    // a session running in another workspace's tmux session is listed there, not where it is assigned
+    const inTmux = viewOf({ ...snap, workspaces: [...snap.workspaces, { ...practice, id: 'other', name: 'Other' }], tmux: { panes: { ttys022: { session: 'ws-other', window: 'claude' } }, clients: {} } },
+      { home: HOME, now: NOW, windowMs: 0, selfId: '' })
+    expect(inTmux.workspaces.map(w => [w.key, w.items.map(i => `${i.title}:${i.tags.join('+')}`)])).toEqual([
+      ['practice-rbac', ['Find the report writer:+2 agents+assigned']],
+      ['other', ['WORKER:work']],
+    ])
     // the terminal with no thread found has no lasting id: it cannot be assigned
     expect(view.repos.flatMap(r => r.trees.flatMap(t => t.items)).find(i => i.title === 'session (thread not found)')?.memberId).toBeUndefined()
   })
@@ -1373,19 +1403,19 @@ describe('workspaces, from the pane', () => {
     await $.session.start(START)
     await $.command.run(SESSIONS)
     const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
-    await ui.press({ key: 'ws-new' })
+    await ui.press({ key: 'workspace:new' })
     // nothing typed yet: said, nothing made
-    await ui.press({ key: 'ws-form-create' })
+    await ui.press({ key: 'form:create' })
     expect((await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')).toContain('Not done: a workspace needs a name.')
-    await ui.input({ key: 'ws-form-name', text: 'Practice RBAC', kind: 'change' })
-    await ui.input({ key: 'ws-form-dir', text: '~/dev/web-app', kind: 'change' })
-    await ui.select({ key: 'ws-form-env', value: 'work' })
-    await ui.press({ key: 'ws-form-create' })
+    await ui.input({ key: 'form:name', text: 'Practice RBAC', kind: 'change' })
+    await ui.input({ key: 'form:dir', text: '~/dev/web-app', kind: 'change' })
+    await ui.select({ key: 'form:env', value: 'work' })
+    await ui.press({ key: 'form:create' })
     const saved = JSON.parse(files.get(WORKSPACES)!).workspaces
     expect(saved.map((w: Workspace) => [w.id, w.env, w.dir])).toEqual([['practice-rbac', 'work', '/Users/u/dev/web-app']])
     expect(runs.some(r => r[0] === '/usr/bin/osascript' && r[4] === OPEN_SCRIPT)).toBe(true)
     // the form closes once it is made
-    expect(await ui.find({ key: 'ws-form-name' })).toBeUndefined()
+    expect(await ui.find({ key: 'form:name' })).toBeUndefined()
     await ui.unmount()
   })
 
@@ -1394,26 +1424,86 @@ describe('workspaces, from the pane', () => {
     await $.session.start(START)
     await $.command.run(SESSIONS)
     const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
-    await ui.press({ key: 'ws-from /Users/u/dev/web-app' })
-    expect((await ui.find({ key: 'ws-form-dir' }))?.props.value).toBe('/Users/u/dev/web-app')
-    await ui.input({ key: 'ws-form-name', text: 'RBAC v2', kind: 'change' })
-    await ui.input({ key: 'ws-form-branch', text: 'feat/rbac', kind: 'change' })
-    await ui.press({ key: 'ws-form-create' })
-    expect(runs.find(r => r[0] === 'git' && r[3] === 'worktree')).toEqual(['git', '-C', '/Users/u/dev/web-app', 'worktree', 'add', '-b', 'feat/rbac', '/Users/u/dev/web-app-worktrees/feat-rbac'])
+    await ui.press({ key: 'new-from:/Users/u/dev/web-app' })
+    expect((await ui.find({ key: 'form:dir' }))?.props.value).toBe('/Users/u/dev/web-app')
+    await ui.input({ key: 'form:name', text: 'RBAC v2', kind: 'change' })
+    await ui.input({ key: 'form:branch', text: 'feat/rbac', kind: 'change' })
+    await ui.press({ key: 'form:create' })
+    expect(runs.find(r => r[2] === WORKTREE_SCRIPT)).toEqual(['/bin/sh', '-c', WORKTREE_SCRIPT, 'sh', '/Users/u/dev/web-app', 'feat/rbac'])
     expect(JSON.parse(files.get(WORKSPACES)!).workspaces[0].dir).toBe('/Users/u/dev/web-app-worktrees/feat-rbac')
     await ui.unmount()
   })
 
-  test('the command takes --branch too; a branch already there is checked out, a bad name or a folder outside git refused', async ($, on) => {
+  test('the command takes --branch too; a bad name, a folder outside git, a worktree already there refused', async ($, on) => {
     const { runs } = engine(on, machine, { termProgram: 'Apple_Terminal' })
     await $.session.start(START)
     const run = async (args: string) => (await $.command.run({ ...SESSIONS, command: 'workspace', args })).text
     expect(await run('new ~/dev/web-app work Old --branch feat/old')).toMatch(/^Created Old \(work, \/Users\/u\/dev\/web-app-worktrees\/feat-old\)/)
-    expect(runs.find(r => r[0] === 'git' && r[3] === 'worktree')).toEqual(['git', '-C', '/Users/u/dev/web-app', 'worktree', 'add', '/Users/u/dev/web-app-worktrees/feat-old', 'feat/old'])
-    expect(await run('new ~/dev/web-app work Bad --branch "a..b"')).toBe('Not done: "a..b" is not a branch name git takes.')
-    expect(await run('new ~ work Out --branch feat/x')).toBe('Not done: /Users/u is not in a git repository, so it has no branches.')
-    // the worktree folder is already there
+    expect(runs.filter(r => r[2] === WORKTREE_SCRIPT).map(r => r.slice(4))).toEqual([['/Users/u/dev/web-app', 'feat/old']])
+    expect(await run('new ~/dev/web-app work Bad --branch a..b')).toBe('Not done: "a..b" is not a branch name git takes.')
+    expect(await run('new ~ work Out --branch feat/x')).toBe('Not done: that folder is not in a git repository, so it has no branches.')
     expect(await run('new ~/dev/web-app work Again --branch feat/old')).toBe('Not done: /Users/u/dev/web-app-worktrees/feat-old is already there.')
+  })
+
+  test('the form refuses a relative folder, a gone environment and an unreadable list, before any git or tmux', async ($, on) => {
+    const { files, runs } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    const error = async () => (await ui.findAll({ type: 'Text' })).map(t => t.text).find(t => t.startsWith('Not done')) ?? ''
+    const acting = () => runs.filter(r => r[2] === WORKTREE_SCRIPT || r[0] === 'tmux' && r[1] !== 'list-panes' && r[1] !== 'list-clients' || r[4] === OPEN_SCRIPT)
+    await ui.press({ key: 'workspace:new' })
+    await ui.input({ key: 'form:name', text: 'Rel', kind: 'change' })
+    await ui.input({ key: 'form:dir', text: 'dev/web-app', kind: 'change' })
+    await ui.press({ key: 'form:create' })
+    expect(await error()).toBe('Not done: the folder must be absolute or start with ~/ ("dev/web-app" is neither).')
+    await ui.input({ key: 'form:dir', text: '~/dev/web-app', kind: 'change' })
+    await ui.input({ key: 'form:branch', text: 'feat/x', kind: 'change' })
+    await ui.select({ key: 'form:env', value: 'work' })
+    // the work profile went away after the form was opened
+    world.gone.add('/Users/u/.codex-work/auth.json')
+    await ui.press({ key: 'form:create' })
+    expect(await error()).toBe('Not done: there is no environment "work".')
+    world.gone.clear()
+    const none = JSON.stringify({ version: 1, workspaces: [] })
+    files.set(WORKSPACES, none)
+    world.unreadable = WORKSPACES
+    await ui.press({ key: 'form:create' })
+    expect(await error()).toMatch(/^Not done: its list cannot be read/)
+    expect(acting()).toEqual([])
+    expect(files.get(WORKSPACES)).toBe(none)
+    // picked back to default: the default accounts, ''
+    world.unreadable = ''
+    await ui.select({ key: 'form:env', value: 'default' })
+    await ui.input({ key: 'form:branch', text: '', kind: 'change' })
+    await ui.press({ key: 'form:create' })
+    expect(JSON.parse(files.get(WORKSPACES)!).workspaces.map((w: Workspace) => [w.env, w.dir])).toEqual([['', '/Users/u/dev/web-app']])
+    await ui.unmount()
+  })
+
+  test('create pressed twice while the first is being made makes one workspace and one window', { timeoutMs: 4_000 }, async ($, on) => {
+    const { files, runs, clock } = engine(on, machine, { termProgram: 'Apple_Terminal', worktreeTakesMs: 5_000 })
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    await ui.press({ key: 'workspace:new' })
+    await ui.input({ key: 'form:name', text: 'Twice', kind: 'change' })
+    await ui.input({ key: 'form:dir', text: '~/dev/web-app', kind: 'change' })
+    await ui.input({ key: 'form:branch', text: 'feat/twice', kind: 'change' })
+    const first = ui.press({ key: 'form:create' })
+    await clock.settle()
+    expect((await ui.find({ key: 'form:create' }))?.props.label).toBe('creating…')
+    await ui.press({ key: 'form:create' })
+    await ui.input({ key: 'form:branch', text: 'feat/twice', kind: 'submit' })
+    // the command waits its turn too
+    expect((await $.command.run({ ...SESSIONS, command: 'workspace', args: 'new ~/dev/web-app work Third' })).text).toBe('Not done: a workspace is already being made.')
+    await clock.advance(5_000)
+    await first
+    await clock.settle()
+    expect(JSON.parse(files.get(WORKSPACES)!).workspaces.map((w: Workspace) => w.id)).toEqual(['twice'])
+    expect(runs.filter(r => r[2] === WORKTREE_SCRIPT)).toHaveLength(1)
+    expect(runs.filter(r => r[4] === OPEN_SCRIPT)).toHaveLength(1)
+    await ui.unmount()
   })
 
   test('⊕ on a session assigns it to a workspace from the pane, and none unassigns it', async ($, on) => {

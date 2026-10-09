@@ -41,18 +41,36 @@ export function parseWorkspaceArgs(args: string, envs: readonly string[], home: 
   }
   if (verb !== 'new') return { action: 'help', error: `"${verb}" is not one of new, open, rm, list` }
   const [folder = '', envWord = '', ...afterEnv] = rest
-  // `--branch <name>` anywhere after the environment: a new worktree for it
-  const at = afterEnv.indexOf('--branch')
-  const branch = at >= 0 ? (afterEnv[at + 1] ?? '') : ''
-  if (at >= 0 && branch === '') return { action: 'help', error: '--branch needs a branch name' }
-  const after = at >= 0 ? [...afterEnv.slice(0, at), ...afterEnv.slice(at + 2)] : afterEnv
-  const name = after.join(' ').trim()
+  // `--branch <b>`, `--branch=<b>` or `-b <b>` anywhere after the environment: that branch's own worktree
+  let branch = ''
+  const nameWords: string[] = []
+  for (let i = 0; i < afterEnv.length; i++) {
+    const word = afterEnv[i]!
+    if (word === '--branch' || word === '-b') {
+      branch = afterEnv[++i] ?? ''
+      if (branch === '') return { action: 'help', error: `${word} needs a branch name` }
+    } else if (word.startsWith('--branch=')) {
+      branch = word.slice('--branch='.length)
+    } else if (word.startsWith('-')) {
+      return { action: 'help', error: `"${word}" is not an option /workspace takes` }
+    } else {
+      nameWords.push(word)
+    }
+  }
+  const name = nameWords.join(' ').trim()
   if (folder === '' || envWord === '' || name === '') return { action: 'help', error: 'new needs a folder, an environment and a name' }
   if (envWord !== 'default' && !envs.includes(envWord)) return { action: 'help', error: `there is no environment "${envWord}"` }
   const env = envWord === 'default' ? '' : envWord
-  const dir = folder === '~' ? home : folder.startsWith('~/') ? `${home}${folder.slice(1)}` : folder
-  if (!dir.startsWith('/')) return { action: 'help', error: 'the folder must be absolute or start with ~' }
-  return { action: 'new', dir: dir.replace(/\/+$/, '') || '/', env, name, branch }
+  const dir = absoluteDir(folder, home)
+  if (dir === undefined) return { action: 'help', error: 'the folder must be absolute or start with ~/' }
+  return { action: 'new', dir, env, name, branch }
+}
+
+/** A folder as typed, as an absolute path: `~` and `~/...` are the home directory; anything else relative, undefined. */
+export function absoluteDir(typed: string, home: string): string | undefined {
+  const text = typed.trim()
+  const dir = text === '~' ? home : text.startsWith('~/') ? `${home}${text.slice(1)}` : text
+  return dir.startsWith('/') ? dir.replace(/\/+$/, '') || '/' : undefined
 }
 
 /** The workspace `ref` names: its id, or its name in any case. */
@@ -149,7 +167,8 @@ export function envsFrom(dirNames: readonly string[], isProfile: (dirName: strin
     const m = /^\.(claude|codex)-([a-z0-9][a-z0-9_.-]*)$/i.exec(name)
     if (m !== null && isProfile(name)) sides.set(m[2]!, (sides.get(m[2]!) ?? new Set()).add(m[1]!.toLowerCase()))
   }
-  const named = [...sides].filter(([, tools]) => tools.has('claude') && tools.has('codex')).map(([env]) => env)
+  // `default` is the word for ~/.claude and ~/.codex, so a pair named so is never offered
+  const named = [...sides].filter(([env, tools]) => env.toLowerCase() !== 'default' && tools.has('claude') && tools.has('codex')).map(([env]) => env)
   return ['', ...named.sort((a, b) => a.localeCompare(b))]
 }
 
@@ -164,8 +183,12 @@ export function workspacesFrom(raw: unknown): Workspace[] {
     const o = ws as Partial<Workspace> | null
     return typeof o === 'object' && o !== null && typeof o.id === 'string' && /^[a-z0-9-]{1,40}$/.test(o.id) &&
       typeof o.name === 'string' && typeof o.env === 'string' && typeof o.dir === 'string' && o.dir.startsWith('/') &&
-      typeof o.createdAt === 'number' &&
-      (o.members === undefined || (Array.isArray(o.members) && o.members.every(m => typeof m === 'string' && MEMBER_ID.test(m))))
+      typeof o.createdAt === 'number'
+  }).map(ws => {
+    // a member this does not read (a hand edit, a later format) is kept as it is and never costs the workspace
+    const members = Array.isArray(ws.members) ? ws.members.filter((m): m is string => typeof m === 'string') : undefined
+    const { members: _, ...rest } = ws
+    return members !== undefined && members.length > 0 ? { ...rest, members } : rest
   })
 }
 
@@ -180,12 +203,52 @@ export function assigned(list: readonly Workspace[], member: string, id: string)
 }
 
 /**
- * Where a new branch's worktree goes: beside the repository, in one folder
- * per repository, `<parent>/<repo>-worktrees/<branch>`, each `/` in the
- * branch a `-`.
+ * Makes branch "$2"'s worktree for the folder "$1" and prints `ok <path>`,
+ * or `error: <why>` and exits non-zero. The worktree goes beside the
+ * repository's main checkout, in `<checkout>-worktrees/<branch>`, each `/` a
+ * `-`. From the main checkout that is its top folder (so a submodule or a
+ * separate git dir is placed right); from a linked worktree, the checkout its
+ * shared git dir belongs to, or a refusal when git cannot tell. A branch there already,
+ * here or on a remote, is checked out (a remote one tracked); a new branch
+ * starts from the folder's own commit.
  */
-export function worktreeDir(repoRoot: string, branch: string): string {
-  const root = repoRoot.replace(/\/+$/, '')
-  const at = root.lastIndexOf('/')
-  return `${root.slice(0, at)}/${root.slice(at + 1)}-worktrees/${branch.replace(/\//g, '-')}`
+export const WORKTREE_SCRIPT = [
+  'dir=$1; branch=$2',
+  'git check-ref-format --branch "$branch" >/dev/null 2>&1 || { echo "error: bad-name"; exit 10; }',
+  'top=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null) && [ -n "$top" ] || { echo "error: not-a-repo"; exit 11; }',
+  'own=$(git -C "$dir" rev-parse --path-format=absolute --git-dir) || exit 11',
+  'common=$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir) || exit 11',
+  'if [ "$own" = "$common" ]; then main=$top',
+  'else',
+  '  wt=$(git --git-dir="$common" config --get core.worktree)',
+  '  if [ -n "$wt" ]; then main=$(cd "$common" && cd "$wt" && pwd -P)',
+  '  elif [ "$(basename "$common")" = .git ]; then main=$(dirname "$common")',
+  '  else echo "error: no-main"; exit 15',
+  '  fi',
+  'fi',
+  `target="$(dirname "$main")/$(basename "$main")-worktrees/$(printf '%s' "$branch" | tr / -)"`,
+  '[ -e "$target" ] && { printf \'error: exists %s\\n\' "$target"; exit 12; }',
+  'if git -C "$dir" rev-parse --verify --quiet "refs/heads/$branch" >/dev/null ||',
+  '  [ -n "$(git -C "$dir" for-each-ref --format=x "refs/remotes/*/$branch")" ]; then',
+  '  out=$(git -C "$dir" worktree add "$target" "$branch" 2>&1)',
+  'else',
+  '  base=$(git -C "$dir" rev-parse --verify HEAD) || { echo "error: no-commit"; exit 13; }',
+  '  out=$(git -C "$dir" worktree add -b "$branch" "$target" "$base" 2>&1)',
+  'fi',
+  `[ $? -eq 0 ] || { printf 'error: git %s\\n' "$(printf '%s\\n' "$out" | grep -E '^(fatal|error):' | tail -n 1)"; exit 14; }`,
+  `printf 'ok %s\\n' "$target"`,
+].join('\n')
+
+/** WORKTREE_SCRIPT's answer: the new worktree, or why there is none, said for a person. */
+export function worktreeResult(stdout: string, branch: string): { dir: string } | { error: string } {
+  const line = stdout.trim().split('\n').pop() ?? ''
+  if (line.startsWith('ok /')) return { dir: line.slice(3) }
+  const why = line.replace(/^error: /, '')
+  if (why === 'bad-name') return { error: `"${branch}" is not a branch name git takes` }
+  if (why === 'not-a-repo') return { error: 'that folder is not in a git repository, so it has no branches' }
+  if (why === 'no-main') return { error: 'git cannot tell where this repository\'s main checkout is; start from the main checkout' }
+  if (why === 'no-commit') return { error: 'that repository has no commit to start a branch from' }
+  if (why.startsWith('exists ')) return { error: `${why.slice(7)} is already there` }
+  if (why.startsWith('git ')) return { error: `git could not make the worktree (${why.slice(4) || 'no reason given'})` }
+  return { error: 'git could not make the worktree' }
 }
