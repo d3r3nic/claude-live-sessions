@@ -135,11 +135,14 @@ const profileEnv = (profile: string, home: string) =>
 export function backgroundCommand(
   s: Pick<ClaudeSession, 'sessionId' | 'startCwd' | 'profile'>,
   home: string,
-  permission: readonly string[],
+  modeFlagWords: readonly string[],
 ): string | undefined {
   const env = profileEnv(s.profile, home)
-  if (!SAFE_ID.test(s.sessionId) || env === undefined || !s.startCwd.startsWith('/')) return undefined
-  const flags = permissionFlags(permission.join(' ')).map(flag => ` ${flag}`).join('')
+  // typed into a shell's line editor: no control character may reach it
+  const isTypeable = !/[\u0000-\u001f\u007f]/.test(s.startCwd + home)
+  if (!SAFE_ID.test(s.sessionId) || env === undefined || !s.startCwd.startsWith('/') || !isTypeable) return undefined
+  if (!modeFlagWords.every(word => FLAG_WORDS.has(word))) return undefined
+  const flags = modeFlagWords.map(flag => ` ${flag}`).join('')
   return `cd ${shellWord(s.startCwd)} && ${env}claude --bg --resume ${s.sessionId}${flags} && ${env}claude attach ${s.sessionId.slice(0, 8)}`
 }
 
@@ -154,6 +157,8 @@ export const TYPE_SCRIPT = [
   '    if (j < 0) continue',
   '    const win = terminal.windows.byId(terminal.windows[w].id())',
   '    const tab = win.tabs[j]',
+  // windows may have moved between the two reads: type only into the tab that still has the tty
+  "    if (tab.tty() !== want) return ''",
   '    terminal.doScript(argv[1], { in: tab })',
   '    win.miniaturized = false',
   '    tab.selected = true',
@@ -165,22 +170,33 @@ export const TYPE_SCRIPT = [
   '}',
 ].join('\n')
 
+/** Prints `yes` when a Terminal.app tab has the tty in argv[0]. Changes nothing. */
+export const HAS_TAB_SCRIPT = [
+  'function run(argv) {',
+  "  return Application('Terminal').windows.tabs.tty().some(tabs => tabs.includes('/dev/' + argv[0])) ? 'yes' : ''",
+  '}',
+].join('\n')
+
 /**
  * Moves a session to the background from its own tab: hangs it up (as a
  * closing terminal does; the tab's shell stays), waits until it has exited,
  * so the resume continues it rather than starting a copy, then types
- * backgroundCommand into that tab. Args: pid, tty, command, TYPE_SCRIPT.
- * Exits 3 when the session cannot be signalled, 4 when it does not exit.
+ * backgroundCommand into that tab and prints `typed`. Args: pid, tty,
+ * command, TYPE_SCRIPT. Exits 3 when it cannot be signalled, 4 when it does
+ * not exit in 20 s, 5 when it exited but the command could not be typed.
  */
 export const MOVE_SCRIPT = [
   'kill -HUP "$1" 2>/dev/null || exit 3',
   'i=0',
-  'while kill -0 "$1" 2>/dev/null; do',
+  // exited but not yet collected by its parent (a zombie) counts as exited
+  'while kill -0 "$1" 2>/dev/null && ! /bin/ps -o stat= -p "$1" | /usr/bin/grep -q "^Z"; do',
   '  i=$((i + 1))',
   '  [ "$i" -gt 100 ] && exit 4',
   '  sleep 0.2',
   'done',
-  '/usr/bin/osascript -l JavaScript -e "$4" "$2" "$3"',
+  'out=$(/usr/bin/osascript -l JavaScript -e "$4" "$2" "$3") || exit 5',
+  '[ "$out" = typed ] || exit 5',
+  'printf typed',
 ].join('\n')
 
 /** BACKGROUND_SCRIPT's answer as a color (`#dfdbc3`), or undefined. */
@@ -192,6 +208,8 @@ export function parseBackground(stdout: string): string | undefined {
 export type Proc = {
   pid: number
   tty: string
+  /** `ps -o stat`: `+` when it is the foreground job of its terminal, `T` when stopped. */
+  stat: string
   /** Start time as `ps -o lstart` prints it under TZ=UTC, spaces collapsed. */
   startText: string
   startedAt: number
@@ -200,7 +218,7 @@ export type Proc = {
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 const PS_LINE =
-  /^\s*(\d+)\s+(\S+)\s+(\w{3}) (\w{3})\s+(\d{1,2}) (\d\d):(\d\d):(\d\d) (\d{4})(?:\s+(.*))?$/
+  /^\s*(\d+)\s+(\S+)\s+(\S+)\s+(\w{3}) (\w{3})\s+(\d{1,2}) (\d\d):(\d\d):(\d\d) (\d{4})(?:\s+(.*))?$/
 
 /** `ps` writes bytes outside printable ASCII as `\ooo`: back to UTF-8 text. */
 export function decodePs(text: string): string {
@@ -210,18 +228,22 @@ export function decodePs(text: string): string {
   })
 }
 
-/** Parses `ps -ww -o pid=,tty=,lstart=,args=` run with LC_ALL=C and TZ=UTC. */
+/** The `ps` columns parsePs reads; run with LC_ALL=C and TZ=UTC. */
+export const PS_COLUMNS = 'pid=,tty=,stat=,lstart=,args='
+
+/** Parses `ps -ww -o PS_COLUMNS` run with LC_ALL=C and TZ=UTC. */
 export function parsePs(stdout: string): Map<number, Proc> {
   const procs = new Map<number, Proc>()
   for (const line of stdout.split('\n')) {
     const m = PS_LINE.exec(line)
     if (!m) continue
-    const [, pid, tty, dow, mon, day, hh, mm, ss, year, args] = m as unknown as string[]
+    const [, pid, tty, stat, dow, mon, day, hh, mm, ss, year, args] = m as unknown as string[]
     const month = MONTHS.indexOf(mon!)
     if (month < 0) continue
     procs.set(Number(pid), {
       pid: Number(pid),
       tty: tty!,
+      stat: stat!,
       startText: `${dow} ${mon} ${Number(day)} ${hh}:${mm}:${ss} ${year}`,
       startedAt: Date.UTC(Number(year), month, Number(day), Number(hh), Number(mm), Number(ss)),
       args: decodePs((args ?? '').trim()),
@@ -302,21 +324,42 @@ export function claudeFromRegistry(
     kind: str(o.kind) || 'interactive',
     profile,
     tty: proc.tty,
+    isForeground: isForeground(proc.stat),
     since: num(o.statusUpdatedAt) || num(o.updatedAt) || num(o.startedAt),
   }
 }
 
-/** The permission flags in a Claude process's arguments: only these, each checked, are carried over. */
-export function permissionFlags(args: string): string[] {
-  const words = args.split(/\s+/)
-  const flags: string[] = []
-  words.forEach((word, at) => {
-    if (word === '--dangerously-skip-permissions' || word === '--allow-dangerously-skip-permissions') flags.push(word)
-    const mode = word === '--permission-mode' ? words[at + 1] : word.startsWith('--permission-mode=') ? word.slice(18) : undefined
-    if (mode !== undefined && /^[A-Za-z]+$/.test(mode)) flags.push('--permission-mode', mode)
-  })
-  return flags
+/** In front of its terminal (`+`), neither stopped (`T`, Ctrl+Z) nor a zombie. */
+export const isForeground = (stat: string) => stat.includes('+') && !/^[TZ]/.test(stat)
+
+/** A Claude Code process, by its command: `claude` itself, or a versioned build of it. */
+export function isClaudeProcess(args: string): boolean {
+  const exe = args.trim().split(/\s+/)[0] ?? ''
+  return exe.split('/').pop() === 'claude' || exe.includes('/claude/versions/')
 }
+
+/**
+ * Prints the permission mode a session last recorded in its transcript
+ * ("$1"): `"permissionMode":"auto"`, or nothing. A prompt's own text is
+ * escaped inside the transcript, so it cannot pass for this record.
+ */
+export const MODE_SCRIPT = `/usr/bin/tail -c 262144 "$1" 2>/dev/null | /usr/bin/grep -o '"permissionMode":"[A-Za-z]*"' | /usr/bin/tail -n 1`
+
+/** The modes `claude --permission-mode` takes, as a session records them. */
+const MODES = new Set(['acceptEdits', 'auto', 'manual', 'dontAsk', 'plan'])
+
+/**
+ * The flags that resume a session with the permission mode it had, from
+ * MODE_SCRIPT's output: none for the default, undefined for a mode this
+ * does not know, which stops the move rather than change its permissions.
+ */
+export function modeFlags(stdout: string): string[] | undefined {
+  const mode = /"permissionMode":"([A-Za-z]*)"/.exec(stdout)?.[1] ?? ''
+  if (mode === '' || mode === 'default') return []
+  if (mode === 'bypassPermissions') return ['--dangerously-skip-permissions']
+  return MODES.has(mode) ? ['--permission-mode', mode] : undefined
+}
+const FLAG_WORDS = new Set(['--dangerously-skip-permissions', '--permission-mode', ...MODES])
 
 const rank = (s: ClaudeSession) => (s.status === 'busy' ? 0 : s.status === 'idle' ? 2 : 1)
 
@@ -843,7 +886,7 @@ export function viewOf(
         state: claudeState(s, o.now),
         where: s.tty === '??' ? 'detached' : s.tty,
         lastActive: s.since,
-        ...(!isSelf && s.kind !== 'bg' && claudeState(s, o.now) === 'idle' && /^ttys\d+$/.test(s.tty) &&
+        ...(!isSelf && s.kind !== 'bg' && s.isForeground && claudeState(s, o.now) === 'idle' && /^ttys\d+$/.test(s.tty) &&
         backgroundCommand(s, o.home, []) !== undefined
           ? { move: { pid: s.pid, tty: s.tty, profile: s.profile, sessionId: s.sessionId, startCwd: s.startCwd } }
           : {}),

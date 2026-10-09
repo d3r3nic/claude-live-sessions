@@ -6,12 +6,17 @@ import {
   BACKGROUND_SCRIPT,
   ENV_SCRIPT,
   FOCUS_SCRIPT,
+  HAS_TAB_SCRIPT,
+  MODE_SCRIPT,
   MOVE_SCRIPT,
+  PS_COLUMNS,
   OPEN_SCRIPT,
   TYPE_SCRIPT,
   attachCommand,
   backgroundCommand,
-  permissionFlags,
+  isClaudeProcess,
+  isForeground,
+  modeFlags,
   PLACE_SCRIPT,
   RECENT_SCRIPT,
   claudeFromRegistry,
@@ -85,6 +90,32 @@ const isUtcEnglish = (env: unknown) => JSON.stringify(env) === JSON.stringify({ 
 const local = (line: string) =>
   line.replace(/ (\d\d):(\d\d):(\d\d) /, (_, h: string, m: string, s: string) => ` ${String((Number(h) + 17) % 24).padStart(2, '0')}:${m}:${s} `)
 
+/** What a test changes about the machine; engine() resets it. */
+const world = {
+  /** A process's `ps` state or command, changed from the fixture. */
+  stat: new Map<number, string>(),
+  args: new Map<number, string>(),
+  /** ttys no Terminal.app tab has any more. */
+  noTab: new Set<string>(),
+  /** What MODE_SCRIPT prints for every transcript. */
+  mode: '"permissionMode":"bypassPermissions"\n',
+  /** How MOVE_SCRIPT ends: its exit code, or `reject` for a run that times out. */
+  move: 0 as number | 'reject',
+}
+const resetWorld = () => {
+  world.stat.clear()
+  world.args.clear()
+  world.noTab.clear()
+  world.mode = '"permissionMode":"bypassPermissions"\n'
+  world.move = 0
+}
+const changed = (pid: number, line: string) => {
+  const stat = world.stat.get(pid)
+  const args = world.args.get(pid)
+  const withStat = stat === undefined ? line : line.replace(/^(\s*\d+\s+\S+\s+)\S+/, `$1${stat}`)
+  return args === undefined ? withStat : withStat.replace(/(\d{4}\s+).*$/, `$1${args}`)
+}
+
 /** The fixture machine: each command line the mod runs, answered as macOS would. */
 function machine(argv: readonly string[], env: unknown): Run {
   const pidsAfter = (flag: string) => (argv[argv.indexOf(flag) + 1] ?? '').split(',').map(Number)
@@ -93,7 +124,7 @@ function machine(argv: readonly string[], env: unknown): Run {
       return ok(PGREP)
     case '/bin/ps': {
       const pids = pidsAfter('-p')
-      const lines = pids.flatMap(pid => (PS_LINES[pid] === undefined ? [] : [PS_LINES[pid]!]))
+      const lines = pids.flatMap(pid => (PS_LINES[pid] === undefined ? [] : [changed(pid, PS_LINES[pid]!)]))
       const text = lines.map(line => (isUtcEnglish(env) ? line : local(line))).join('\n')
       // ps exits 1 when a listed pid has gone, saying nothing on stderr
       return { exitCode: lines.length === pids.length ? 0 : 1, stdout: `${text}\n`, stderr: '' }
@@ -103,7 +134,8 @@ function machine(argv: readonly string[], env: unknown): Run {
       if (argv[2] === PLACE_SCRIPT) {
         return ok(args.map(d => `==> ${d}\n${GIT[d]?.rev ?? ''}--\n${(GIT[d]?.remotes ?? []).map(r => `${r}\n`).join('')}`).join(''))
       }
-      if (argv[2] === MOVE_SCRIPT) return ok('typed\n')
+      if (argv[2] === MOVE_SCRIPT) return world.move === 0 ? ok('typed') : { exitCode: Number(world.move), stdout: '', stderr: '' }
+      if (argv[2] === MODE_SCRIPT) return ok(world.mode)
       if (argv[2] === RECENT_SCRIPT) return ok(args.map(f => `==> ${f}\n${(RECENT[f] ?? []).map(l => `${l}\n`).join('')}`).join(''))
       if (argv[2] !== ENV_SCRIPT) return { exitCode: 2, stdout: '', stderr: 'unexpected script' }
       const pids = (args[0] ?? '').split(',').map(Number)
@@ -114,6 +146,7 @@ function machine(argv: readonly string[], env: unknown): Run {
     case '/usr/bin/osascript':
       if (argv[4] === FOCUS_SCRIPT) return ok(TABS.has(argv[5] ?? '') ? 'shown\n' : '\n')
       if (argv[4] === OPEN_SCRIPT) return ok('opened\n')
+      if (argv[4] === HAS_TAB_SCRIPT) return ok(TABS.has(argv[5] ?? '') && !world.noTab.has(argv[5] ?? '') ? 'yes\n' : '\n')
       if (argv[4] !== BACKGROUND_SCRIPT) return { exitCode: 1, stdout: '', stderr: 'unexpected script' }
       // Terminal.app's tab on ttys022 has the Novel profile's background; the others another
       return ok(argv[5] === 'ttys022' ? 'dfdbc3\n' : argv[5]?.startsWith('ttys') ? '1e1e1e\n' : '\n')
@@ -140,8 +173,14 @@ const dbOf = (argv: readonly string[]) =>
 function engine(
   on: On,
   run: (argv: readonly string[], env: unknown) => Run = machine,
-  { canWrite = true, selfId = 'session-elsewhere', termProgram }: { canWrite?: boolean; selfId?: string; termProgram?: string } = {},
+  {
+    canWrite = true,
+    selfId = 'session-elsewhere',
+    termProgram,
+    moveTakesMs = 0,
+  }: { canWrite?: boolean; selfId?: string; termProgram?: string; moveTakesMs?: number } = {},
 ) {
+  resetWorld()
   on('session.start', async ($, e) => ({ cwd: e.cwd }))
   on('session.id', async () => ({ value: selfId }))
   on('command.register', async ($, e) => ({ value: { command: e.name } }))
@@ -165,6 +204,11 @@ function engine(
     store.set(e.key, e.value)
     return { value: undefined }
   })
+  const toasts: string[] = []
+  on('ui.toast', async ($, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
   const status: (string | undefined)[] = []
   on('ui.status', async ($, e) => {
     status.push(e.text)
@@ -175,6 +219,9 @@ function engine(
   const runs: string[][] = []
   on('process.run', async ($, e) => {
     runs.push([...e.argv])
+    const isMove = e.argv[0] === '/bin/sh' && e.argv[2] === MOVE_SCRIPT
+    if (isMove && moveTakesMs > 0) await clock.sleep(moveTakesMs)
+    if (isMove && world.move === 'reject') return { deny: 'timed out after 40000 ms' }
     return { value: { ...run(e.argv, e.init?.env), isStdoutTruncated: false, isStderrTruncated: false } }
   })
   const files = new Map<string, string>(Object.entries(REGISTRY))
@@ -197,7 +244,7 @@ function engine(
     return { value: undefined }
   })
   const collections = () => runs.filter(r => r[0] === '/usr/bin/pgrep').length
-  return { clock, runs, panes, status, files, store, collections }
+  return { clock, runs, panes, status, toasts, files, store, collections }
 }
 
 const shownOn = async ($: Engine, surface: 'terminal' | 'desktop', columns: number) => {
@@ -453,13 +500,23 @@ describe('collect', () => {
   })
 
   test('moving to the background: the command that resumes it there and attaches its tab', async () => {
-    expect(permissionFlags('claude --dangerously-skip-permissions --permission-mode=plan --model opus')).toEqual([
-      '--dangerously-skip-permissions', '--permission-mode', 'plan',
-    ])
-    expect(permissionFlags('claude --permission-mode $(id) --permission-mode auto')).toEqual(['--permission-mode', 'auto'])
+    // the permission mode comes from the transcript's own record, never from words on a command line
+    expect(modeFlags('"permissionMode":"bypassPermissions"')).toEqual(['--dangerously-skip-permissions'])
+    expect(modeFlags('"permissionMode":"auto"\n')).toEqual(['--permission-mode', 'auto'])
+    expect(modeFlags('')).toEqual([])
+    expect(modeFlags('"permissionMode":"default"')).toEqual([])
+    expect(modeFlags('"permissionMode":"somethingNew"')).toBeUndefined()
+    expect(isForeground('S+')).toBe(true)
+    expect(isForeground('Ss+')).toBe(true)
+    for (const stat of ['T+', 'T', 'S', 'Ss', 'Z+']) expect(isForeground(stat)).toBe(false)
+    expect(isClaudeProcess('claude --dangerously-skip-permissions')).toBe(true)
+    expect(isClaudeProcess('/Users/u/.local/share/claude/versions/2.1.283 --resume x')).toBe(true)
+    for (const args of ['/usr/bin/vim notes.txt', 'zsh', 'node claude.js']) expect(isClaudeProcess(args)).toBe(false)
     const s = { sessionId: 'abc-123', startCwd: '/Users/u/dev', profile: 'claude' }
     expect(backgroundCommand(s, '/Users/u', [])).toBe("cd '/Users/u/dev' && claude --bg --resume abc-123 && claude attach abc-123")
-    expect(backgroundCommand({ ...s, profile: 'claude-work', startCwd: "/Users/u/it's" }, '/Users/u', ['claude --dangerously-skip-permissions'])).toBe(
+    expect(backgroundCommand(s, '/Users/u', ['--model', 'opus'])).toBeUndefined()
+    expect(backgroundCommand({ ...s, startCwd: '/Users/u/a\nrm -rf ~' }, '/Users/u', [])).toBeUndefined()
+    expect(backgroundCommand({ ...s, profile: 'claude-work', startCwd: "/Users/u/it's" }, '/Users/u', ['--dangerously-skip-permissions'])).toBe(
       "cd '/Users/u/it'\\''s' && CLAUDE_CONFIG_DIR='/Users/u/.claude-work' claude --bg --resume abc-123 --dangerously-skip-permissions && CLAUDE_CONFIG_DIR='/Users/u/.claude-work' claude attach abc-123",
     )
     expect(backgroundCommand({ ...s, sessionId: 'a;b' }, '/Users/u', [])).toBeUndefined()
@@ -497,7 +554,7 @@ describe('pane', () => {
 
     // ps reads only the registry's pids and pgrep's codex processes
     expect(runs.find(r => r[0] === '/bin/ps')).toEqual([
-      '/bin/ps', '-ww', '-o', 'pid=,tty=,lstart=,args=', '-p', '101,102,103,999,104,201,202,204,206,207,208,209,210,211',
+      '/bin/ps', '-ww', '-o', PS_COLUMNS, '-p', '101,102,103,999,104,201,202,204,206,207,208,209,210,211',
     ])
     // environments are read for the codex terminals alone, filtered in the pipeline
     expect(runs.find(r => r[0] === '/bin/sh')?.[4]).toBe('201,202,207,208,210,211')
@@ -588,7 +645,7 @@ describe('pane', () => {
     await ui.press({ key: 'bg claude-104' })
     expect(moves()).toEqual([[
       '/bin/sh', '-c', MOVE_SCRIPT, 'sh', '104', 'ttys022',
-      "cd '/Users/u' && CLAUDE_CONFIG_DIR='/Users/u/.claude-work' claude --bg --resume session-104 --dangerously-skip-permissions --permission-mode plan && CLAUDE_CONFIG_DIR='/Users/u/.claude-work' claude attach session-",
+      "cd '/Users/u' && CLAUDE_CONFIG_DIR='/Users/u/.claude-work' claude --bg --resume session-104 --dangerously-skip-permissions && CLAUDE_CONFIG_DIR='/Users/u/.claude-work' claude attach session-",
       TYPE_SCRIPT,
     ]])
     expect((await ui.find({ key: 'bg claude-104' }))?.props.label).toBe('to bg')
@@ -610,6 +667,106 @@ describe('pane', () => {
     files.set(path, JSON.stringify({ ...JSON.parse(files.get(path)!), status: 'busy', statusUpdatedAt: NOW }))
     await ui.press({ key: 'bg claude-104' })
     expect(moves()).toEqual([])
+    await ui.unmount()
+  })
+
+  test('nothing is touched unless the move can finish: each refusal leaves the session alone and says why', async ($, on) => {
+    const { runs, files, toasts } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    const moves = () => runs.filter(r => r[0] === '/bin/sh' && r[2] === MOVE_SCRIPT).length
+    const path = '/Users/u/.claude-work/sessions/104.json'
+    const entry = JSON.parse(files.get(path)!) as Record<string, unknown>
+    const attempt = async (change: () => void, why: RegExp) => {
+      change()
+      await ui.press({ key: 'bg claude-104' })
+      await ui.press({ key: 'bg claude-104' })
+      expect(moves()).toBe(0)
+      expect(toasts.at(-1)).toMatch(why)
+      resetWorld()
+      files.set(path, JSON.stringify(entry))
+    }
+    await attempt(() => world.stat.set(104, 'T+'), /suspended/)
+    await attempt(() => world.noTab.add('ttys022'), /not a Terminal\.app tab/)
+    await attempt(() => world.args.set(104, '/usr/bin/vim notes.txt'), /ended or its process changed/)
+    await attempt(() => files.set(path, JSON.stringify({ ...entry, sessionId: 'session-other' })), /ended or its process changed/)
+    await attempt(() => files.set(path, JSON.stringify({ ...entry, kind: 'bg' })), /no longer idle/)
+    await attempt(() => files.set(path, JSON.stringify({ ...entry, procStart: undefined })), /no start time/)
+    await attempt(() => { world.mode = '"permissionMode":"somethingNew"' }, /permission mode/)
+    // and with nothing in the way, it moves
+    await ui.press({ key: 'bg claude-104' })
+    await ui.press({ key: 'bg claude-104' })
+    expect(moves()).toBe(1)
+    expect(toasts.at(-1)).toMatch(/closing that tab now leaves it running/)
+    await ui.unmount()
+  })
+
+  test('a suspended session is not offered the move at all', async ($, on) => {
+    engine(on, machine, { termProgram: 'Apple_Terminal' })
+    world.stat.set(104, 'T+')
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    expect(await ui.find({ key: 'bg claude-104' })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('a first press on one row is not confirmed by a press on another', async ($, on) => {
+    const { runs, files } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    // WEB CONSOLE idle too, so two rows offer the move
+    const path = '/Users/u/.claude/sessions/101.json'
+    files.set(path, JSON.stringify({ ...JSON.parse(files.get(path)!), status: 'idle' }))
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    const moves = () => runs.filter(r => r[0] === '/bin/sh' && r[2] === MOVE_SCRIPT).map(r => r[4])
+    await ui.press({ key: 'bg claude-101' })
+    await ui.press({ key: 'bg claude-104' })
+    expect(moves()).toEqual([])
+    expect((await ui.find({ key: 'bg claude-104' }))?.props.label).toBe('sure?')
+    expect((await ui.find({ key: 'bg claude-101' }))?.props.label).toBe('to bg')
+    await ui.press({ key: 'bg claude-104' })
+    expect(moves()).toEqual(['104'])
+    await ui.unmount()
+  })
+
+  test('when the move fails after the hang-up, the toast says how to resume it', async ($, on) => {
+    const { toasts } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    const twice = async () => {
+      await ui.press({ key: 'bg claude-104' })
+      await ui.press({ key: 'bg claude-104' })
+    }
+    world.move = 4
+    await twice()
+    expect(toasts.at(-1)).toMatch(/has not exited after 20 s.*claude --resume session-104/)
+    world.move = 5
+    await twice()
+    expect(toasts.at(-1)).toMatch(/could not be typed into ttys022.*claude --bg --resume session-104/)
+    world.move = 'reject'
+    await twice()
+    expect(toasts.at(-1)).toMatch(/resume could not be typed|timed out/)
+    await ui.unmount()
+  })
+
+  test('a second move of the same session while the first runs is refused', { timeoutMs: 4_000 }, async ($, on) => {
+    const { runs, toasts, clock } = engine(on, machine, { termProgram: 'Apple_Terminal', moveTakesMs: 10_000 })
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    const moves = () => runs.filter(r => r[0] === '/bin/sh' && r[2] === MOVE_SCRIPT).length
+    await ui.press({ key: 'bg claude-104' })
+    const first = ui.press({ key: 'bg claude-104' })
+    await clock.settle()
+    await ui.press({ key: 'bg claude-104' })
+    await ui.press({ key: 'bg claude-104' })
+    expect(toasts).toContain('That session is already being moved.')
+    await clock.advance(10_000)
+    await first
+    expect(moves()).toBe(1)
     await ui.unmount()
   })
 

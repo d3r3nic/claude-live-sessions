@@ -2,7 +2,7 @@
 // pipeline, the SQL against Codex's real schema, and one full collection.
 // Run: node --experimental-strip-types tests/host-check.mjs
 // It opens Codex databases read-only, and prints no environment values.
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -64,7 +64,7 @@ try {
 
 // 2. The environment pipeline against node's own reading of `ps -E`
 const codexPids = new Set(runOk(['/usr/bin/pgrep', '-x', 'codex']).split('\n').filter(Boolean).map(Number))
-const procs = c.parsePs(runOk(['/bin/ps', '-ww', '-o', 'pid=,tty=,lstart=,args=', '-p', [...codexPids].join(',') || '1'], PS_ENV))
+const procs = c.parsePs(runOk(['/bin/ps', '-ww', '-o', c.PS_COLUMNS, '-p', [...codexPids].join(',') || '1'], PS_ENV))
 const open = c.codexTerminals(procs, codexPids)
 if (open.length > 0) {
   const pids = open.map(p => p.pid).join(',')
@@ -98,7 +98,7 @@ for (const dir of readdirSync(home).filter(n => /^\.claude(-[\w.-]+)?$/.test(n))
   if (!existsSync(sessions)) continue
   for (const name of readdirSync(sessions)) if (c.registryPid(name) > 0) files.push({ dir, path: join(sessions, name), pid: c.registryPid(name) })
 }
-const all = c.parsePs(runOk(['/bin/ps', '-ww', '-o', 'pid=,tty=,lstart=,args=', '-p', [...new Set([...files.map(f => f.pid), ...codexPids])].join(',')], PS_ENV))
+const all = c.parsePs(runOk(['/bin/ps', '-ww', '-o', c.PS_COLUMNS, '-p', [...new Set([...files.map(f => f.pid), ...codexPids])].join(',')], PS_ENV))
 const claude = c.sortClaude(files.filter(f => all.has(f.pid)).flatMap(f => {
   const row = c.claudeFromRegistry(JSON.parse(readFileSync(f.path, 'utf8')), c.profileOf(f.dir), all, home)
   return row ? [row] : []
@@ -139,7 +139,7 @@ const placedClaude = claude.map(s => ({ ...s, cwd: c.workDir(s.cwd, recentOf(`cl
 const placedCodex = codex.map(s => ({ ...s, cwd: c.workDir(s.cwd, recentOf(`codex-${s.key}`), known) }))
 const places = Object.fromEntries([...placedClaude, ...placedCodex].map(s => [s.cwd, known[s.cwd] ?? { repo: '', name: '', tree: s.cwd, branch: '' }]))
 const snap = { claude: placedClaude, codex: placedCodex, places, checkedAt: now, problems: [] }
-const windowMs = c.windowFrom(process.argv[2] ?? 'all') ?? 0
+const windowMs = c.windowFrom(process.argv.slice(2).find(a => !a.startsWith('--')) ?? 'all') ?? 0
 const view = c.viewOf(snap, { home, now, windowMs, selfId: '' })
 check('every session lands in exactly one tree', view.repos.flatMap(r => r.trees.flatMap(t => t.items)).length === view.shown)
 console.log(`\n${claude.length} Claude · ${codex.length} Codex · showing ${view.shown} of ${view.total} (${c.windowLabel(windowMs)})`)
@@ -160,4 +160,39 @@ if (tabs.length > 0 && process.platform === 'darwin') {
   const found = colors.filter(Boolean)
   check('Terminal.app tab backgrounds read as colors', found.length > 0, `${found.length}/${tabs.length} tabs, e.g. ${found[0]}`)
 }
+// 5. MOVE_SCRIPT itself, on throwaway processes; the typing step is a stand-in that touches no window
+const typed = "function run() { return 'typed' }"
+const untyped = "function run() { return '' }"
+const move = (pid, type) => spawnSync('/bin/sh', ['-c', c.MOVE_SCRIPT, 'sh', String(pid), 'ttys999', 'echo resumed', type], { encoding: 'utf8', timeout: 40_000 })
+const alive = pid => { try { process.kill(pid, 0); return true } catch { return false } }
+{
+  // a hang-up, not a kill: the process gets to run its own shutdown (here, it leaves a mark)
+  const scratch = mkdtempSync(join(tmpdir(), 'live-sessions-hup-'))
+  const mark = join(scratch, 'hung-up')
+  const sleeper = spawn('/bin/sh', ['-c', `trap 'echo yes > "${mark}"; exit 0' HUP; sleep 300 & wait`], { stdio: 'ignore' })
+  await new Promise(r => setTimeout(r, 300))
+  const out = move(sleeper.pid, typed)
+  await new Promise(r => setTimeout(r, 100))
+  check('move: hangs up, waits for the exit, then types', out.status === 0 && out.stdout === 'typed' && !alive(sleeper.pid), `exit ${out.status} "${out.stdout}"`)
+  check('move: the session was hung up, so it shut down on its own terms', existsSync(mark))
+  rmSync(scratch, { recursive: true, force: true })
+}
+{
+  const sleeper = spawn('/bin/sleep', ['300'], { stdio: 'ignore' })
+  await new Promise(r => setTimeout(r, 300))
+  const out = move(sleeper.pid, untyped)
+  check('move: exit 5 when the command could not be typed', out.status === 5, `exit ${out.status}`)
+}
+check('move: exit 3 when there is no such process', move(999999, typed).status === 3)
+if (process.argv.includes('--slow')) {
+  // a process that ignores the hang-up: given up on after 20 s, nothing typed
+  const stubborn = spawn('/bin/sh', ['-c', 'trap "" HUP; sleep 60'], { stdio: 'ignore' })
+  await new Promise(r => setTimeout(r, 300))
+  const out = move(stubborn.pid, typed)
+  check('move: exit 4, nothing typed, when it does not exit in 20 s', out.status === 4 && out.stdout === '', `exit ${out.status}`)
+  stubborn.kill('SIGKILL')
+} else {
+  console.log('skip move exit 4 (20 s): run with --slow')
+}
+
 process.exitCode = failures > 0 ? 1 : 0

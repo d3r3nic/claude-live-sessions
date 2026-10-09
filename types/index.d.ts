@@ -17,6 +17,8 @@ export type ClaudeSession = {
   profile: string
   /** The controlling terminal (`ttys004`), `??` for none. */
   tty: string
+  /** It is the job in front of its terminal: not suspended (Ctrl+Z) and not behind another program. */
+  isForeground: boolean
   /** When the status last changed (its last turn began or ended), ms since the epoch. */
   since: number
 }

@@ -8,7 +8,10 @@ import {
   BACKGROUND_SCRIPT,
   ENV_SCRIPT,
   FOCUS_SCRIPT,
+  HAS_TAB_SCRIPT,
+  MODE_SCRIPT,
   MOVE_SCRIPT,
+  PS_COLUMNS,
   OPEN_SCRIPT,
   TYPE_SCRIPT,
   attachCommand,
@@ -19,6 +22,9 @@ import {
   codexProcFrom,
   codexSessions,
   codexTerminals,
+  isClaudeProcess,
+  isForeground,
+  modeFlags,
   PLACE_SCRIPT,
   RECENT_SCRIPT,
   REPOS_SCOPE,
@@ -103,6 +109,9 @@ const manualOrder = atom({ plugin: 'live-sessions', key: 'order' } as const, {} 
 const registry = new Map<string, { mtimeMs: number; raw: unknown }>()
 let held: { key: string; at: number; byPid: Map<number, string[]> } | undefined
 const placed = new Map<string, { at: number; place: Place }>()
+let recentRead: { key: string; at: number; dirs: Map<string, string[]> } | undefined
+/** How long the working directories sessions recorded are trusted before they are read again. */
+const RECENT_MAX_AGE_MS = 30_000
 /** The refresh under way, which a second caller joins rather than starting another. */
 let inFlight: Promise<void> | undefined
 let lastAttemptAt = 0
@@ -148,7 +157,7 @@ async function heldRollouts($: EngineInterface, pids: readonly number[], now: nu
 }
 
 /** Each directory's repository, worktree and branch: git asked once for all that are not known from the last PLACE_MAX_AGE_MS. */
-async function placesOf($: EngineInterface, dirs: readonly string[], now: number) {
+async function placesOf($: EngineInterface, dirs: readonly string[], now: number, problems: string[]) {
   const wanted = [...new Set(dirs)].filter(dir => dir.startsWith('/'))
   const unknown = wanted.filter(dir => {
     const known = placed.get(dir)
@@ -158,22 +167,34 @@ async function placesOf($: EngineInterface, dirs: readonly string[], now: number
     // a directory outside any repository prints nothing but its header and `--`: a folder of its own
     const out = await $.process
       .run(['/bin/sh', '-c', PLACE_SCRIPT, 'sh', ...unknown], { timeoutMs: 20_000 })
-      .catch(() => undefined)
-    const found = parsePlaces(out?.stdout ?? '')
+      .catch((error: unknown) => ({ exitCode: -1, stdout: '', stderr: message(error) }))
+    const found = parsePlaces(out.stdout)
+    // a failed run is said, and its directories asked again next time rather than kept as plain folders
+    if (out.exitCode !== 0 && found.size < unknown.length) problems.push(`git: ${firstLine(out.stderr) || `exit ${out.exitCode}`}`)
     for (const dir of unknown) {
-      placed.set(dir, { at: now, place: found.get(dir) ?? { repo: '', name: '', tree: dir, branch: '' } })
+      const place = found.get(dir)
+      if (place !== undefined) placed.set(dir, { at: now, place })
     }
   }
-  return Object.fromEntries(wanted.map(dir => [dir, placed.get(dir)!.place] as const))
+  const fallback = (dir: string): Place => ({ repo: '', name: '', tree: dir, branch: '' })
+  return Object.fromEntries(wanted.map(dir => [dir, placed.get(dir)?.place ?? fallback(dir)] as const))
 }
 
-/** The working directories each file records lately, oldest first: one pipeline for all of them. */
-async function recentDirs($: EngineInterface, files: readonly string[]) {
+/**
+ * The working directories each file records lately, oldest first: one
+ * pipeline for all of them, read again at most every RECENT_MAX_AGE_MS
+ * (where a session works moves slowly; the pane in view refreshes faster).
+ */
+async function recentDirs($: EngineInterface, files: readonly string[], now: number) {
   if (files.length === 0) return new Map<string, string[]>()
+  const key = [...files].sort().join('\n')
+  if (recentRead?.key === key && now - recentRead.at < RECENT_MAX_AGE_MS) return recentRead.dirs
   const out = await $.process
     .run(['/bin/sh', '-c', RECENT_SCRIPT, 'sh', ...files], { timeoutMs: 20_000 })
     .catch(() => undefined)
-  return parseRecent(out?.stdout ?? '')
+  const dirs = parseRecent(out?.stdout ?? '')
+  if (out !== undefined) recentRead = { key, at: now, dirs }
+  return dirs
 }
 
 async function codexThreads(
@@ -240,7 +261,7 @@ async function collect($: EngineInterface, home: string, now: number): Promise<S
   const pids = [...new Set([...files.map(f => f.pid), ...codexPids])]
   let procs = new Map<number, Proc>()
   if (pids.length > 0) {
-    const ps = await $.process.run(['/bin/ps', '-ww', '-o', 'pid=,tty=,lstart=,args=', '-p', pids.join(',')], {
+    const ps = await $.process.run(['/bin/ps', '-ww', '-o', PS_COLUMNS, '-p', pids.join(',')], {
       env: PS_ENV,
       timeoutMs: 10_000,
     })
@@ -282,10 +303,10 @@ async function collect($: EngineInterface, home: string, now: number): Promise<S
       return rollout === undefined || rollout === '' ? [] : [[`codex-${s.key}`, rollout] as const]
     }),
   ])
-  const recent = await recentDirs($, [...new Set(fileOf.values())])
+  const recent = await recentDirs($, [...new Set(fileOf.values())], now)
   const recentOf = (key: string) => recent.get(fileOf.get(key) ?? '') ?? []
   const allDirs = [...claudeRows.map(s => s.cwd), ...started.map(s => s.cwd), ...[...recent.values()].flat()]
-  const known = await placesOf($, allDirs, now)
+  const known = await placesOf($, allDirs, now, problems)
   const claude = claudeRows.map(s => ({ ...s, cwd: workDir(s.cwd, recentOf(`claude-${s.pid}`), known) }))
   const codex = started.map(s => ({ ...s, cwd: workDir(s.cwd, recentOf(`codex-${s.key}`), known) }))
   const places = Object.fromEntries(
@@ -389,35 +410,72 @@ async function openSession($: EngineInterface, target: NonNullable<Item['target'
  * that same tab: checked again first (the same process, the same session,
  * still idle), then hung up, resumed in the background and attached there.
  */
+/** Sessions with a move under way: one move at a time per session. */
+const moving = new Set<number>()
+
+/**
+ * Moves an idle Claude session from its terminal tab to the background, in
+ * that same tab. Everything that could stop it is checked before the
+ * session is touched: it is still the same Claude process and session,
+ * idle, in front of its terminal, in a Terminal.app tab, with a permission
+ * mode this knows. Then it is hung up, resumed in the background and
+ * attached there. Whatever goes wrong after the hang-up, the toast says how
+ * to resume it.
+ */
 async function moveToBackground($: EngineInterface, move: NonNullable<Item['move']>) {
+  if (moving.has(move.pid)) {
+    $.ui.toast('That session is already being moved.')
+    return
+  }
+  moving.add(move.pid)
+  try {
+    await moveChecked($, move)
+  } catch (error) {
+    $.ui.toast(`The move stopped: ${message(error)}`)
+  } finally {
+    moving.delete(move.pid)
+  }
+}
+
+async function moveChecked($: EngineInterface, move: NonNullable<Item['move']>) {
   const home = (await $.env.get('HOME')) ?? ''
+  const refuse = (why: string) => $.ui.toast(`Not moved: ${why}.`)
   const raw = await $.fs
     .read(`${home}/.${move.profile}/sessions/${move.pid}.json`)
     .then(text => JSON.parse(text) as unknown)
     .catch(() => undefined)
-  const ps = await $.process.run(['/bin/ps', '-ww', '-o', 'pid=,tty=,lstart=,args=', '-p', String(move.pid)], {
-    env: PS_ENV,
-    timeoutMs: 10_000,
-  })
+  // without its start time the pid could be anyone's
+  if (typeof (raw as { procStart?: unknown } | undefined)?.procStart !== 'string') return refuse('its registry entry has no start time')
+  const ps = await $.process.run(['/bin/ps', '-ww', '-o', PS_COLUMNS, '-p', String(move.pid)], { env: PS_ENV, timeoutMs: 10_000 })
+  const proc = parsePs(ps.stdout).get(move.pid)
+  const still = claudeFromRegistry(raw, move.profile, parsePs(ps.stdout), home)
   const now = await $.clock.now()
-  const procs = parsePs(ps.stdout)
-  const still = claudeFromRegistry(raw, move.profile, procs, home)
-  if (still === undefined || still.sessionId !== move.sessionId || still.kind !== 'interactive' || claudeState(still, now) !== 'idle') {
-    $.ui.toast('That session changed (busy, gone or another process); nothing was moved.')
-    return
+  if (proc === undefined || still === undefined || still.sessionId !== move.sessionId || !isClaudeProcess(proc.args)) {
+    return refuse('that session has ended or its process changed')
   }
-  // the permission flags it runs with now go with it, so it does not stop for approvals it never asked for
-  const command = backgroundCommand(move, home, [procs.get(move.pid)?.args ?? ''])
-  if (command === undefined) return
-  const out = await $.process.run(['/bin/sh', '-c', MOVE_SCRIPT, 'sh', String(move.pid), move.tty, command, TYPE_SCRIPT], {
-    timeoutMs: 40_000,
-  })
+  if (still.kind !== 'interactive' || claudeState(still, now) !== 'idle') return refuse('it is no longer idle')
+  if (!isForeground(proc.stat)) return refuse('it is suspended (Ctrl+Z) or not in front of its terminal; bring it back first')
+  const hasTab = await $.process.run(['/usr/bin/osascript', '-l', 'JavaScript', '-e', HAS_TAB_SCRIPT, proc.tty], { timeoutMs: 10_000 })
+  if (hasTab.stdout.trim() !== 'yes') return refuse(`${proc.tty} is not a Terminal.app tab (tmux, iTerm, VS Code are not supported)`)
+  const transcript = transcriptPath(`${home}/.${move.profile}`, still.startCwd, still.sessionId)
+  const mode = await $.process.run(['/bin/sh', '-c', MODE_SCRIPT, 'sh', transcript], { timeoutMs: 10_000 })
+  const flags = modeFlags(mode.stdout)
+  if (flags === undefined) return refuse('its permission mode is not one this knows')
+  const command = backgroundCommand(still, home, flags)
+  if (command === undefined) return refuse('its id, profile or folder cannot be typed safely')
+  const resume = `cd '${still.startCwd}' && claude --resume ${still.sessionId}`
+  const out = await $.process
+    .run(['/bin/sh', '-c', MOVE_SCRIPT, 'sh', String(move.pid), proc.tty, command, TYPE_SCRIPT], { timeoutMs: 40_000 })
+    .catch((error: unknown) => ({ exitCode: -1, stdout: '', stderr: message(error) }))
   $.ui.toast(
     out.exitCode === 0 && out.stdout.trim() === 'typed'
-      ? `Moving to the background in ${move.tty}: closing that tab now leaves it running.`
-      : out.exitCode === 4
-        ? 'The session did not exit; nothing was resumed.'
-        : `The move did not finish (${firstLine(out.stderr) || `exit ${out.exitCode}`}).`,
+      ? `Moving to the background in ${proc.tty}: closing that tab now leaves it running.`
+      : out.exitCode === 3
+        ? 'Not moved: the session could not be signalled.'
+        : out.exitCode === 4
+          ? `The session has not exited after 20 s; nothing was resumed. If it closes, resume it in its tab: ${resume}`
+          : `The session ended but the resume could not be typed into ${proc.tty}. Resume it there: ${command}`,
+    { timeoutMs: 20_000 },
   )
 }
 

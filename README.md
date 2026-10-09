@@ -10,11 +10,13 @@ A Claude Code plugin (a function-hooks mod) that lists the live Claude Code and 
 - In Terminal.app, a press on a session's title does one of two things:
   - For a session running in a terminal tab, it brings that tab to the front.
   - For a background Claude session, it opens a new window with `claude attach`.
-- `[ to bg ]`, pressed twice, moves an idle Claude session into the background in its own tab. The mod hangs the session up, waits until it exits, then runs `claude --bg --resume <id>` with its permission flags and `claude attach`. After that, closing the tab leaves the session running.
+- `[ to bg ]`, pressed twice, moves an idle Claude session into the background in its own tab. The mod hangs the session up, waits until it exits, then runs `claude --bg --resume <id>` and `claude attach`. The resumed session keeps the permission mode its transcript last recorded. After that, closing the tab leaves the session running.
+  - Before anything is touched, the mod checks that the session is still the same idle Claude process. It must also be in front of its terminal (not suspended with Ctrl+Z) and running in a Terminal.app tab, with a permission mode the mod knows. Otherwise it is not moved, and a toast says why.
+  - Limits: only Terminal.app, not tmux, iTerm or VS Code. Only the permission mode carries over, not `--model` or `--add-dir`. A background task the session itself started ends when it is hung up.
 
 ## Where it reads from
 
-Everything is read-only. Nothing in Claude's or Codex's own files is written.
+Collecting is read-only. Nothing in Claude's or Codex's own files is written. The only writes are the mod's own shared snapshot and its kept settings. The only actions that act on a session are the ones you press: bringing a tab to the front, attaching, and `[ to bg ]`, which ends and relaunches the session you chose.
 
 | What | From |
 | --- | --- |
@@ -49,5 +51,6 @@ To change it, edit this folder, then run `/reload-plugins` in a session.
 claude plugin validate .
 claude plugin test .                                         # 46 tests
 npx -p typescript@5.6.3 tsc -p .                             # after one load, which lays down .claude-plugin/types
-node --experimental-strip-types tests/host-check.mjs [2d]    # on this Mac: SQL, pipelines, a full collection
+node --experimental-strip-types tests/host-check.mjs [2d] [--slow]   # on this Mac: SQL, pipelines, a full collection, the move script on throwaway processes
+node --experimental-strip-types tests/e2e-terminal.mjs       # opens a Terminal window, moves a throwaway session to the background, cleans up
 ```

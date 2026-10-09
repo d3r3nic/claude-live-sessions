@@ -12,25 +12,25 @@ const CODEX_BIN = '/opt/homebrew/lib/node_modules/@openai/codex/vendor/bin/codex
 /** `pgrep -x codex`: every process named codex, terminal or not. */
 export const PGREP = ['201', '202', '204', '206', '207', '208', '209', '210', '211', ''].join('\n')
 
-/** `ps -ww -o pid=,tty=,lstart=,args=` under TZ=UTC, one line per pid. */
+/** `ps -ww -o PS_COLUMNS` under TZ=UTC, one line per pid. */
 export const PS_LINES: Record<number, string> = {
-  101: '  101 ttys004  Fri Oct  9 15:33:30 2026     claude --dangerously-skip-permissions',
-  102: '  102 ??       Thu Oct  8 15:50:35 2026     /Users/u/.local/share/claude/ClaudeCode.app/Contents/MacOS/claude --bg-pty-host',
-  103: '  103 ttys009  Wed Oct  7 09:00:00 2026     /usr/bin/vim notes.txt',
-  104: '  104 ttys022  Thu Oct  8 15:50:35 2026     claude --dangerously-skip-permissions --permission-mode=plan',
-  201: `  201 ttys000  Wed Sep 23 21:54:00 2026     ${CODEX_BIN}`,
-  202: `  202 ttys001  Mon Oct  5 14:00:00 2026     ${CODEX_BIN} resume ${RESUMED}`,
+  101: '  101 ttys004  S+ Fri Oct  9 15:33:30 2026     claude --dangerously-skip-permissions',
+  102: '  102 ??       Ss Thu Oct  8 15:50:35 2026     /Users/u/.local/share/claude/ClaudeCode.app/Contents/MacOS/claude --bg-pty-host',
+  103: '  103 ttys009  S+ Wed Oct  7 09:00:00 2026     /usr/bin/vim notes.txt',
+  104: '  104 ttys022  S+ Thu Oct  8 15:50:35 2026     claude --dangerously-skip-permissions --permission-mode=plan',
+  201: `  201 ttys000  S+ Wed Sep 23 21:54:00 2026     ${CODEX_BIN}`,
+  202: `  202 ttys001  S+ Mon Oct  5 14:00:00 2026     ${CODEX_BIN} resume ${RESUMED}`,
   // the node wrapper is not named codex, so pgrep never lists it
-  203: `  203 ttys001  Mon Oct  5 14:00:00 2026     node /opt/homebrew/bin/codex resume ${RESUMED}`,
-  204: `  204 ??       Mon Oct  5 14:00:00 2026     ${CODEX_BIN} app-server --listen unix://`,
-  206: `  206 ttys003  Wed Sep 23 21:54:10 2026     ${CODEX_BIN} -c model=o3 login`,
-  207: `  207 ttys045  Thu Oct  8 10:00:00 2026     ${CODEX_BIN} resume ${RESUMED_A}`,
-  208: `  208 ttys033  Thu Oct  8 09:00:00 2026     /Applications/My Tools/codex --cd=../projects`,
+  203: `  203 ttys001  S+ Mon Oct  5 14:00:00 2026     node /opt/homebrew/bin/codex resume ${RESUMED}`,
+  204: `  204 ??       Ss Mon Oct  5 14:00:00 2026     ${CODEX_BIN} app-server --listen unix://`,
+  206: `  206 ttys003  S+ Wed Sep 23 21:54:10 2026     ${CODEX_BIN} -c model=o3 login`,
+  207: `  207 ttys045  S+ Thu Oct  8 10:00:00 2026     ${CODEX_BIN} resume ${RESUMED_A}`,
+  208: `  208 ttys033  S+ Thu Oct  8 09:00:00 2026     /Applications/My Tools/codex --cd=../projects`,
   // the desktop app's own codex: no terminal
-  209: '  209 ??       Mon Oct  5 14:00:00 2026     /Applications/ChatGPT.app/Contents/Resources/codex',
-  210: `  210 ttys040  Fri Oct  9 15:00:00 2026     ${CODEX_BIN} exec fix the build`,
+  209: '  209 ??       Ss Mon Oct  5 14:00:00 2026     /Applications/ChatGPT.app/Contents/Resources/codex',
+  210: `  210 ttys040  S+ Fri Oct  9 15:00:00 2026     ${CODEX_BIN} exec fix the build`,
   // a prompt that begins with a subcommand's word is still a session
-  211: `  211 ttys041  Fri Oct  9 15:10:00 2026     ${CODEX_BIN} -m gpt help me read this`,
+  211: `  211 ttys041  S+ Fri Oct  9 15:10:00 2026     ${CODEX_BIN} -m gpt help me read this`,
 }
 
 /** ENV_SCRIPT's output for the codex terminals: pid, CODEX_HOME, PWD. */
@@ -147,7 +147,7 @@ const thread = (fields: Record<string, unknown>) => ({
 
 export const THREADS: Record<string, unknown[]> = {
   '/Users/u/.codex': [
-    thread({ id: RESUMED_A, title: 'can you find the backend', name: 'Find the report writer', updated_at_ms: NOW - 10_000, agents: 2 }),
+    thread({ id: RESUMED_A, title: 'where are reports written', name: 'Find the report writer', updated_at_ms: NOW - 10_000, agents: 2 }),
     thread({ id: HELD, name: 'Execute research', created_at_ms: NOW - 9 * 86_400_000, updated_at_ms: NOW - 9 * 86_400_000 }),
     // newer in the same folder: what matching by folder alone would give 201
     thread({ id: 'g', name: 'Newer in web-app', created_at_ms: NOW - 3 * 86_400_000, updated_at_ms: NOW - 2 * 86_400_000 }),
