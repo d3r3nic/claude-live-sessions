@@ -49,7 +49,7 @@ To change it, edit this folder, then run `/reload-plugins` in a session.
 
 ```sh
 claude plugin validate .
-claude plugin test .                                         # 51 tests
+claude plugin test .                                         # 52 tests
 npx -p typescript@5.6.3 tsc -p .                             # after one load, which lays down .claude-plugin/types
 node --experimental-strip-types tests/host-check.mjs [2d] [--slow]   # on this Mac: SQL, pipelines, a full collection, the move script on throwaway processes
 node --experimental-strip-types tests/e2e-terminal.mjs       # opens a Terminal window, moves a throwaway session to the background, cleans up

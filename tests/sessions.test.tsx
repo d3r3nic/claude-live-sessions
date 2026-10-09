@@ -103,8 +103,10 @@ const world = {
   mode: '"permissionMode":"bypassPermissions"\n',
   /** How MOVE_SCRIPT ends: its exit code, or `reject` for a run that times out. */
   move: 0 as number | 'reject',
-  /** The command of every session's parent. */
-  parent: '-zsh',
+  /** Every session's parent, as `ps -o stat=,comm=` prints it. */
+  parent: 'Ss -zsh',
+  /** PLACE_SCRIPT fails (exit 1, nothing printed). */
+  placeFails: false,
 }
 const resetWorld = () => {
   world.stat.clear()
@@ -112,7 +114,8 @@ const resetWorld = () => {
   world.noTab.clear()
   world.mode = '"permissionMode":"bypassPermissions"\n'
   world.move = 0
-  world.parent = '-zsh'
+  world.parent = 'Ss -zsh'
+  world.placeFails = false
 }
 const changed = (pid: number, line: string) => {
   const stat = world.stat.get(pid)
@@ -129,7 +132,7 @@ function machine(argv: readonly string[], env: unknown): Run {
       return ok(PGREP)
     case '/bin/ps': {
       if (argv.includes('ppid=')) return ok(`${9000 + Number(argv[argv.length - 1])}\n`)
-      if (argv.includes('comm=')) return ok(`${world.parent}\n`)
+      if (argv.includes('stat=,comm=')) return ok(`${world.parent}\n`)
       const pids = pidsAfter('-p')
       const lines = pids.flatMap(pid => (PS_LINES[pid] === undefined ? [] : [changed(pid, PS_LINES[pid]!)]))
       const text = lines.map(line => (isUtcEnglish(env) ? line : local(line))).join('\n')
@@ -138,6 +141,7 @@ function machine(argv: readonly string[], env: unknown): Run {
     }
     case '/bin/sh': {
       const args = argv.slice(4)
+      if (argv[2] === PLACE_SCRIPT && world.placeFails) return { exitCode: 1, stdout: '', stderr: 'fatal: timed out\n' }
       if (argv[2] === PLACE_SCRIPT) {
         return ok(args.map(d => `==> ${d}\n${GIT[d]?.rev ?? ''}--\n${(GIT[d]?.remotes ?? []).map(r => `${r}\n`).join('')}`).join(''))
       }
@@ -711,7 +715,9 @@ describe('pane', () => {
     await attempt(() => files.set(path, JSON.stringify({ ...entry, kind: 'bg' })), /no longer idle/)
     await attempt(() => files.set(path, JSON.stringify({ ...entry, procStart: undefined })), /no start time/)
     await attempt(() => { world.mode = '"permissionMode":"somethingNew"' }, /permission mode/)
-    await attempt(() => { world.parent = 'node' }, /not started directly by a shell/)
+    await attempt(() => { world.parent = 'Ss node' }, /not started directly by an interactive shell/)
+    // a launcher script's interpreter is a shell, but in the foreground job with claude
+    await attempt(() => { world.parent = 'S+ /bin/zsh' }, /not started directly by an interactive shell/)
     // and with nothing in the way, it moves
     await ui.press({ key: 'bg claude-104' })
     await ui.press({ key: 'bg claude-104' })
@@ -1009,6 +1015,21 @@ describe('pane', () => {
     expect(shown).toContain('WEB CONSOLE')
     expect(shown).toContain('Find the report writer')
     expect(shown).not.toContain('! ')
+  })
+
+  test('a failed git run is shown, and asked again after 30 s rather than on every refresh', async ($, on) => {
+    const { runs, clock } = engine(on)
+    world.placeFails = true
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const places = () => runs.filter(r => r[0] === '/bin/sh' && r[2] === PLACE_SCRIPT).length
+    const ran = places()
+    expect((await shownOn($, 'terminal', 90)).join('\n')).toContain('! git: fatal: timed out')
+    // the pane in view refreshes every 4 s: no git run until the 30 s are up
+    await clock.advance(24_000)
+    expect(places()).toBe(ran)
+    await clock.advance(12_000)
+    expect(places()).toBeGreaterThan(ran)
   })
 
   test('a failing sqlite3 is reported in the pane, Claude sessions still shown', async ($, on) => {

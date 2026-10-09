@@ -461,10 +461,17 @@ async function moveChecked($: EngineInterface, move: NonNullable<Item['move']>) 
   }
   if (still.kind !== 'interactive' || claudeState(still, now) !== 'idle') return refuse('it is no longer idle')
   if (!isForeground(proc.stat)) return refuse('it is suspended (Ctrl+Z) or not in front of its terminal; bring it back first')
-  // started by a shell, so the shell is what takes the typed resume once it exits (a launcher script might not be)
+  // started by an interactive shell, so the shell is what takes the typed resume once it exits. A launcher
+  // script's interpreter is a shell too, but it runs in the foreground job with claude; an interactive
+  // shell puts claude in a job of its own and waits outside it (no `+`)
   const ppid = (await $.process.run(['/bin/ps', '-o', 'ppid=', '-p', String(move.pid)], { timeoutMs: 10_000 })).stdout.trim()
-  const parent = /^\d+$/.test(ppid) ? (await $.process.run(['/bin/ps', '-o', 'comm=', '-p', ppid], { timeoutMs: 10_000 })).stdout : ''
-  if (!isShell(parent)) return refuse('it was not started directly by a shell, so the resume could not be typed after it')
+  const parent = /^\d+$/.test(ppid)
+    ? (await $.process.run(['/bin/ps', '-o', 'stat=,comm=', '-p', ppid], { timeoutMs: 10_000 })).stdout.trim()
+    : ''
+  const [parentStat = '', ...parentComm] = parent.split(/\s+/)
+  if (!isShell(parentComm.join(' ')) || parentStat.includes('+')) {
+    return refuse('it was not started directly by an interactive shell, so the resume could not be typed after it')
+  }
   const hasTab = await $.process.run(['/usr/bin/osascript', '-l', 'JavaScript', '-e', HAS_TAB_SCRIPT, proc.tty], { timeoutMs: 10_000 })
   if (hasTab.stdout.trim() !== 'yes') return refuse(`${proc.tty} is not a Terminal.app tab (tmux, iTerm, VS Code are not supported)`)
   const transcript = transcriptPath(`${home}/.${move.profile}`, still.startCwd, still.sessionId)
