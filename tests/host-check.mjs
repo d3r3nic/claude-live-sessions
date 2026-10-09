@@ -305,7 +305,7 @@ if (process.argv.includes('--slow')) {
   mkdirSync(join(repo, 'sub'))
 
   check('worktree: a bad branch name, refused', ['a..b', '-x', '--orphan', 'HEAD', 'a b'].every(b => make(repo, b).result.error?.includes('not a branch name')))
-  check('worktree: a folder outside git, refused', make(scratch, 'feat/x').result.error?.includes('not in a git repository'))
+  check('worktree: a folder outside git, refused', make(scratch, 'feat/x').result.error?.includes('not in a git checkout'))
   const fresh = make(join(repo, 'sub'), 'feat/new')
   check('worktree: a new branch, from a subfolder, beside the main checkout', fresh.result.dir === `${scratch}/app-worktrees/feat-new` && branchOf(fresh.result.dir) === 'feat/new' && head(fresh.result.dir) === head(repo), fresh.result.dir?.slice(scratch.length) ?? fresh.result.error)
   const old = make(repo, 'feat/old')
@@ -338,6 +338,13 @@ if (process.argv.includes('--slow')) {
   // from its linked worktree git cannot say where the checkout is: refused, never put by the git store
   const sepAgain = make(sep.result.dir ?? scratch, 'feat/sep2')
   check('worktree: from a separate git dir\'s worktree, refused', sepAgain.result.error?.includes('main checkout') === true, sepAgain.result.error)
+  // the repository's own hooks never run: the engine keeps them off for git, and so does the script
+  const hooked = newRepo(join(scratch, 'hooked'))
+  mkdirSync(join(hooked, '.husky'))
+  writeFileSync(join(hooked, '.husky/post-checkout'), `#!/bin/sh\ntouch "${scratch}/HOOK-RAN"\n`, { mode: 0o755 })
+  git('-C', hooked, 'config', 'core.hooksPath', '.husky')
+  const viaHook = make(hooked, 'feat/h')
+  check('worktree: the repository\'s hooks do not run', viaHook.result.dir !== undefined && !existsSync(join(scratch, 'HOOK-RAN')), viaHook.result.error)
   rmSync(scratch, { recursive: true, force: true })
 }
 

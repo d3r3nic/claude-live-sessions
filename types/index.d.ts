@@ -68,9 +68,10 @@ export type Workspace = {
   createdAt: number
   /**
    * Sessions assigned to it that run outside its tmux session, by a lasting
-   * id: `claude:<session id>` or `codex:<thread id>`.
+   * id: `claude:<session id>` or `codex:<thread id>`. An entry in another
+   * form (a hand edit, a later version) is kept as it is.
    */
-  members?: string[]
+  members?: unknown[]
 }
 
 export type Snapshot = {

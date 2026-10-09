@@ -51,7 +51,7 @@ export function parseWorkspaceArgs(args: string, envs: readonly string[], home: 
       if (branch === '') return { action: 'help', error: `${word} needs a branch name` }
     } else if (word.startsWith('--branch=')) {
       branch = word.slice('--branch='.length)
-    } else if (word.startsWith('-')) {
+    } else if (word.startsWith('--')) {
       return { action: 'help', error: `"${word}" is not an option /workspace takes` }
     } else {
       nameWords.push(word)
@@ -186,7 +186,7 @@ export function workspacesFrom(raw: unknown): Workspace[] {
       typeof o.createdAt === 'number'
   }).map(ws => {
     // a member this does not read (a hand edit, a later format) is kept as it is and never costs the workspace
-    const members = Array.isArray(ws.members) ? ws.members.filter((m): m is string => typeof m === 'string') : undefined
+    const members: unknown[] | undefined = Array.isArray(ws.members) ? ws.members : undefined
     const { members: _, ...rest } = ws
     return members !== undefined && members.length > 0 ? { ...rest, members } : rest
   })
@@ -208,32 +208,34 @@ export function assigned(list: readonly Workspace[], member: string, id: string)
  * repository's main checkout, in `<checkout>-worktrees/<branch>`, each `/` a
  * `-`. From the main checkout that is its top folder (so a submodule or a
  * separate git dir is placed right); from a linked worktree, the checkout its
- * shared git dir belongs to, or a refusal when git cannot tell. A branch there already,
+ * shared git dir belongs to, or a refusal when git cannot tell. The
+ * repository's own hooks and fsmonitor never run, as when git is run directly. A branch there already,
  * here or on a remote, is checked out (a remote one tracked); a new branch
  * starts from the folder's own commit.
  */
 export const WORKTREE_SCRIPT = [
   'dir=$1; branch=$2',
-  'git check-ref-format --branch "$branch" >/dev/null 2>&1 || { echo "error: bad-name"; exit 10; }',
-  'top=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null) && [ -n "$top" ] || { echo "error: not-a-repo"; exit 11; }',
-  'own=$(git -C "$dir" rev-parse --path-format=absolute --git-dir) || exit 11',
-  'common=$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir) || exit 11',
+  'g() { git -c core.hooksPath=/dev/null -c core.fsmonitor= "$@"; }',
+  'g check-ref-format --branch "$branch" >/dev/null 2>&1 || { echo "error: bad-name"; exit 10; }',
+  'top=$(g -C "$dir" rev-parse --show-toplevel 2>/dev/null) && [ -n "$top" ] || { echo "error: not-a-repo"; exit 11; }',
+  'own=$(g -C "$dir" rev-parse --path-format=absolute --git-dir) || exit 11',
+  'common=$(g -C "$dir" rev-parse --path-format=absolute --git-common-dir) || exit 11',
   'if [ "$own" = "$common" ]; then main=$top',
   'else',
-  '  wt=$(git --git-dir="$common" config --get core.worktree)',
+  '  wt=$(g --git-dir="$common" config --get core.worktree)',
   '  if [ -n "$wt" ]; then main=$(cd "$common" && cd "$wt" && pwd -P)',
   '  elif [ "$(basename "$common")" = .git ]; then main=$(dirname "$common")',
-  '  else echo "error: no-main"; exit 15',
   '  fi',
   'fi',
+  'case $main in /*) ;; *) echo "error: no-main"; exit 15;; esac',
   `target="$(dirname "$main")/$(basename "$main")-worktrees/$(printf '%s' "$branch" | tr / -)"`,
   '[ -e "$target" ] && { printf \'error: exists %s\\n\' "$target"; exit 12; }',
-  'if git -C "$dir" rev-parse --verify --quiet "refs/heads/$branch" >/dev/null ||',
-  '  [ -n "$(git -C "$dir" for-each-ref --format=x "refs/remotes/*/$branch")" ]; then',
-  '  out=$(git -C "$dir" worktree add "$target" "$branch" 2>&1)',
+  'if g -C "$dir" rev-parse --verify --quiet "refs/heads/$branch" >/dev/null ||',
+  '  [ -n "$(g -C "$dir" for-each-ref --format=x "refs/remotes/*/$branch")" ]; then',
+  '  out=$(g -C "$dir" worktree add "$target" "$branch" 2>&1)',
   'else',
-  '  base=$(git -C "$dir" rev-parse --verify HEAD) || { echo "error: no-commit"; exit 13; }',
-  '  out=$(git -C "$dir" worktree add -b "$branch" "$target" "$base" 2>&1)',
+  '  base=$(g -C "$dir" rev-parse --verify HEAD) || { echo "error: no-commit"; exit 13; }',
+  '  out=$(g -C "$dir" worktree add -b "$branch" "$target" "$base" 2>&1)',
   'fi',
   `[ $? -eq 0 ] || { printf 'error: git %s\\n' "$(printf '%s\\n' "$out" | grep -E '^(fatal|error):' | tail -n 1)"; exit 14; }`,
   `printf 'ok %s\\n' "$target"`,
@@ -245,7 +247,7 @@ export function worktreeResult(stdout: string, branch: string): { dir: string } 
   if (line.startsWith('ok /')) return { dir: line.slice(3) }
   const why = line.replace(/^error: /, '')
   if (why === 'bad-name') return { error: `"${branch}" is not a branch name git takes` }
-  if (why === 'not-a-repo') return { error: 'that folder is not in a git repository, so it has no branches' }
+  if (why === 'not-a-repo') return { error: 'that folder is not in a git checkout, so it has no branches' }
   if (why === 'no-main') return { error: 'git cannot tell where this repository\'s main checkout is; start from the main checkout' }
   if (why === 'no-commit') return { error: 'that repository has no commit to start a branch from' }
   if (why.startsWith('exists ')) return { error: `${why.slice(7)} is already there` }

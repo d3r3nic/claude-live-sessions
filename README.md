@@ -21,9 +21,10 @@ A workspace is a project with your own name. It has a folder, an environment, an
 - In the pane, `+ workspace` opens a form: a name, a folder, the environment (a list of the ones on this Mac) and, optionally, a new branch. `+ ws` on any branch or folder row opens it with that folder filled in.
 - `/workspace new <folder> <env> <name> [--branch <branch>]` does the same from the prompt, for example `/workspace new ~/code/app work Practice RBAC`. `--branch=<branch>` and `-b <branch>` work too.
 - A folder is an absolute path or starts with `~/`, in the form and the command alike.
-- With a branch, the workspace gets that branch's own worktree beside the repository's main checkout, `<checkout>-worktrees/<branch>` (each `/` a `-`), even when the folder is itself a worktree or a submodule.
+- With a branch, the workspace gets that branch's own worktree beside the repository's main checkout, `<checkout>-worktrees/<branch>` (each `/` a `-`), even when the folder is itself a worktree or a submodule. A submodule's worktrees therefore sit inside the parent repository, which lists them as untracked.
   - A new branch starts from the commit of the folder you chose. For `+ ws` on a branch's row, that is that branch.
   - A branch already there is checked out, and one only on a remote is checked out tracking it.
+  - The repository's own git hooks do not run while the worktree is made, as when the mod runs git itself.
   - A worktree folder already there is refused, as is a folder whose main checkout git cannot find (a linked worktree of a repository with a separate git dir). The worktree is made by a script that `tests/host-check.mjs` runs for real on throwaway repositories.
 - Create is taken once: a second press, or Enter, while one is being made, does not make another.
 - What the form or the command makes: it saves the workspace, then opens a Terminal window on tmux session `ws-<id>` (`<id>` is the name in lowercase with dashes, e.g. `ws-practice-rbac`), with a `claude` window and a `codex` window in that folder.
@@ -77,7 +78,7 @@ To change it, edit this folder, then run `/reload-plugins` in a session.
 
 ```sh
 claude plugin validate .
-claude plugin test .                                         # 74 tests
+claude plugin test .                                         # 75 tests
 npx -p typescript@5.6.3 tsc -p .                             # after one load, which lays down .claude-plugin/types
 node --experimental-strip-types tests/host-check.mjs [2d] [--slow]   # on this Mac: SQL, pipelines, a full collection, the move script on throwaway processes, workspaces on a private tmux server, the worktree script on throwaway repositories
 E2E_TRUSTED_DIR=<a trusted folder> node --experimental-strip-types tests/e2e-terminal.mjs    # a Terminal window: move a throwaway session to the background

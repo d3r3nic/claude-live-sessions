@@ -1144,6 +1144,8 @@ describe('workspaces', () => {
     expect(parseWorkspaceArgs('new /x work Name --branch=feat/a', ['work'], HOME)).toMatchObject({ name: 'Name', branch: 'feat/a' })
     expect(parseWorkspaceArgs('new /x work -b feat/a Name', ['work'], HOME)).toMatchObject({ name: 'Name', branch: 'feat/a' })
     expect(parseWorkspaceArgs('new /x work Name --brnach feat/a', ['work'], HOME)).toEqual({ action: 'help', error: '"--brnach" is not an option /workspace takes' })
+    // a dash word is part of a name
+    expect(parseWorkspaceArgs('new /x work RBAC - phase -2', ['work'], HOME)).toMatchObject({ name: 'RBAC - phase -2', branch: '' })
     // a folder is absolute or starts with ~/; ~name (another person's home) is neither
     for (const folder of ['dev/web-app', '~u/web-app', './web-app']) {
       expect(parseWorkspaceArgs(`new ${folder} work Name`, ['work'], HOME)).toEqual({ action: 'help', error: 'the folder must be absolute or start with ~/' })
@@ -1378,8 +1380,10 @@ describe('workspaces, from the pane', () => {
     expect(moved.map(w => w.members ?? [])).toEqual([[], ['claude:session-104']])
     expect(assigned(moved, 'claude:session-104', '')).toEqual(two)
     // a member this does not read is kept, and never costs the workspace
-    expect(workspacesFrom({ workspaces: [{ ...practice, members: ['claude:x', 'gemini:abc', 5] }, { ...practice, id: 'empty', members: [] }] }))
-      .toEqual([{ ...practice, members: ['claude:x', 'gemini:abc'] }, { ...practice, id: 'empty' }])
+    const later = { tool: 'gemini', id: 'abc' }
+    expect(workspacesFrom({ workspaces: [{ ...practice, members: ['claude:x', 'gemini:abc', later] }, { ...practice, id: 'empty', members: [] }] }))
+      .toEqual([{ ...practice, members: ['claude:x', 'gemini:abc', later] }, { ...practice, id: 'empty' }])
+    expect(assigned([{ ...practice, members: [later] }], 'claude:x', 'practice-rbac')[0]!.members).toEqual([later, 'claude:x'])
   })
 
   test('an assigned session groups under its workspace, tagged; running in its tmux session wins', async () => {
@@ -1441,7 +1445,7 @@ describe('workspaces, from the pane', () => {
     expect(await run('new ~/dev/web-app work Old --branch feat/old')).toMatch(/^Created Old \(work, \/Users\/u\/dev\/web-app-worktrees\/feat-old\)/)
     expect(runs.filter(r => r[2] === WORKTREE_SCRIPT).map(r => r.slice(4))).toEqual([['/Users/u/dev/web-app', 'feat/old']])
     expect(await run('new ~/dev/web-app work Bad --branch a..b')).toBe('Not done: "a..b" is not a branch name git takes.')
-    expect(await run('new ~ work Out --branch feat/x')).toBe('Not done: that folder is not in a git repository, so it has no branches.')
+    expect(await run('new ~ work Out --branch feat/x')).toBe('Not done: that folder is not in a git checkout, so it has no branches.')
     expect(await run('new ~/dev/web-app work Again --branch feat/old')).toBe('Not done: /Users/u/dev/web-app-worktrees/feat-old is already there.')
   })
 
@@ -1504,6 +1508,21 @@ describe('workspaces, from the pane', () => {
     expect(runs.filter(r => r[2] === WORKTREE_SCRIPT)).toHaveLength(1)
     expect(runs.filter(r => r[4] === OPEN_SCRIPT)).toHaveLength(1)
     await ui.unmount()
+  })
+
+  test('a reload of the plugin while a create is cut off never holds the next create back', { timeoutMs: 4_000 }, async ($, on) => {
+    const { files, clock } = engine(on, machine, { termProgram: 'Apple_Terminal', worktreeTakesMs: 5_000 })
+    await $.session.start(START)
+    const run = (args: string) => $.command.run({ ...SESSIONS, command: 'workspace', args })
+    const cut = run('new ~/dev/web-app work Cut --branch feat/cut')
+    await clock.settle()
+    expect((await run('new ~/dev/web-app work Waits')).text).toBe('Not done: a workspace is already being made.')
+    // the plugin loads again (register runs, session.start fires): the flag of the cut-off create goes
+    await $.session.start(START)
+    expect((await run('new ~/dev/web-app work After')).text).toMatch(/^Created After/)
+    await clock.advance(5_000)
+    await cut
+    expect(JSON.parse(files.get(WORKSPACES)!).workspaces.map((w: Workspace) => w.id)).toContain('after')
   })
 
   test('⊕ on a session assigns it to a workspace from the pane, and none unassigns it', async ($, on) => {

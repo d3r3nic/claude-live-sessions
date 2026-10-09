@@ -761,6 +761,8 @@ async function tick($: EngineInterface, hasStatusLine: boolean) {
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
+    // a create cut off by a reload of the plugin never holds the next one back
+    await update($, creating, () => false)
     await $.command.register({
       name: 'sessions',
       description: 'Show or hide the live Claude Code and Codex sessions on this Mac',
