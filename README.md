@@ -18,16 +18,20 @@ A Claude Code plugin (a function-hooks mod) that lists the live Claude Code and 
 
 A workspace is a project with your own name. It has a folder, an environment, and one tmux session with Claude and Codex in it.
 
-- `/workspace new <folder> [<env>] <name>`, for example `/workspace new ~/code/app work Practice RBAC`. It saves the workspace, then opens a Terminal window on tmux session `ws-<name>`, with a `claude` window and a `codex` window in that folder.
-- `<env>` picks the accounts the agents start under:
-  - `default` (or no env given) uses `~/.claude` and `~/.codex`.
+- `/workspace new <folder> <env> <name>`, for example `/workspace new ~/code/app work Practice RBAC`. It saves the workspace, then opens a Terminal window on tmux session `ws-<id>` (`<id>` is the name in lowercase with dashes, e.g. `ws-practice-rbac`), with a `claude` window and a `codex` window in that folder.
+- `<env>` is required, and picks the accounts the agents start under:
+  - `default` uses `~/.claude` and `~/.codex`.
   - `work` uses `~/.claude-work` and `~/.codex-work`, through `CLAUDE_CONFIG_DIR` and `CODEX_HOME`.
-  The environments offered are the ones found on this Mac.
-- Agents start without the variables a Claude Code session sets for its children, so their transcripts are kept. When an agent exits, its window leaves a shell.
-- Closing the window only detaches, and both agents keep running. `/workspace open <name>`, or `[open]` in the pane, brings it back: it focuses a Terminal tab already attached, or opens a new one.
+  An environment is offered only when both its Claude and Codex profiles exist, and a misspelt one is an error, never another account.
+- Each agent starts with Claude Code's session variables and any inherited `CLAUDE_CONFIG_DIR` or `CODEX_HOME` cleared, so its transcript is kept and it runs on its own environment's account. When an agent exits, its window leaves a shell.
+- Closing the window only detaches, and both agents keep running. `/workspace open <name>`, or `[open]` in the pane, brings it back:
+  - It focuses a Terminal tab already attached, or opens a new one.
+  - From inside tmux, it switches that terminal to the workspace.
+  - In another terminal app, it gives the command to run.
+  It refuses a folder that is gone, and a running `ws-<id>` session that was not started for this workspace. A new workspace never reuses the name of a session already running.
 - The pane lists workspaces first, each with its agents (whatever runs in its tmux session) and a running or stopped state. Pressing an agent selects its tmux window.
-- `/workspace rm <name>` forgets a workspace. Its tmux session keeps running until `tmux kill-session -t ws-<name>`.
-- The list is kept in `~/Library/Application Support/live-sessions/workspaces.json`, which every profile's sessions read. Workspaces need tmux, and opening one from the pane needs Terminal.app; elsewhere the toast gives the command to run.
+- `/workspace rm <name>` forgets a workspace. Its tmux session keeps running until `tmux kill-session -t ws-<id>`.
+- The list is kept in `~/Library/Application Support/live-sessions/workspaces.json`, which every profile's sessions read. If that file can't be read, it is reported and never overwritten. Workspaces need tmux.
 
 ## Where it reads from
 
@@ -64,7 +68,7 @@ To change it, edit this folder, then run `/reload-plugins` in a session.
 
 ```sh
 claude plugin validate .
-claude plugin test .                                         # 59 tests
+claude plugin test .                                         # 65 tests
 npx -p typescript@5.6.3 tsc -p .                             # after one load, which lays down .claude-plugin/types
 node --experimental-strip-types tests/host-check.mjs [2d] [--slow]   # on this Mac: SQL, pipelines, a full collection, the move script on throwaway processes
 E2E_TRUSTED_DIR=<a trusted folder> node --experimental-strip-types tests/e2e-terminal.mjs    # a Terminal window: move a throwaway session to the background

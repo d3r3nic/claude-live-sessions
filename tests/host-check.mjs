@@ -3,7 +3,7 @@
 // Run: node --experimental-strip-types tests/host-check.mjs
 // It opens Codex databases read-only, and prints no environment values.
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { registerHooks } from 'node:module'
@@ -238,10 +238,14 @@ if (process.argv.includes('--slow')) {
   const socket = `live-sessions-check-${process.pid}`
   const scratch = mkdtempSync(join(tmpdir(), 'live-sessions-ws-'))
   const record = tool => `sh -c 'env > "${scratch}/${tool}.env"; pwd > "${scratch}/${tool}.pwd"; sleep 30'`
-  const ws = { id: 'check', env: 'checkenv', dir: scratch }
+  const ws = { id: 'check', env: 'checkenv', dir: scratch, createdAt: 1234 }
   const line = w.openCommand(ws, home, { socket, attach: false, bins: { claude: record('claude'), codex: record('codex') } })
-  // run as a terminal would: by the person's shell, here carrying this session's own markers on purpose
-  spawnSync(process.env.SHELL ?? '/bin/zsh', ['-c', line], { encoding: 'utf8', env: { ...process.env, CLAUDECODE: '1', CLAUDE_CODE_CHILD_SESSION: '1' } })
+  // run as a terminal would: by the person's shell, here carrying this session's own markers and
+  // another account's config directories on purpose, which the tmux server then holds for every pane
+  spawnSync(process.env.SHELL ?? '/bin/zsh', ['-c', line], {
+    encoding: 'utf8',
+    env: { ...process.env, CLAUDECODE: '1', CLAUDE_CODE_CHILD_SESSION: '1', CLAUDE_CONFIG_DIR: '/wrong/claude', CODEX_HOME: '/wrong/codex' },
+  })
   for (let i = 0; i < 30 && !(existsSync(`${scratch}/claude.env`) && existsSync(`${scratch}/codex.env`)); i++) await new Promise(r => setTimeout(r, 200))
   const panes = w.parsePanes(spawnSync('tmux', ['-L', socket, 'list-panes', '-a', '-F', w.PANES_FORMAT], { encoding: 'utf8' }).stdout)
   const windows = Object.values(panes).filter(p => p.session === 'ws-check').map(p => p.window).sort()
@@ -252,10 +256,21 @@ if (process.argv.includes('--slow')) {
   check('workspace: Claude under its environment\'s config directory', env('claude').includes(`CLAUDE_CONFIG_DIR=${home}/.claude-checkenv`))
   check('workspace: Codex under its environment\'s home', env('codex').includes(`CODEX_HOME=${home}/.codex-checkenv`))
   check('workspace: no Claude Code session markers reach the agents', !/^(CLAUDECODE|CLAUDE_CODE_CHILD_SESSION)=/m.test(env('claude') + env('codex')))
+  check('workspace: marked as started for this workspace', spawnSync('tmux', ['-L', socket, 'show-options', '-t', 'ws-check', '-qv', w.OWNER_OPTION], { encoding: 'utf8' }).stdout.trim() === '1234')
+  // a default workspace on the same server, whose global environment holds another account, in a folder with # in its name
+  const hashed = join(scratch, 'C#{session_name}')
+  mkdirSync(hashed)
+  const record2 = tool => `sh -c 'env > "${scratch}/d-${tool}.env"; pwd > "${scratch}/d-${tool}.pwd"; sleep 30'`
+  spawnSync(process.env.SHELL ?? '/bin/zsh', ['-c', w.openCommand({ id: 'check2', env: '', dir: hashed, createdAt: 5 }, home, { socket, attach: false, bins: { claude: record2('claude'), codex: record2('codex') } })], { encoding: 'utf8' })
+  for (let i = 0; i < 30 && !(existsSync(`${scratch}/d-claude.env`) && existsSync(`${scratch}/d-codex.env`)); i++) await new Promise(r => setTimeout(r, 200))
+  const denv = existsSync(`${scratch}/d-claude.env`) ? readFileSync(`${scratch}/d-claude.env`, 'utf8') + readFileSync(`${scratch}/d-codex.env`, 'utf8') : 'missing'
+  check('workspace: a default one runs under no other account, whatever the tmux server holds', !/^(CLAUDE_CONFIG_DIR|CODEX_HOME)=/m.test(denv))
+  const dpwd = existsSync(`${scratch}/d-claude.pwd`) ? readFileSync(`${scratch}/d-claude.pwd`, 'utf8').trim() : ''
+  check('workspace: a folder with # in its name is the folder it starts in', dpwd.endsWith('C#{session_name}'), dpwd.split('/').pop())
   // opened again while it runs: nothing new is created
   spawnSync(process.env.SHELL ?? '/bin/zsh', ['-c', line], { encoding: 'utf8' })
   const again = Object.values(w.parsePanes(spawnSync('tmux', ['-L', socket, 'list-panes', '-a', '-F', w.PANES_FORMAT], { encoding: 'utf8' }).stdout)).length
-  check('workspace: opening it again creates nothing more', again === 2, `${again} panes`)
+  check('workspace: opening it again creates nothing more', again === 4, `${again} panes in two workspaces`)
   spawnSync('tmux', ['-L', socket, 'kill-server'])
   // kill-server leaves its socket file behind
   rmSync(join(process.env.TMUX_TMPDIR ?? '/tmp', `tmux-${process.getuid()}`, socket), { force: true })

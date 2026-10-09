@@ -23,7 +23,7 @@ const w = await import('../hooks/workspaces.ts')
 
 const HOME = process.env.HOME
 const WORK = mkdtempSync(join(process.env.E2E_TRUSTED_DIR ?? process.cwd(), 'live-sessions-ws-'))
-const ws = { id: `e2e-${process.pid}`, env: '', dir: WORK }
+const ws = { id: `e2e-${process.pid}`, env: '', dir: WORK, createdAt: Date.now() }
 const session = w.tmuxName(ws)
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 const tmux = (...args) => spawnSync('tmux', args, { encoding: 'utf8' })
@@ -46,6 +46,7 @@ try {
   check('opened: claude and codex run in its tmux session', /\bclaude\b/.test(running.claude ?? '') && /\bcodex\b/.test(running.codex ?? ''), Object.keys(running).join(','))
   const clients = w.parseClients(tmux('list-clients', '-F', w.CLIENTS_FORMAT).stdout)[session] ?? []
   check('a Terminal window is attached to it', clients.length === 1, clients.join(','))
+  check('its tmux session is marked as this workspace\'s', tmux('show-options', '-t', session, '-qv', w.OWNER_OPTION).stdout.trim() === String(ws.createdAt))
   // closing the window hangs up its tmux client
   const client = spawnSync('/bin/ps', ['-t', clients[0] ?? 'none', '-o', 'pid=,args='], { encoding: 'utf8' }).stdout.split('\n').find(l => /tmux attach/.test(l))?.trim().split(/\s+/)[0]
   if (client) process.kill(Number(client), 'SIGHUP')

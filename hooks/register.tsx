@@ -7,6 +7,7 @@ import {
   PANES_FORMAT,
   envsFrom,
   findWorkspace,
+  OWNER_OPTION,
   openCommand,
   parseClients,
   parsePanes,
@@ -104,6 +105,7 @@ const EMPTY: Snapshot = {
 }
 /** The workspaces, kept where every profile's sessions read them. */
 const workspacesPath = (home: string) => `${home}/Library/Application Support/live-sessions/workspaces.json`
+const UNREADABLE = 'its list cannot be read; fix or move ~/Library/Application Support/live-sessions/workspaces.json'
 const snapshot = atom({ plugin: 'live-sessions', key: 'snapshot' } as const, EMPTY)
 /**
  * The pane is painted in the terminal's own background: the engine fills a
@@ -340,7 +342,9 @@ async function collect($: EngineInterface, home: string, now: number): Promise<S
   const candidates = homeEntries.filter(d => d.kind === 'dir' && /^\.(claude|codex)(-[a-z0-9][a-z0-9_.-]*)?$/i.test(d.name)).map(d => d.name)
   const profiles = await profileDirs($, home, candidates)
   const envs = envsFrom(candidates, name => profiles.has(name))
-  const [workspaces, tmux] = await Promise.all([readWorkspaces($, home), tmuxState($)])
+  const [kept, tmux] = await Promise.all([readWorkspaces($, home), tmuxState($)])
+  if (!kept.isReadable) problems.push(`workspaces: ${UNREADABLE}`)
+  const workspaces = kept.list
 
   return { claude, codex, places, workspaces, envs, tmux, checkedAt: now, problems }
 }
@@ -354,12 +358,28 @@ const isSnapshot = (v: unknown): v is Snapshot => {
   )
 }
 
-async function readWorkspaces($: EngineInterface, home: string): Promise<Workspace[]> {
-  return workspacesFrom(await $.fs.read(workspacesPath(home)).then(text => JSON.parse(text) as unknown).catch(() => null))
+/** The workspaces; `isReadable` false when the file is there but is not one, which nothing then overwrites. */
+async function readWorkspaces($: EngineInterface, home: string): Promise<{ list: Workspace[]; isReadable: boolean }> {
+  const text = await $.fs.read(workspacesPath(home)).catch(() => undefined)
+  if (text === undefined) return { list: [], isReadable: true }
+  try {
+    const raw = JSON.parse(text) as unknown
+    return { list: workspacesFrom(raw), isReadable: Array.isArray((raw as { workspaces?: unknown } | null)?.workspaces) }
+  } catch {
+    return { list: [], isReadable: false }
+  }
 }
 
-async function writeWorkspaces($: EngineInterface, home: string, workspaces: readonly Workspace[]) {
-  await $.fs.write(workspacesPath(home), `${JSON.stringify({ version: 1, workspaces }, null, 2)}\n`)
+/**
+ * Changes the workspaces as they are now: read again just before writing,
+ * so a change another session made meanwhile is kept. Refuses (false) a
+ * file it cannot read rather than replace it.
+ */
+async function changeWorkspaces($: EngineInterface, home: string, change: (list: Workspace[]) => Workspace[]) {
+  const now = await readWorkspaces($, home)
+  if (!now.isReadable) return false
+  await $.fs.write(workspacesPath(home), `${JSON.stringify({ version: 1, workspaces: change(now.list) }, null, 2)}\n`)
+  return true
 }
 
 /** tmux's panes and attached terminals; none when no tmux server runs. */
@@ -458,22 +478,48 @@ async function move($: EngineInterface, scope: string, shown: readonly string[],
  * session to the front, else a new window that creates the session (if it
  * is not running) and attaches. `window` is selected first.
  */
-async function openWorkspace($: EngineInterface, ws: Workspace, window?: string) {
+async function openWorkspace($: EngineInterface, ws: Workspace, window?: string): Promise<{ isOpen: boolean; text: string }> {
   const home = (await $.env.get('HOME')) ?? ''
-  if (window !== undefined) {
-    await $.process.run(['tmux', 'select-window', '-t', `=${tmuxName(ws)}:${window}`], { timeoutMs: 10_000 }).catch(() => undefined)
+  const name = tmuxName(ws)
+  const tmux = (args: string[]) =>
+    $.process.run(['tmux', ...args], { timeoutMs: 10_000 }).catch((error: unknown) => ({ exitCode: -1, stdout: '', stderr: message(error) }))
+  const isDir = await $.fs.stat(ws.dir).then(s => s.kind === 'dir').catch(() => false)
+  if (!isDir) return { isOpen: false, text: `Not opened: its folder ${ws.dir} is not there any more.` }
+  // a running session of that name must be this workspace's own, not an older one or anyone else's
+  if ((await tmux(['has-session', '-t', `=${name}`])).exitCode === 0) {
+    // show-options takes no `=` target; has-session just found this exact name, which tmux prefers to a prefix
+    const owner = (await tmux(['show-options', '-t', name, '-qv', OWNER_OPTION])).stdout.trim()
+    if (owner !== String(ws.createdAt)) {
+      return { isOpen: false, text: `Not opened: tmux session ${name} was not started for this workspace; end it (tmux kill-session -t ${name}) or remove this workspace.` }
+    }
+    if (window !== undefined) await tmux(['select-window', '-t', `=${name}:${window}`])
   }
   const command = openCommand(ws, home)
-  if ((await $.env.get('TERM_PROGRAM')) !== 'Apple_Terminal') {
-    $.ui.toast(`Open it in a terminal: ${command}`, { timeoutMs: 20_000 })
-    return
+  const term = await $.env.get('TERM_PROGRAM')
+  if (term === 'tmux') {
+    // from inside tmux: create it if need be, then switch this terminal to it
+    const made = await $.process
+      .run(['/bin/sh', '-c', openCommand(ws, home, { attach: false })], { timeoutMs: 20_000 })
+      .catch((error: unknown) => ({ exitCode: -1, stdout: '', stderr: message(error) }))
+    const switched = made.exitCode === 0 ? await tmux(['switch-client', '-t', `=${name}`]) : made
+    return switched.exitCode === 0
+      ? { isOpen: true, text: `Switched to ${name}.` }
+      : { isOpen: false, text: `Not opened (${firstLine(switched.stderr) || `exit ${switched.exitCode}`}). Run: ${command}` }
   }
+  if (term !== 'Apple_Terminal') return { isOpen: false, text: `Open it in a terminal: ${command}` }
   const osascript = (script: string, arg: string) =>
-    $.process.run(['/usr/bin/osascript', '-l', 'JavaScript', '-e', script, arg], { timeoutMs: 10_000 })
-  for (const tty of (await read($, snapshot)).tmux.clients[tmuxName(ws)] ?? []) {
-    if ((await osascript(FOCUS_SCRIPT, tty)).stdout.trim() === 'shown') return
+    $.process
+      .run(['/usr/bin/osascript', '-l', 'JavaScript', '-e', script, arg], { timeoutMs: 10_000 })
+      .catch((error: unknown) => ({ exitCode: -1, stdout: '', stderr: message(error) }))
+  // the terminals attached now (the snapshot may be seconds old)
+  const attached = parseClients((await tmux(['list-clients', '-F', CLIENTS_FORMAT])).stdout)[name] ?? []
+  for (const tty of attached) {
+    if ((await osascript(FOCUS_SCRIPT, tty)).stdout.trim() === 'shown') return { isOpen: true, text: `Brought ${name} to the front.` }
   }
-  await osascript(OPEN_SCRIPT, command)
+  const opened = await osascript(OPEN_SCRIPT, command)
+  return opened.exitCode === 0 && opened.stdout.trim() === 'opened'
+    ? { isOpen: true, text: `Opened ${name} in a new Terminal window.` }
+    : { isOpen: false, text: `Not opened (${firstLine(opened.stderr) || `exit ${opened.exitCode}`}). Run: ${command}` }
 }
 
 async function openSession($: EngineInterface, target: NonNullable<Item['target']>) {
@@ -481,7 +527,9 @@ async function openSession($: EngineInterface, target: NonNullable<Item['target'
     $.process.run(['/usr/bin/osascript', '-l', 'JavaScript', '-e', script, arg], { timeoutMs: 10_000 })
   if ('workspace' in target) {
     const ws = (await read($, snapshot)).workspaces.find(w => tmuxName(w) === target.workspace)
-    if (ws !== undefined) await openWorkspace($, ws, target.window)
+    if (ws === undefined) return
+    const result = await openWorkspace($, ws, target.window)
+    if (!result.isOpen) $.ui.toast(result.text, { timeoutMs: 20_000 })
     return
   }
   if ('tty' in target) {
@@ -581,7 +629,9 @@ async function moveChecked($: EngineInterface, move: NonNullable<Item['move']>) 
 
 async function openWorkspaceById($: EngineInterface, id: string) {
   const ws = (await read($, snapshot)).workspaces.find(w => w.id === id)
-  if (ws !== undefined) await openWorkspace($, ws)
+  if (ws === undefined) return
+  const result = await openWorkspace($, ws)
+  if (!result.isOpen) $.ui.toast(result.text, { timeoutMs: 20_000 })
 }
 
 async function resetOrder($: EngineInterface) {
@@ -637,9 +687,9 @@ export const register: Register = on => {
     await refresh($, VISIBLE_MAX_AGE_MS)
     const snap = await read($, snapshot)
     const named = snap.envs.filter(env => env !== '')
-    const usage = `Usage: /workspace new <folder> [${['default', ...named].join(' | ')}] <name>; /workspace open <name>; /workspace rm <name>`
+    const usage = `Usage: /workspace new <folder> <${['default', ...named].join(' | ')}> <name>; /workspace open <name>; /workspace rm <name>`
     const command = parseWorkspaceArgs(e.args, named, home)
-    const list = await readWorkspaces($, home)
+    const { list, isReadable } = await readWorkspaces($, home)
     const label = (ws: Workspace) => `${ws.name} (${ws.env || 'default'}, ${ws.dir})`
     switch (command.action) {
       case 'help':
@@ -649,25 +699,35 @@ export const register: Register = on => {
       case 'open': {
         const ws = findWorkspace(list, command.ref)
         if (ws === undefined) return { text: `No workspace named "${command.ref}".` }
-        await openWorkspace($, ws)
-        return { text: `Opening ${label(ws)}.` }
+        return { text: (await openWorkspace($, ws)).text }
       }
       case 'rm': {
         const ws = findWorkspace(list, command.ref)
         if (ws === undefined) return { text: `No workspace named "${command.ref}".` }
-        await writeWorkspaces($, home, list.filter(w => w.id !== ws.id))
+        if (!(await changeWorkspaces($, home, now => now.filter(w => w.id !== ws.id)))) return { text: `Not done: ${UNREADABLE}.` }
         await refresh($, 0)
         return { text: `Removed ${label(ws)}. Its agents keep running in tmux session ${tmuxName(ws)} (end it: tmux kill-session -t ${tmuxName(ws)}).` }
       }
       case 'new': {
+        if (!isReadable) return { text: `Not done: ${UNREADABLE}.` }
         const isDir = await $.fs.stat(command.dir).then(s => s.kind === 'dir').catch(() => false)
         if (!isDir) return { text: `Not done: ${command.dir} is not a folder.` }
-        if (!snap.envs.includes(command.env)) return { text: `Not done: no environment "${command.env}". ${usage}` }
-        const ws: Workspace = { id: slugOf(command.name, list.map(w => w.id)), name: command.name, env: command.env, dir: command.dir, createdAt: await $.clock.now() }
-        await writeWorkspaces($, home, [...list, ws])
+        // never the name of a tmux session already running: a new workspace never takes over an old one
+        const running = Object.values(snap.tmux.panes).map(p => p.session).filter(s => s.startsWith('ws-')).map(s => s.slice(3))
+        let ws: Workspace | undefined
+        const createdAt = await $.clock.now()
+        const saved = await changeWorkspaces($, home, now => {
+          ws = { id: slugOf(command.name, [...now.map(w => w.id), ...running]), name: command.name, env: command.env, dir: command.dir, createdAt }
+          return [...now, ws]
+        })
+        if (!saved || ws === undefined) return { text: `Not done: ${UNREADABLE}.` }
         await refresh($, 0)
-        await openWorkspace($, ws)
-        return { text: `Created ${label(ws)}: Claude and Codex start in tmux session ${tmuxName(ws)}. Closing its window leaves them running; /workspace open ${ws.id} brings it back.` }
+        const opened = await openWorkspace($, ws)
+        return {
+          text: opened.isOpen
+            ? `Created ${label(ws)}: Claude and Codex start in tmux session ${tmuxName(ws)}. Closing its window leaves them running; /workspace open ${ws.id} brings it back. ${opened.text}`
+            : `Created ${label(ws)}, but it was not opened: ${opened.text}`,
+        }
       }
     }
   })
@@ -803,7 +863,8 @@ export const register: Register = on => {
       )
     }
 
-    const working = view.repos.flatMap(r => r.trees.flatMap(t => t.items)).filter(i => i.state === 'working').length
+    const working = [...view.workspaces.flatMap(w => w.items), ...view.repos.flatMap(r => r.trees.flatMap(t => t.items))]
+      .filter(i => i.state === 'working').length
     const hidden = view.total - view.shown
     return (
       <Box flexDirection="column" width={width} minHeight={height} backgroundColor={paint}>

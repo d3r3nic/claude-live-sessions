@@ -28,9 +28,10 @@ export type WorkspaceCommand =
   | { action: 'help'; error?: string }
 
 /**
- * `/workspace` arguments: `new <folder> [<env>] <name>`, `open <name>`,
- * `rm <name>`, or nothing to list. `<env>` is one of `envs` (`default` for
- * the default environment); `~` in the folder is the home directory.
+ * `/workspace` arguments: `new <folder> <env> <name>`, `open <name>`,
+ * `rm <name>`, or nothing to list. `<env>` is required and must be one of
+ * `envs` or `default`: a misspelt one is an error, never another account.
+ * `~` in the folder is the home directory.
  */
 export function parseWorkspaceArgs(args: string, envs: readonly string[], home: string): WorkspaceCommand {
   const [verb = '', ...rest] = words(args)
@@ -39,11 +40,11 @@ export function parseWorkspaceArgs(args: string, envs: readonly string[], home: 
     return rest.length > 0 ? { action: verb, ref: rest.join(' ') } : { action: 'help', error: `say which workspace to ${verb}` }
   }
   if (verb !== 'new') return { action: 'help', error: `"${verb}" is not one of new, open, rm, list` }
-  const [folder = '', ...after] = rest
-  const isEnv = (word: string | undefined) => word !== undefined && (word === 'default' || envs.includes(word))
-  const env = isEnv(after[0]) ? (after[0] === 'default' ? '' : after[0]!) : ''
-  const name = (isEnv(after[0]) ? after.slice(1) : after).join(' ').trim()
-  if (folder === '' || name === '') return { action: 'help', error: 'new needs a folder and a name' }
+  const [folder = '', envWord = '', ...after] = rest
+  const name = after.join(' ').trim()
+  if (folder === '' || envWord === '' || name === '') return { action: 'help', error: 'new needs a folder, an environment and a name' }
+  if (envWord !== 'default' && !envs.includes(envWord)) return { action: 'help', error: `there is no environment "${envWord}"` }
+  const env = envWord === 'default' ? '' : envWord
   const dir = folder === '~' ? home : folder.startsWith('~/') ? `${home}${folder.slice(1)}` : folder
   if (!dir.startsWith('/')) return { action: 'help', error: 'the folder must be absolute or start with ~' }
   return { action: 'new', dir: dir.replace(/\/+$/, '') || '/', env, name }
@@ -64,7 +65,9 @@ const shellWord = (text: string) => `'${text.replace(/'/g, `'\\''`)}'`
 const SESSION_MARKERS = [
   'CLAUDECODE', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_SESSION_ID',
   'CLAUDE_CODE_BRIDGE_SESSION_ID', 'CLAUDE_CODE_MESSAGING_SOCKET', 'CLAUDE_CODE_MESSAGING_TOKEN',
-  'CLAUDE_CODE_SESSION_ATTENDED', 'CLAUDE_CODE_EXECPATH', 'CLAUDE_PID', 'CLAUDE_EFFORT',
+  'CLAUDE_CODE_SESSION_ATTENDED', 'CLAUDE_CODE_EXECPATH', 'CLAUDE_PID', 'CLAUDE_EFFORT', 'AI_AGENT',
+  // which account: cleared, then set for a named environment only, whatever the tmux server holds
+  'CLAUDE_CONFIG_DIR', 'CODEX_HOME',
 ]
 
 /** An agent's start under a workspace's environment: its config directory, Claude's or Codex's. */
@@ -72,6 +75,9 @@ export function agentStart(tool: 'claude' | 'codex', env: string, home: string, 
   const vars = env === '' ? '' : tool === 'claude' ? `CLAUDE_CONFIG_DIR=${shellWord(`${home}/.claude-${env}`)} ` : `CODEX_HOME=${shellWord(`${home}/.codex-${env}`)} `
   return `env ${SESSION_MARKERS.map(v => `-u ${v}`).join(' ')} ${vars}${bin}`
 }
+
+/** The tmux session option that marks a session as started for one workspace (its createdAt). */
+export const OWNER_OPTION = '@live-sessions-workspace'
 
 /**
  * The command line that opens a workspace in a terminal: creates its tmux
@@ -81,7 +87,7 @@ export function agentStart(tool: 'claude' | 'codex', env: string, home: string, 
  * `socket` and `bins` are for tests; `attach: false` only creates.
  */
 export function openCommand(
-  ws: Pick<Workspace, 'id' | 'env' | 'dir'>,
+  ws: Pick<Workspace, 'id' | 'env' | 'dir' | 'createdAt'>,
   home: string,
   o: { socket?: string; bins?: { claude: string; codex: string }; attach?: boolean } = {},
 ): string {
@@ -89,10 +95,14 @@ export function openCommand(
   const name = tmuxName(ws)
   const window = (tool: 'claude' | 'codex') =>
     shellWord(`${agentStart(tool, ws.env, home, o.bins?.[tool])}; exec "$SHELL" -l`)
+  // tmux expands `#` sequences in -c: a literal `#` is `##`
+  const dir = shellWord(ws.dir.replace(/#/g, '##'))
   const create = [
     `${tmux} has-session -t ${shellWord(`=${name}`)} 2>/dev/null ||`,
-    `${tmux} new-session -d -s ${shellWord(name)} -c ${shellWord(ws.dir)} -n claude ${window('claude')}`,
-    `\\; new-window -t ${shellWord(`=${name}:`)} -c ${shellWord(ws.dir)} -n codex ${window('codex')}`,
+    `${tmux} new-session -d -s ${shellWord(name)} -c ${dir} -n claude ${window('claude')}`,
+    `\\; new-window -t ${shellWord(`=${name}:`)} -c ${dir} -n codex ${window('codex')}`,
+    // set-option takes no `=` exact-match target; the session was just made under this exact name
+    `\\; set-option -t ${shellWord(name)} ${OWNER_OPTION} ${shellWord(String(ws.createdAt))}`,
   ].join(' ')
   return o.attach === false ? create : `${create}; ${tmux} attach -t ${shellWord(`=${name}`)}`
 }
@@ -123,17 +133,19 @@ export function parseClients(stdout: string): Record<string, string[]> {
 }
 
 /**
- * The environments on this machine: a Claude config directory
- * (`.claude-<env>`) or a Codex home (`.codex-<env>`) that is one; '' is the
- * default (`.claude`, `.codex`). `isProfile` says whether a directory is.
+ * The environments on this machine: the default ('') always, and each
+ * `<env>` with both a Claude config directory (`.claude-<env>`) and a Codex
+ * home (`.codex-<env>`), so neither agent starts on a config that is not
+ * there. `isProfile` says whether a directory is one.
  */
 export function envsFrom(dirNames: readonly string[], isProfile: (dirName: string) => boolean): string[] {
-  const envs = new Set<string>()
+  const sides = new Map<string, Set<string>>()
   for (const name of dirNames) {
-    const m = /^\.(claude|codex)(?:-([a-z0-9][a-z0-9_.-]*))?$/i.exec(name)
-    if (m !== null && isProfile(name)) envs.add(m[2] ?? '')
+    const m = /^\.(claude|codex)-([a-z0-9][a-z0-9_.-]*)$/i.exec(name)
+    if (m !== null && isProfile(name)) sides.set(m[2]!, (sides.get(m[2]!) ?? new Set()).add(m[1]!.toLowerCase()))
   }
-  return [...envs].sort((a, b) => (a === '' ? -1 : b === '' ? 1 : a.localeCompare(b)))
+  const named = [...sides].filter(([, tools]) => tools.has('claude') && tools.has('codex')).map(([env]) => env)
+  return ['', ...named.sort((a, b) => a.localeCompare(b))]
 }
 
 /** The workspaces file, if it is one. */
