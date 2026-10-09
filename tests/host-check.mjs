@@ -264,8 +264,8 @@ if (process.argv.includes('--slow')) {
   check('workspace: Claude under its environment\'s config directory', file('claude.env').includes(`CLAUDE_CONFIG_DIR=${fakeHome}/.claude-checkenv`))
   check('workspace: Codex under its environment\'s home', file('codex.env').includes(`CODEX_HOME=${fakeHome}/.codex-checkenv`))
   check('workspace: no Claude Code session markers reach the agents', !/^(CLAUDECODE|CLAUDE_CODE_CHILD_SESSION)=/m.test(file('claude.env') + file('codex.env')))
-  check('workspace: both may work in the worktrees folder; Codex without its update offer', file('claude.args').startsWith('--add-dir\n/x/app-worktrees\n') && file('codex.args') === '-c\ncheck_for_update_on_startup=false\n--add-dir\n/x/app-worktrees\nSay you are ready.\n', JSON.stringify(file('codex.args')))
-  check('workspace: Claude takes the first prompt as it is, as one argument, running nothing in it', file('claude.args') === `--add-dir\n/x/app-worktrees\n${prompt}\n` && !existsSync(`${scratch}/RAN`))
+  check('workspace: both may work in the worktrees folder; Codex without its update offer, in workspace-write', file('codex.args') === '-c\ncheck_for_update_on_startup=false\n--sandbox\nworkspace-write\n--add-dir\n/x/app-worktrees\n--\nSay you are ready.\n', JSON.stringify(file('codex.args')))
+  check('workspace: Claude takes the first prompt as it is, as one argument after --, running nothing in it', file('claude.args') === `--add-dir\n/x/app-worktrees\n--\n${prompt}\n` && !existsSync(`${scratch}/RAN`), JSON.stringify(file('claude.args').slice(0, 60)))
   check('workspace: each first prompt is taken once', !existsSync(w.promptPath(fakeHome, 'check', 'claude')) && !existsSync(w.promptPath(fakeHome, 'check', 'codex')))
   check('workspace: marked as started for this workspace', spawnSync('tmux', ['-L', socket, '-f', '/dev/null', 'show-options', '-t', 'ws-check', '-qv', w.OWNER_OPTION], { encoding: 'utf8' }).stdout.trim() === '1234')
   // a default workspace on the same server, whose global environment holds another account, in a folder with # in its name
@@ -275,7 +275,7 @@ if (process.argv.includes('--slow')) {
   for (let i = 0; i < 30 && !(existsSync(`${scratch}/d-claude.args`) && existsSync(`${scratch}/d-codex.args`)); i++) await new Promise(r => setTimeout(r, 200))
   check('workspace: a default one runs under no other account, whatever the tmux server holds', !/^(CLAUDE_CONFIG_DIR|CODEX_HOME)=/m.test(file('d-claude.env') + file('d-codex.env')) && file('d-claude.env') !== '')
   check('workspace: a folder with # in its name is the folder it starts in', file('d-claude.pwd').trim().endsWith('C#{session_name}'), file('d-claude.pwd').trim().split('/').pop())
-  check('workspace: no checkout, no first prompt: nothing more on the command line', file('d-claude.args').trim() === '' && file('d-codex.args') === '-c\ncheck_for_update_on_startup=false\n')
+  check('workspace: no checkout, no first prompt: nothing more on the command line', file('d-claude.args').trim() === '' && file('d-codex.args') === '-c\ncheck_for_update_on_startup=false\n--sandbox\nworkspace-write\n')
   // opened again while it runs: nothing new is created
   spawnSync(process.env.SHELL ?? '/bin/zsh', ['-c', line], { encoding: 'utf8' })
   const again = Object.values(w.parsePanes(spawnSync('tmux', ['-L', socket, '-f', '/dev/null', 'list-panes', '-a', '-F', w.PANES_FORMAT], { encoding: 'utf8' }).stdout)).length
@@ -363,7 +363,9 @@ if (process.argv.includes('--slow')) {
   const socket = `live-sessions-relay-${process.pid}`
   // a private server that reads no tmux.conf: the person's plugins (a session restore) never run in it
   const tmux = (...args) => spawnSync('tmux', ['-L', socket, '-f', '/dev/null', ...args], { encoding: 'utf8' })
-  tmux('new-session', '-d', '-s', 'ws-relay', '-n', 'peers', 'cat')
+  // as a workspace's pane: a shell that starts the agent (`cat` here) and is the group's leader, which tmux
+  // names as the pane's command; and a pane where the agent has exited, back at the shell
+  tmux('new-session', '-d', '-s', 'ws-relay', '-n', 'peers', "/bin/sh -c 'cat; exec /bin/sh'")
   tmux('split-window', '-h', '-t', '=ws-relay:peers', '/bin/sh')
   const [agentPane, shellPane] = tmux('list-panes', '-t', '=ws-relay:peers', '-F', '#{pane_id}').stdout.trim().split('\n')
   await new Promise(res => setTimeout(res, 500))

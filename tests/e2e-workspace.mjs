@@ -1,4 +1,5 @@
-// End to end on a real Terminal.app window and the person's tmux server: open a throwaway workspace
+// End to end on a real Terminal.app window and a private tmux server (never the person's own, which a
+// session-saving plugin would save this one into; reading no tmux.conf): open a throwaway workspace
 // (the real `claude` and `codex` in its folder), check both run and the window is attached, close the
 // window, check both keep running, then remove it all. Run from, or point E2E_TRUSTED_DIR at, a
 // folder Claude already trusts:
@@ -26,7 +27,8 @@ const WORK = mkdtempSync(join(process.env.E2E_TRUSTED_DIR ?? process.cwd(), 'liv
 const ws = { id: `e2e-${process.pid}`, env: '', dir: WORK, createdAt: Date.now() }
 const session = w.tmuxName(ws)
 const sleep = ms => new Promise(r => setTimeout(r, ms))
-const tmux = (...args) => spawnSync('tmux', args, { encoding: 'utf8' })
+const socket = `live-sessions-e2e-${process.pid}`
+const tmux = (...args) => spawnSync('tmux', ['-L', socket, '-f', '/dev/null', ...args], { encoding: 'utf8' })
 const argsOn = tty => spawnSync('/bin/ps', ['-t', tty, '-o', 'args='], { encoding: 'utf8' }).stdout
 const agents = () => {
   const panes = Object.entries(w.parsePanes(tmux('list-panes', '-a', '-F', w.PANES_FORMAT).stdout)).filter(([, p]) => p.session === session)
@@ -36,7 +38,7 @@ let failures = 0
 const check = (name, ok, detail = '') => { console.log(`${ok ? 'ok  ' : 'FAIL'} ${name}${detail ? `: ${detail}` : ''}`); if (!ok) failures++ }
 
 try {
-  execFileSync('/usr/bin/osascript', ['-l', 'JavaScript', '-e', c.OPEN_SCRIPT, w.openCommand(ws, HOME)])
+  execFileSync('/usr/bin/osascript', ['-l', 'JavaScript', '-e', c.OPEN_SCRIPT, w.openCommand(ws, HOME, { socket })])
   let running = {}
   for (let i = 0; i < 40; i++) {
     await sleep(500)
@@ -56,9 +58,10 @@ try {
   check('window closed: detached, and both agents keep running', stillAttached.length === 0 && /\bclaude\b/.test(after.claude ?? '') && /\bcodex\b/.test(after.codex ?? ''))
   if (clients[0]) execFileSync('/usr/bin/osascript', ['-l', 'JavaScript', '-e', `function run(a) { const t = Application('Terminal'); for (const x of t.windows()) if (x.tabs().some(y => y.tty() === '/dev/' + a[0])) x.close() }`, clients[0]])
 } finally {
-  tmux('kill-session', '-t', `=${session}`)
+  tmux('kill-server')
+  rmSync(join(process.env.TMUX_TMPDIR ?? '/tmp', `tmux-${process.getuid()}`, socket), { force: true })
   rmSync(`${HOME}/.claude/projects/${WORK.replace(/[^A-Za-z0-9]/g, '-')}`, { recursive: true, force: true })
   rmSync(WORK, { recursive: true, force: true })
-  console.log(`cleaned up: tmux session ${session} ended, its folder deleted`)
+  console.log(`cleaned up: its private tmux server ended, its folder deleted`)
 }
 process.exitCode = failures > 0 ? 1 : 0

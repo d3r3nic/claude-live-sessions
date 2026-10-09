@@ -1203,7 +1203,7 @@ describe('workspaces', () => {
     expect(withCheckout).toContain('Application Support/live-sessions/prompts/practice-rbac-codex.txt')
     expect(cmd).not.toContain('--add-dir')
     // Codex starts without its update offer, whose default answer on Enter installs a new version
-    expect(cmd).toContain('codex -c check_for_update_on_startup=false')
+    expect(cmd).toContain('codex -c check_for_update_on_startup=false --sandbox workspace-write')
     expect(openCommand({ ...practice, env: '', dir: "/Users/u/it's" }, HOME, { attach: false })).toContain(`-c '/Users/u/it'\\''s'`)
     expect(openCommand(practice, HOME, { attach: false })).not.toContain('attach')
     // tmux would expand #{...} in -c: a literal # goes in doubled
@@ -1678,13 +1678,13 @@ describe('relay', () => {
     // WORKER (claude, idle) on the left, the Codex terminal resumed on ttys045 on the right
     world.tmuxPanes = 'ws-practice-rbac\tpeers\t/dev/ttys022\t%1\tclaude\nws-practice-rbac\tpeers\t/dev/ttys045\t%2\tcodex\n'
     world.tmuxOwner = String(NOW)
-    world.paneCommands = { '%1': 'claude', '%2': 'node' }
+    world.paneCommands = { '%1': 'claude', '%2': 'codex' }
     world.turns = { 'session-104': `done\tturn-c1\t${new Date(NOW - 60_000).toISOString()}\t${READY_CODEX}`, '/rollouts/a.jsonl': `done\tturn-x0\t${new Date(NOW - 120_000).toISOString()}\t` }
     await $.session.start(START)
     await $.command.run(SESSIONS)
     const relayed = () => runs.filter(r => r[2] === RELAY_SCRIPT).map(r => r.slice(4, 10))
     const ledger = '/Users/u/Library/Application Support/live-sessions/relayed'
-    expect(relayed()).toEqual([['pass', ledger, 'pass-turn-c1', '%2', 'node|codex', READY_CODEX]])
+    expect(relayed()).toEqual([['pass', ledger, 'pass-turn-c1', '%2', 'codex', READY_CODEX]])
     // only the two agents' own records are read
     const read = runs.find(r => r[2] === TURN_SCRIPT)!.slice(4)
     expect(read).toHaveLength(2)

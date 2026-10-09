@@ -125,17 +125,18 @@ export function relaySteps(ws: Pick<Workspace, 'name' | 'relay'>, sides: Partial
   return steps
 }
 
-/** What a pane must be running for the relay to type into it: the agent, never a shell. */
-export const AGENT_COMMANDS: Record<Tool, string> = { claude: 'claude', codex: 'node|codex' }
+/** The agent a pane must have in its foreground for the relay to type into it: never only a shell. */
+export const AGENT_COMMANDS: Record<Tool, string> = { claude: 'claude', codex: 'codex' }
 
 /**
  * Does one relay step, once: "$1" pass or tell, "$2" the ledger folder, "$3"
  * the step's key (a folder made in the ledger, so a second session finds it
- * taken), "$4" the pane, "$5" the commands it may be running (`a|b`), "$6"
- * the line or the text, "$7" a tmux socket name (tests: a private server
- * that reads no tmux.conf), "$8" the
- * notification's title. A pass types the line only while the pane runs the
- * agent, and answers `passed`, `taken`, `gone` or `not-agent <command>`.
+ * taken), "$4" the pane, "$5" the agent's command names (`a|b`), "$6" the
+ * line or the text, "$7" a tmux socket name (tests: a private server that
+ * reads no tmux.conf), "$8" the notification's title. A pass types the line
+ * only while one of the pane's foreground processes is the agent (tmux
+ * names only the group's leader, the shell that started it), and answers
+ * `passed`, `taken`, `gone` or `not-agent <the foreground commands>`.
  */
 export const RELAY_SCRIPT = [
   'kind=$1; ledger=$2; key=$3; pane=$4; allow=$5; text=$6; sock=$7; title=$8',
@@ -147,8 +148,10 @@ export const RELAY_SCRIPT = [
   `  /usr/bin/osascript -l JavaScript -e 'function run(a) { const app = Application.currentApplication(); app.includeStandardAdditions = true; app.displayNotification(a[1], { withTitle: a[0] }) }' "$title" "$text" >/dev/null 2>&1`,
   '  echo told; exit 0',
   'fi',
-  `cmd=$(t display-message -p -t "$pane" '#{pane_current_command}' 2>/dev/null) && [ -n "$cmd" ] || { echo gone; exit 0; }`,
-  'case "|$allow|" in *"|$cmd|"*) ;; *) printf \'not-agent %s\\n\' "$cmd"; exit 0;; esac',
+  `tty=$(t display-message -p -t "$pane" '#{pane_tty}' 2>/dev/null) && [ -n "$tty" ] || { echo gone; exit 0; }`,
+  `cmds=$(ps -t "\${tty#/dev/}" -o stat=,comm= 2>/dev/null | awk '$1 ~ /[+]/ { n = $2; sub(".*/", "", n); print n }' | sort -u)`,
+  'ok=; for c in $cmds; do case "|$allow|" in *"|$c|"*) ok=1;; esac; done',
+  '[ -n "$ok" ] || { printf \'not-agent %s\\n\' "$(echo $cmds)"; exit 0; }',
   't send-keys -t "$pane" -l -- "$text" && sleep 0.5 && t send-keys -t "$pane" Enter && echo passed',
 ].join('\n')
 

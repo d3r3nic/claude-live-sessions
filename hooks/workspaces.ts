@@ -99,14 +99,17 @@ export const promptPath = (home: string, id: string, tool: 'claude' | 'codex') =
  * nothing) that starts the agent able to work in the project's worktrees
  * folder too, and leaves a shell when it exits. Each takes its first prompt
  * from the workspace, when there is one, and removes it so a restart never
- * sends it again. Codex starts without its update offer, whose default
- * answer on Enter installs a new version.
+ * sends it again; it goes after `--`, so an option taking several values
+ * (Claude's --add-dir) never takes it. Codex starts without its update
+ * offer, whose default answer on Enter installs a new version, and in the
+ * sandbox it uses for a trusted project (workspace-write), which lets it
+ * write in the worktrees folder too; its approvals stay as configured.
  */
 function paneScript(tool: 'claude' | 'codex', ws: Pick<Workspace, 'id' | 'env' | 'checkout'>, home: string, bin?: string): string {
-  const start = `${agentStart(tool, ws.env, home, bin)}${tool === 'codex' ? ' -c check_for_update_on_startup=false' : ''}`
+  const start = `${agentStart(tool, ws.env, home, bin)}${tool === 'codex' ? ' -c check_for_update_on_startup=false --sandbox workspace-write' : ''}`
   const addDir = ws.checkout === undefined ? '' : ` --add-dir ${shellWord(`${ws.checkout}-worktrees`)}`
   const prompt = shellWord(promptPath(home, ws.id, tool))
-  const run = `p=$(cat ${prompt} 2>/dev/null) && rm -f ${prompt}; ${start}${addDir} \${p:+"$p"}`
+  const run = `p=$(cat ${prompt} 2>/dev/null) && rm -f ${prompt}; ${start}${addDir} \${p:+--} \${p:+"$p"}`
   return `/bin/sh -c ${shellWord(`${run}; exec "$SHELL" -l`)}`
 }
 
