@@ -144,6 +144,8 @@ const draft = atom({ plugin: 'live-sessions', key: 'draft' } as const, NO_DRAFT)
 const assigning = atom({ plugin: 'live-sessions', key: 'assigning' } as const, { key: '', member: '' })
 /** A workspace is being made in this session. */
 const creating = atom({ plugin: 'live-sessions', key: 'creating' } as const, false)
+/** The row whose actions are shown, as `item:<key>`, `tree:<key>`, `repo:<key>` or `ws:<id>`; '' for none. */
+const selected = atom({ plugin: 'live-sessions', key: 'selected' } as const, '')
 /** The git repositories on this Mac, for the form; looked for when it opens. */
 const projects = atom({ plugin: 'live-sessions', key: 'projects' } as const, [] as string[])
 /** Where the relay keeps each step it took, so no step is taken twice. */
@@ -787,14 +789,15 @@ async function openDraft($: EngineInterface, dir: string) {
   await update($, projects, () => paths)
 }
 
+const RELAY_NEXT: Record<Relay['mode'], Relay['mode']> = { auto: 'notify', notify: 'off', off: 'auto' }
+
 /** The relay's mode, pressed round: auto, notify, off. Turned on, it counts cues from now. */
 async function cycleRelay($: EngineInterface, id: string) {
   const home = (await $.env.get('HOME')) ?? ''
   const now = await $.clock.now()
-  const next: Record<Relay['mode'], Relay['mode']> = { auto: 'notify', notify: 'off', off: 'auto' }
   await changeWorkspaces($, home, list => list.map(ws => {
     if (ws.id !== id) return ws
-    const mode = next[ws.relay?.mode ?? 'off']
+    const mode = RELAY_NEXT[ws.relay?.mode ?? 'off']
     return { ...ws, relay: mode === 'off' ? { ...(ws.relay ?? { since: now, streak: 0 }), mode } : { mode, since: now, streak: 0 } }
   }))
   await refresh($, 0)
@@ -860,6 +863,15 @@ async function passCues(
       }
     }
   }
+}
+
+/** Forgets a workspace (the command's `rm` and the pane's Remove): its tmux session keeps running. */
+async function removeWorkspace($: EngineInterface, ws: Workspace): Promise<string> {
+  const home = (await $.env.get('HOME')) ?? ''
+  if (!(await changeWorkspaces($, home, now => now.filter(w => w.id !== ws.id)))) return `Not done: ${UNREADABLE}.`
+  await removePrompts($, home, ws.id)
+  await refresh($, 0)
+  return `Removed ${ws.name} (${ws.env || 'default'}, ${ws.dir}). Its agents keep running in tmux session ${tmuxName(ws)} (end it: tmux kill-session -t ${tmuxName(ws)}).`
 }
 
 async function assignTo($: EngineInterface, member: string, id: string) {
@@ -954,10 +966,7 @@ export const register: Register = on => {
       case 'rm': {
         const ws = findWorkspace(list, command.ref)
         if (ws === undefined) return { text: `No workspace named "${command.ref}".` }
-        if (!(await changeWorkspaces($, home, now => now.filter(w => w.id !== ws.id)))) return { text: `Not done: ${UNREADABLE}.` }
-        await removePrompts($, home, ws.id)
-        await refresh($, 0)
-        return { text: `Removed ${label(ws)}. Its agents keep running in tmux session ${tmuxName(ws)} (end it: tmux kill-session -t ${tmuxName(ws)}).` }
+        return { text: await removeWorkspace($, ws) }
       }
       case 'new':
         if (!isReadable) return { text: `Not done: ${UNREADABLE}.` }
@@ -1004,7 +1013,7 @@ export const register: Register = on => {
     // a press reaches another Terminal tab or window, so only inside Terminal.app
     const canOpen = (await $.env.get('TERM_PROGRAM')) === 'Apple_Terminal'
     const hasMove = hasWhere && canOpen
-    const titleWidth = Math.max(8, width - (6 + 7 + 10 + (hasWhere ? 9 : 0) + 5 + 4 + 3 + (hasMove ? 11 : 0)))
+    const titleWidth = Math.max(8, width - (6 + 7 + 10 + (hasWhere ? 9 : 0) + 5 + 10))
     const elements = $.ui.resolve(e)
     const Input = 'Input' in elements ? elements.Input : undefined
     const Select = 'Select' in elements ? elements.Select : undefined
@@ -1017,6 +1026,19 @@ export const register: Register = on => {
     const matches = form.isOpen ? rankProjects(await read($, projects), [...snap.claude, ...snap.codex].map(s => ({ cwd: s.cwd, at: 'lastActive' in s ? s.lastActive : s.since })), form.dir === '' ? form.query : '', home) : []
     const pending = await read($, pendingMove)
     const isPending = (key: string) => pending.key === key && now - pending.at < CONFIRM_MS
+    // Remove, like the move, asks for a second press
+    const pressRemove = (id: string) => async () => {
+      const at = await $.clock.now()
+      const asked = await read($, pendingMove)
+      if (asked.key === `rm:${id}` && at - asked.at < CONFIRM_MS) {
+        await update($, pendingMove, () => ({ key: '', at: 0 }))
+        const ws = (await read($, snapshot)).workspaces.find(w => w.id === id)
+        if (ws !== undefined) $.ui.toast(await removeWorkspace($, ws), { timeoutMs: 15_000 })
+        await update($, selected, () => '')
+      } else {
+        await update($, pendingMove, () => ({ key: `rm:${id}`, at }))
+      }
+    }
     const pressMove = (key: string, move: NonNullable<Item['move']>) => async () => {
       const at = await $.clock.now()
       const asked = await read($, pendingMove)
@@ -1028,16 +1050,33 @@ export const register: Register = on => {
       }
     }
 
-    // ↑ ↓ move a row among its siblings as listed now; a dim arrow is the end of the list
-    const arrows = (scope: string, shown: readonly string[], key: string): Element =>
-      shown.length < 2 ? (
-        <Box width={4} flexShrink={0} />
-      ) : (
-        <Box width={3} flexShrink={0} marginLeft={1} flexDirection="row" columnGap={1}>
-          <Button key={`up ${scope} ${key}`} label="↑" plain dimColor={shown[0] === key} onPress={() => void move($, scope, shown, key, -1)} />
-          <Button key={`down ${scope} ${key}`} label="↓" plain dimColor={shown[shown.length - 1] === key} onPress={() => void move($, scope, shown, key, 1)} />
-        </Box>
-      )
+    // each row carries one [ more ]; pressed, the row's actions show under it, each a worded button with a
+    // key that presses it while this pane has the focus
+    const open = await read($, selected)
+    // showing a row's actions also asks for the keyboard (granted over an empty prompt), so their keys work at once
+    const toggle = (id: string) => async () => {
+      const shown = await update($, selected, now => (now === id ? '' : id))
+      if (shown !== '') await $.ui.open({ id: PANE, title: TITLE, focus: true }).catch(() => undefined)
+    }
+    const more = (id: string): Element => (
+      <Box width={9} flexShrink={0} marginLeft={1}>
+        <Button key={`more ${id}`} label={open === id ? 'hide' : 'more'} {...(open === id ? { variant: 'primary' as const } : {})} onPress={() => void toggle(id)()} />
+      </Box>
+    )
+    const bar = (id: string, indent: number, children: Element[]): Element => (
+      <Box key={`bar ${id}`} flexDirection="row" flexWrap="wrap" width={width - indent} marginLeft={indent} columnGap={2}>
+        {children}
+        <Button key={`close ${id}`} label="Close (x)" hotkey="x" onPress={() => void toggle(id)()} />
+      </Box>
+    )
+    // Move up and Move down among a row's siblings as listed now; at an end of the list, drawn dim
+    const moves = (scope: string, shown: readonly string[], key: string): Element[] =>
+      shown.length < 2
+        ? []
+        : [
+            <Button key={`up ${scope} ${key}`} label="Move up (u)" hotkey="u" dimColor={shown[0] === key} onPress={() => void move($, scope, shown, key, -1)} />,
+            <Button key={`down ${scope} ${key}`} label="Move down (d)" hotkey="d" dimColor={shown[shown.length - 1] === key} onPress={() => void move($, scope, shown, key, 1)} />,
+          ]
 
     const itemRow = (i: Item, siblings: readonly string[], scope: string) => {
       const isWorking = i.state === 'working'
@@ -1077,43 +1116,45 @@ export const register: Register = on => {
           <Box width={4} flexShrink={0} marginLeft={1}>
             <Text dimColor wrap="truncate-end">{ago(now - i.lastActive)}</Text>
           </Box>
-          {hasMove && (
-            <Box width={10} flexShrink={0} marginLeft={1}>
-              {i.move !== undefined && (
-                <Button
-                  key={`bg ${i.key}`}
-                  label={isPending(i.key) ? 'sure?' : 'to bg'}
-                  {...(isPending(i.key) ? { variant: 'primary' as const } : {})}
-                  onPress={() => void pressMove(i.key, i.move!)()}
-                />
-              )}
-            </Box>
-          )}
-          <Box width={2} flexShrink={0} marginLeft={1}>
-            {i.memberId !== undefined && (
-              <Button key={`assign ${i.key}`} label="⊕" plain onPress={() => void update($, assigning, () => ({ key: i.key, member: i.memberId! }))} />
-            )}
-          </Box>
-          {arrows(scope, siblings, i.key)}
+          {more(`item:${i.key}`)}
         </Box>
       )
     }
-    // a session's row, and under it, while it is being assigned, the workspaces to choose from
-    const sessionRow = (i: Item, siblings: readonly string[], scope: string) => (
-      <Box key={`row ${i.key}`} flexDirection="column" width={width}>
-        {itemRow(i, siblings, scope)}
-        {choosing.key === i.key && (
-          <Box flexDirection="row" flexWrap="wrap" width={width - 6} columnGap={1} marginLeft={6}>
-            <Text dimColor>assign to:</Text>
-            {snap.workspaces.map(ws => (
-              <Button key={`assign-to ${i.key} ${ws.id}`} label={ws.name} onPress={() => void assignTo($, choosing.member, ws.id)} />
-            ))}
-            <Button key={`assign-to ${i.key} -`} label="none" onPress={() => void assignTo($, choosing.member, '')} />
-            <Button key={`assign-cancel ${i.key}`} label="cancel" onPress={() => void update($, assigning, () => ({ key: '', member: '' }))} />
-          </Box>
-        )}
-      </Box>
-    )
+    // a session's row and, while shown, its actions; while it is being assigned, the workspaces to choose from
+    const sessionRow = (i: Item, siblings: readonly string[], scope: string) => {
+      const id = `item:${i.key}`
+      const target = canOpen ? i.target : undefined
+      const actions = (): Element[] => [
+        ...(target === undefined ? [] : [<Button key={`open-bar ${i.key}`} label="Open (o)" hotkey="o" variant="primary" onPress={() => void openSession($, target)} />]),
+        ...(hasMove && i.move !== undefined
+          ? [
+              <Button
+                key={`bg ${i.key}`}
+                label={isPending(i.key) ? 'Press again to move it (b)' : 'To background (b)'}
+                hotkey="b"
+                {...(isPending(i.key) ? { variant: 'primary' as const } : {})}
+                onPress={() => void pressMove(i.key, i.move!)()}
+              />,
+            ]
+          : []),
+        ...(i.memberId === undefined
+          ? []
+          : [<Button key={`assign ${i.key}`} label="Assign to workspace (w)" hotkey="w" onPress={() => void update($, assigning, () => ({ key: i.key, member: i.memberId! }))} />]),
+        ...moves(scope, siblings, i.key),
+      ]
+      const choices = (): Element[] => [
+        <Text dimColor>Assign to:</Text>,
+        ...snap.workspaces.map(ws => <Button key={`assign-to ${i.key} ${ws.id}`} label={ws.name} onPress={() => void assignTo($, choosing.member, ws.id)} />),
+        <Button key={`assign-to ${i.key} -`} label="No workspace" onPress={() => void assignTo($, choosing.member, '')} />,
+        <Button key={`assign-cancel ${i.key}`} label="Back" onPress={() => void update($, assigning, () => ({ key: '', member: '' }))} />,
+      ]
+      return (
+        <Box key={`row ${i.key}`} flexDirection="column" width={width}>
+          {itemRow(i, siblings, scope)}
+          {open === id && bar(id, 6, choosing.key === i.key ? choices() : actions())}
+        </Box>
+      )
+    }
     const repoKeys = view.repos.map(r => r.key)
 
     const problems = snap.problems.map(p => (
@@ -1155,10 +1196,10 @@ export const register: Register = on => {
         <Box key="workspaces" flexDirection="column" width={width} marginTop={1}>
           <Box flexDirection="row" width={width} columnGap={1}>
             <Text bold>Workspaces</Text>
-            {Input !== undefined && !form.isOpen && <Button key="workspace:new" label="+ workspace" plain onPress={openForm('')} />}
+            {Input !== undefined && !form.isOpen && <Button key="workspace:new" label="+ New workspace (n)" hotkey="n" onPress={openForm('')} />}
           </Box>
           {view.workspaces.length === 0 && !form.isOpen && (
-            <Text dimColor wrap="truncate-end">{'  none yet: + workspace, or /workspace new <folder> <env> <name> --for <purpose>'}</Text>
+            <Text dimColor wrap="truncate-end">{'  none yet: + New workspace, or /workspace new <folder> <env> <name> --for <purpose>'}</Text>
           )}
           {form.isOpen && Input !== undefined && Select !== undefined && (
             <Box key="form" flexDirection="column" width={width - 2} marginLeft={2}>
@@ -1212,14 +1253,26 @@ export const register: Register = on => {
                 <Box flexShrink={0} marginLeft={1}>
                   <Text dimColor>{ws.isAttached ? 'open' : ws.isRunning ? 'running' : 'stopped'}</Text>
                 </Box>
-                <Box flexShrink={0} marginLeft={1}>
-                  <Button key={`wsopen ${ws.key}`} label="open" onPress={() => void openWorkspaceById($, ws.key)} />
+                <Box flexShrink={0} marginLeft={2}>
+                  <Button key={`wsopen ${ws.key}`} label="Open" onPress={() => void openWorkspaceById($, ws.key)} />
                 </Box>
-                <Box flexShrink={0} marginLeft={1}>
-                  <Button key={`relay ${ws.key}`} label={`relay ${ws.relay.mode}`} plain onPress={() => void cycleRelay($, ws.key)} />
+                <Box flexShrink={0} marginLeft={2}>
+                  <Button key={`relay ${ws.key}`} label={`Relay: ${ws.relay.mode}`} {...(ws.relay.mode === 'auto' ? { variant: 'primary' as const } : {})} onPress={() => void cycleRelay($, ws.key)} />
                 </Box>
-                {arrows(WORKSPACES_SCOPE, view.workspaces.map(w => w.key), ws.key)}
+                {more(`ws:${ws.key}`)}
               </Box>
+              {open === `ws:${ws.key}` &&
+                bar(`ws:${ws.key}`, 4, [
+                  <Button key={`wsopen-bar ${ws.key}`} label="Open (o)" hotkey="o" variant="primary" onPress={() => void openWorkspaceById($, ws.key)} />,
+                  <Button key={`relay-bar ${ws.key}`} label={`Relay: ${ws.relay.mode} → ${RELAY_NEXT[ws.relay.mode]} (r)`} hotkey="r" onPress={() => void cycleRelay($, ws.key)} />,
+                  ...moves(WORKSPACES_SCOPE, view.workspaces.map(w => w.key), ws.key),
+                  <Button
+                    key={`remove ${ws.key}`}
+                    label={isPending(`rm:${ws.key}`) ? 'Press again to remove it' : 'Remove'}
+                    {...(isPending(`rm:${ws.key}`) ? { variant: 'primary' as const } : {})}
+                    onPress={() => void pressRemove(ws.key)()}
+                  />,
+                ])}
               {(ws.relay.status !== '' || ws.relay.isWaiting) && (
                 <Box flexDirection="row" width={width} columnGap={1} marginLeft={4}>
                   <Text dimColor wrap="truncate-end">{`relay: ${ws.relay.isWaiting ? `waits for you after ${RELAY_CAP} hand-offs` : ws.relay.status}`}</Text>
@@ -1241,8 +1294,9 @@ export const register: Register = on => {
               <Box flexGrow={1} flexShrink={1}>
                 <Text bold wrap="truncate-end">{repo.label}</Text>
               </Box>
-              {arrows(REPOS_SCOPE, repoKeys, repo.key)}
+              {repoKeys.length > 1 && more(`repo:${repo.key}`)}
             </Box>
+            {open === `repo:${repo.key}` && bar(`repo:${repo.key}`, 2, moves(REPOS_SCOPE, repoKeys, repo.key))}
             {repo.trees.map(tree => (
               <Box key={`tree-${tree.key}`} flexDirection="column" width={width}>
                 <Box flexDirection="row" width={width}>
@@ -1250,13 +1304,13 @@ export const register: Register = on => {
                     <Text wrap="truncate-end">{`  ${tree.label}`}</Text>
                     {tree.path !== '' && <Text dimColor wrap="truncate-end">{`  ${tree.path}`}</Text>}
                   </Box>
-                  {Input !== undefined && (
-                    <Box flexShrink={0} marginLeft={1}>
-                      <Button key={`new-from:${tree.key}`} label="+ ws" plain onPress={openForm(tree.key)} />
-                    </Box>
-                  )}
-                  {arrows(treesScope(repo.key), repo.trees.map(t => t.key), tree.key)}
+                  {more(`tree:${tree.key}`)}
                 </Box>
+                {open === `tree:${tree.key}` &&
+                  bar(`tree:${tree.key}`, 4, [
+                    ...(Input === undefined ? [] : [<Button key={`new-from:${tree.key}`} label="New workspace here (n)" hotkey="n" variant="primary" onPress={openForm(tree.key)} />]),
+                    ...moves(treesScope(repo.key), repo.trees.map(t => t.key), tree.key),
+                  ])}
                 {tree.items.map(i => sessionRow(i, tree.items.map(x => x.key), itemsScope(tree.key)))}
               </Box>
             ))}
@@ -1265,7 +1319,7 @@ export const register: Register = on => {
         {problems}
         <Box marginTop={1}>
           <Text dimColor wrap="truncate-end">
-            {`checked ${ago(now - snap.checkedAt)} ago${hidden > 0 ? ` · ${hidden} idle longer, hidden` : ''}${hasMove ? ' · [to bg] twice: keeps it running after its tab closes' : ''} · /sessions hides`}
+            {`checked ${ago(now - snap.checkedAt)} ago${hidden > 0 ? ` · ${hidden} idle longer, hidden` : ''} · [ more ] shows a row's actions; a key in ( ) presses one while this pane has the keys (ctrl+x tab) · /sessions hides`}
           </Text>
         </Box>
       </Box>

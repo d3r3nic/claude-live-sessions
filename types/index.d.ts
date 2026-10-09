@@ -124,6 +124,8 @@ declare module 'claude-code' {
       pendingMove: { key: string; at: number }
       /** The new-workspace form, while open. */
       draft: { isOpen: boolean; name: string; query: string; dir: string; env: string; purpose: string; error: string }
+      /** The row whose actions are shown under it: `item:<key>`, `tree:<key>`, `repo:<key>` or `ws:<id>`; '' for none. */
+      selected: string
       /** The git repositories found on this Mac (main checkouts), for the form to offer; [] until looked for. */
       projects: string[]
       /** The session whose workspace is being chosen: its row's key and lasting id; '' when none. */

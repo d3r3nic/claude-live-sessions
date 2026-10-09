@@ -183,6 +183,9 @@ const changed = (pid: number, line: string) => {
   return args === undefined ? withStat : withStat.replace(/(\d{4}\s+).*$/, `$1${args}`)
 }
 
+/** Shows a row's actions, as its [ more ] does: `item:<key>`, `tree:<key>`, `repo:<key>`, `ws:<id>`. */
+const reveal = (ui: { press: (target: { key: string }) => Promise<unknown> }, id: string) => ui.press({ key: `more ${id}` })
+
 /** The fixture machine: each command line the mod runs, answered as macOS would. */
 function machine(argv: readonly string[], env: unknown): Run {
   const pidsAfter = (flag: string) => (argv[argv.indexOf(flag) + 1] ?? '').split(',').map(Number)
@@ -288,7 +291,9 @@ function engine(
   on('session.id', async () => ({ value: selfId }))
   on('command.register', async ($, e) => ({ value: { command: e.name } }))
   const panes = new Map<string, { isShown: boolean; isPlaced: boolean }>()
+  const focusAsked: string[] = []
   on('ui.open', async ($, e) => {
+    if (e.focus === true) focusAsked.push(e.id)
     panes.set(e.id, { isShown: true, isPlaced: true })
     return { value: { isPlaced: true as const } }
   })
@@ -358,7 +363,7 @@ function engine(
     return { value: undefined }
   })
   const collections = () => runs.filter(r => r[0] === '/usr/bin/pgrep').length
-  return { clock, runs, panes, status, toasts, files, store, collections }
+  return { clock, runs, panes, status, toasts, files, store, collections, focusAsked }
 }
 
 const shownOn = async ($: Engine, surface: 'terminal' | 'desktop', columns: number) => {
@@ -762,9 +767,13 @@ describe('pane', () => {
     await $.command.run(SESSIONS)
     const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
     const moves = () => runs.filter(r => r[0] === '/bin/sh' && r[2] === MOVE_SCRIPT)
+    // a working session's actions offer no move
+    await reveal(ui, 'item:claude-101')
+    expect(await ui.find({ key: 'open-bar claude-101' })).toBeDefined()
     expect(await ui.find({ key: 'bg claude-101' })).toBeUndefined()
+    await reveal(ui, 'item:claude-104')
     await ui.press({ key: 'bg claude-104' })
-    expect((await ui.find({ key: 'bg claude-104' }))?.props.label).toBe('sure?')
+    expect((await ui.find({ key: 'bg claude-104' }))?.props.label).toBe('Press again to move it (b)')
     expect(moves()).toEqual([])
     await ui.press({ key: 'bg claude-104' })
     expect(moves()).toEqual([[
@@ -772,7 +781,7 @@ describe('pane', () => {
       "cd '/Users/u' && CLAUDE_CONFIG_DIR='/Users/u/.claude-work' claude --bg --resume session-104 --dangerously-skip-permissions && CLAUDE_CONFIG_DIR='/Users/u/.claude-work' claude attach session-",
       TYPE_SCRIPT,
     ]])
-    expect((await ui.find({ key: 'bg claude-104' }))?.props.label).toBe('to bg')
+    expect((await ui.find({ key: 'bg claude-104' }))?.props.label).toBe('To background (b)')
     await ui.unmount()
   })
 
@@ -782,6 +791,7 @@ describe('pane', () => {
     await $.command.run(SESSIONS)
     const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
     const moves = () => runs.filter(r => r[0] === '/bin/sh' && r[2] === MOVE_SCRIPT)
+    await reveal(ui, 'item:claude-104')
     await ui.press({ key: 'bg claude-104' })
     await clock.advance(7_000)
     await ui.press({ key: 'bg claude-104' })
@@ -802,6 +812,7 @@ describe('pane', () => {
     const moves = () => runs.filter(r => r[0] === '/bin/sh' && r[2] === MOVE_SCRIPT).length
     const path = '/Users/u/.claude-work/sessions/104.json'
     const entry = JSON.parse(files.get(path)!) as Record<string, unknown>
+    await reveal(ui, 'item:claude-104')
     const attempt = async (change: () => void, why: RegExp) => {
       change()
       await ui.press({ key: 'bg claude-104' })
@@ -835,6 +846,8 @@ describe('pane', () => {
     await $.session.start(START)
     await $.command.run(SESSIONS)
     const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    await reveal(ui, 'item:claude-104')
+    expect(await ui.find({ key: 'assign claude-104' })).toBeDefined()
     expect(await ui.find({ key: 'bg claude-104' })).toBeUndefined()
     await ui.unmount()
   })
@@ -848,11 +861,15 @@ describe('pane', () => {
     await $.command.run(SESSIONS)
     const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
     const moves = () => runs.filter(r => r[0] === '/bin/sh' && r[2] === MOVE_SCRIPT).map(r => r[4])
+    await reveal(ui, 'item:claude-101')
     await ui.press({ key: 'bg claude-101' })
+    await reveal(ui, 'item:claude-104')
     await ui.press({ key: 'bg claude-104' })
     expect(moves()).toEqual([])
-    expect((await ui.find({ key: 'bg claude-104' }))?.props.label).toBe('sure?')
-    expect((await ui.find({ key: 'bg claude-101' }))?.props.label).toBe('to bg')
+    expect((await ui.find({ key: 'bg claude-104' }))?.props.label).toBe('Press again to move it (b)')
+    await reveal(ui, 'item:claude-101')
+    expect((await ui.find({ key: 'bg claude-101' }))?.props.label).toBe('To background (b)')
+    await reveal(ui, 'item:claude-104')
     await ui.press({ key: 'bg claude-104' })
     expect(moves()).toEqual(['104'])
     await ui.unmount()
@@ -863,6 +880,7 @@ describe('pane', () => {
     await $.session.start(START)
     await $.command.run(SESSIONS)
     const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    await reveal(ui, 'item:claude-104')
     const twice = async () => {
       await ui.press({ key: 'bg claude-104' })
       await ui.press({ key: 'bg claude-104' })
@@ -885,6 +903,7 @@ describe('pane', () => {
     await $.command.run(SESSIONS)
     const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
     const moves = () => runs.filter(r => r[0] === '/bin/sh' && r[2] === MOVE_SCRIPT).length
+    await reveal(ui, 'item:claude-104')
     await ui.press({ key: 'bg claude-104' })
     const first = ui.press({ key: 'bg claude-104' })
     await clock.settle()
@@ -903,6 +922,8 @@ describe('pane', () => {
     await $.command.run(SESSIONS)
     const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(90) })
     expect(await ui.find({ key: 'open claude-101' })).toBeUndefined()
+    await reveal(ui, 'item:claude-104')
+    expect(await ui.find({ key: 'open-bar claude-104' })).toBeUndefined()
     expect(await ui.find({ key: 'bg claude-104' })).toBeUndefined()
     expect((await ui.findAll({ type: 'Text' })).some(t => t.text === 'WEB CONSOLE')).toBe(true)
     await ui.unmount()
@@ -971,11 +992,13 @@ describe('pane', () => {
     expect(await above('Acme/web-app', 'Acme/api')).toBe(true)
     expect(await ui.find({ key: 'reset-order' })).toBeUndefined()
 
+    await reveal(ui, 'repo:github.com/acme/api')
     await ui.press({ key: 'up repos github.com/acme/api' })
     expect(await above('Acme/api', 'Acme/web-app')).toBe(true)
     expect((store.get('order') as Record<string, string[]>).repos?.slice(0, 2)).toEqual(['github.com/acme/api', 'github.com/acme/web-app'])
 
     // within web-app's main checkout: the working WEB CONSOLE goes below Find the report writer
+    await reveal(ui, 'item:claude-101')
     await ui.press({ key: 'down items:/Users/u/dev/web-app claude-101' })
     expect(await above('Find the report writer', 'WEB CONSOLE')).toBe(true)
 
@@ -1419,6 +1442,61 @@ describe('workspaces', () => {
 })
 
 describe('workspaces, from the pane', () => {
+  test('each row has one [ more ]; it shows the row\'s actions, worded, each with its key; one row at a time', async ($, on) => {
+    const { focusAsked } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    const shown = async (key: string) => (await ui.find({ key }))?.props as { label: string; hotkey?: string } | undefined
+    // closed: none of a row's actions is drawn, only its [ more ]
+    expect((await shown('more item:claude-104'))?.label).toBe('more')
+    expect(await shown('bg claude-104')).toBeUndefined()
+    await reveal(ui, 'item:claude-104')
+    expect((await shown('more item:claude-104'))?.label).toBe('hide')
+    // shown, it asks for the keyboard, so its keys work at once
+    expect(focusAsked).toEqual(['live-sessions'])
+    expect([await shown('open-bar claude-104'), await shown('bg claude-104'), await shown('assign claude-104'), await shown('close item:claude-104')].map(b => [b?.label, b?.hotkey]))
+      .toEqual([['Open (o)', 'o'], ['To background (b)', 'b'], ['Assign to workspace (w)', 'w'], ['Close (x)', 'x']])
+    // another row's [ more ] shows its actions instead
+    await reveal(ui, 'item:claude-101')
+    expect(await shown('bg claude-104')).toBeUndefined()
+    expect((await shown('down items:/Users/u/dev/web-app claude-101'))?.label).toBe('Move down (d)')
+    expect((await shown('down items:/Users/u/dev/web-app claude-101'))?.hotkey).toBe('d')
+    // Close, or its [ hide ], hides them
+    await ui.press({ key: 'close item:claude-101' })
+    expect(await shown('down items:/Users/u/dev/web-app claude-101')).toBeUndefined()
+    await reveal(ui, 'tree:/Users/u/dev/web-app')
+    expect(await shown('new-from:/Users/u/dev/web-app')).toMatchObject({ label: 'New workspace here (n)', hotkey: 'n' })
+    await reveal(ui, 'tree:/Users/u/dev/web-app')
+    expect(await shown('new-from:/Users/u/dev/web-app')).toBeUndefined()
+    expect(await shown('workspace:new')).toMatchObject({ label: '+ New workspace (n)', hotkey: 'n' })
+    // no single-glyph control is left to aim at
+    const labels = (await ui.findAll({ type: 'Button' })).map(b => (b.props as { label: string }).label)
+    expect(labels.filter(l => [...l].length < 3)).toEqual(['1d', '2d', '3d', '7d'])
+    await ui.unmount()
+  })
+
+  test('a workspace: Open and Relay on its row; its actions move, cycle the relay, and remove it on a second press', async ($, on) => {
+    const { files, toasts } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [practice, { ...practice, id: 'other', name: 'Other' }] }))
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    const label = async (key: string) => ((await ui.find({ key }))?.props as { label: string } | undefined)?.label
+    expect([await label('wsopen practice-rbac'), await label('relay practice-rbac')]).toEqual(['Open', 'Relay: off'])
+    await reveal(ui, 'ws:practice-rbac')
+    expect([await label('wsopen-bar practice-rbac'), await label('relay-bar practice-rbac'), await label('up workspaces practice-rbac'), await label('remove practice-rbac')])
+      .toEqual(['Open (o)', 'Relay: off → auto (r)', 'Move up (u)', 'Remove'])
+    await ui.press({ key: 'remove practice-rbac' })
+    expect(await label('remove practice-rbac')).toBe('Press again to remove it')
+    expect(JSON.parse(files.get(WORKSPACES)!).workspaces.map((w: Workspace) => w.id)).toEqual(['practice-rbac', 'other'])
+    await ui.press({ key: 'remove practice-rbac' })
+    expect(JSON.parse(files.get(WORKSPACES)!).workspaces.map((w: Workspace) => w.id)).toEqual(['other'])
+    expect(toasts.at(-1)).toMatch(/^Removed Practice RBAC \(work, \/Users\/u\/dev\/web-app\)\. Its agents keep running in tmux session ws-practice-rbac/)
+    expect(world.removed).toEqual([promptPath(HOME, 'practice-rbac', 'claude'), promptPath(HOME, 'practice-rbac', 'codex')])
+    await ui.unmount()
+  })
+
   test('helpers: the checkout script\'s answers; projects ranked; assigning a session to one workspace; members kept', async () => {
     expect(checkoutResult('ok /Users/u/dev/web-app\n')).toEqual({ checkout: '/Users/u/dev/web-app' })
     expect(checkoutResult('error: not-a-repo\n')).toEqual({ error: 'that folder is not in a git checkout; peer coding works on a git repository' })
@@ -1510,6 +1588,7 @@ describe('workspaces, from the pane', () => {
     await $.session.start(START)
     await $.command.run(SESSIONS)
     const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    await reveal(ui, 'tree:/Users/u/dev/web-app')
     await ui.press({ key: 'new-from:/Users/u/dev/web-app' })
     expect((await ui.find({ key: 'form:project' }))?.props.value).toBe('~/dev/web-app')
     await ui.input({ key: 'form:name', text: 'RBAC v2', kind: 'change' })
@@ -1603,6 +1682,7 @@ describe('workspaces, from the pane', () => {
     await $.session.start(START)
     await $.command.run(SESSIONS)
     const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    await reveal(ui, 'item:claude-104')
     await ui.press({ key: 'assign claude-104' })
     await ui.press({ key: 'assign-to claude-104 practice-rbac' })
     expect(JSON.parse(files.get(WORKSPACES)!).workspaces[0].members).toEqual(['claude:session-104'])
@@ -1723,7 +1803,7 @@ describe('relay', () => {
     const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
     const shown = (await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')
     expect(shown).toMatch(/relay: passed to Codex/)
-    expect((await ui.find({ key: 'relay practice-rbac' }))?.props.label).toBe('relay auto')
+    expect((await ui.find({ key: 'relay practice-rbac' }))?.props.label).toBe('Relay: auto')
     // the next collection (here or in any session) finds the step taken
     await clock.advance(4_000)
     await $.command.run(SESSIONS)
@@ -1842,7 +1922,7 @@ describe('relay', () => {
     await ui.press({ key: 'relay practice-rbac' })
     expect(kept()[0]).toEqual({ mode: 'auto', since: kept()[1].since, streak: 0 })
     expect(kept()[0].since).toBeGreaterThan(NOW - 1)
-    expect((await ui.find({ key: 'relay plain' }))?.props.label).toBe('relay auto')
+    expect((await ui.find({ key: 'relay plain' }))?.props.label).toBe('Relay: auto')
     await ui.unmount()
   })
 })
