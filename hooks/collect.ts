@@ -1,5 +1,6 @@
 // Pure parsing and matching: no `$`, so the tests drive it directly.
 import type { ClaudeSession, CodexSession, Place, Snapshot } from '../types'
+import { RELAY_CAP } from './relay'
 import { tmuxName } from './workspaces'
 
 /** A Codex thread counts as active this long after its last write. */
@@ -870,7 +871,7 @@ export type Item = {
    * What a press opens: the terminal tab it runs in, a background Claude
    * session to attach, or the workspace window it runs in.
    */
-  target?: { tty: string } | { attach: string; profile: string } | { workspace: string; window: string }
+  target?: { tty: string } | { attach: string; profile: string } | { workspace: string; window: string; pane?: string }
   /** Its lasting id for assigning it to a workspace: `claude:<session id>` or `codex:<thread id>`. */
   memberId?: string
   /** For an idle Claude session in a terminal tab: what moving it to the background starts from. */
@@ -887,6 +888,8 @@ export type WorkspaceView = {
   isRunning: boolean
   isAttached: boolean
   items: Item[]
+  /** The relay: its mode, and what it last did, said for the owner ('' when nothing yet). */
+  relay: { mode: 'auto' | 'notify' | 'off'; status: string; isWaiting: boolean }
 }
 export const WORKSPACES_SCOPE = 'workspaces'
 export type RepoView = { key: string; label: string; trees: TreeView[] }
@@ -936,7 +939,7 @@ export function viewOf(
         ...(isSelf
           ? {}
           : inWorkspace(s.tty) !== undefined
-            ? { target: { workspace: inWorkspace(s.tty)!.session, window: inWorkspace(s.tty)!.window } }
+            ? { target: { workspace: inWorkspace(s.tty)!.session, window: inWorkspace(s.tty)!.window, pane: inWorkspace(s.tty)!.pane } }
             : s.kind === 'bg'
             ? { target: { attach: s.jobId || s.sessionId.slice(0, 8), profile: s.profile } }
             : /^ttys\d+$/.test(s.tty)
@@ -962,7 +965,7 @@ export function viewOf(
       ...(s.surface !== 'terminal' || !/^ttys\d+$/.test(s.tty)
         ? {}
         : inWorkspace(s.tty) !== undefined
-          ? { target: { workspace: inWorkspace(s.tty)!.session, window: inWorkspace(s.tty)!.window } }
+          ? { target: { workspace: inWorkspace(s.tty)!.session, window: inWorkspace(s.tty)!.window, pane: inWorkspace(s.tty)!.pane } }
           : { target: { tty: s.tty } }),
     })),
   ]
@@ -1018,6 +1021,11 @@ export function viewOf(
     isRunning: sessionsRunning.has(tmuxName(ws)),
     isAttached: (snap.tmux.clients[tmuxName(ws)]?.length ?? 0) > 0,
     items: arrange(inWorkspaces.get(tmuxName(ws)) ?? [], i => i.key, order[itemsScope(`ws:${ws.id}`)], byActivity),
+    relay: {
+      mode: ws.relay?.mode ?? 'off',
+      status: ws.relay?.status === undefined ? '' : `${ws.relay.status}${ws.relay.at === undefined ? '' : ` ${ago(o.now - ws.relay.at)} ago`}`,
+      isWaiting: ws.relay !== undefined && ws.relay.mode === 'auto' && ws.relay.streak >= RELAY_CAP,
+    },
   }))
   const created = (w: WorkspaceView) => snap.workspaces.findIndex(ws => ws.id === w.key)
   return {

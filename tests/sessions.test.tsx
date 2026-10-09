@@ -51,12 +51,19 @@ import {
 } from '../hooks/collect'
 import type { CodexProc, ThreadRow } from '../hooks/collect'
 import type { Workspace } from '../types'
+import { afterStep, cueOf, parseTurns, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_SCRIPT } from '../hooks/relay'
+import type { Side } from '../hooks/relay'
 import {
   absoluteDir,
   agentStart,
   assigned,
-  worktreeResult,
-  WORKTREE_SCRIPT,
+  checkoutResult,
+  CHECKOUT_SCRIPT,
+  promptPath,
+  PROJECTS_SCRIPT,
+  peerPrompt,
+  rankProjects,
+  setupPrompt,
   envsFrom,
   findWorkspace,
   openCommand,
@@ -135,8 +142,11 @@ const world = {
   spoilsAfterRead: '',
   /** A file that is there but cannot be read (too large, no permission). */
   unreadable: '',
-  /** Folders made while the test runs (a new worktree). */
-  made: new Set<string>(),
+  /** What TURN_SCRIPT prints for a transcript whose path holds the key: its last turn's line. */
+  turns: {} as Record<string, string>,
+  /** The relay's steps already taken (its ledger), and what each tmux pane runs. */
+  ledger: new Set<string>(),
+  paneCommands: {} as Record<string, string>,
   /** Paths that are not there, though the fixtures have them. */
   gone: new Set<string>(),
 }
@@ -154,7 +164,9 @@ const resetWorld = () => {
   world.openFails = false
   world.spoilsAfterRead = ''
   world.unreadable = ''
-  world.made.clear()
+  world.turns = {}
+  world.ledger.clear()
+  world.paneCommands = {}
   world.gone.clear()
 }
 const changed = (pid: number, line: string) => {
@@ -188,15 +200,24 @@ function machine(argv: readonly string[], env: unknown): Run {
       if (argv[2]?.startsWith('tmux has-session')) return ok('')
       if (argv[2] === MOVE_SCRIPT) return world.move === 0 ? ok('typed') : { exitCode: Number(world.move), stdout: '', stderr: '' }
       if (argv[2] === MODE_SCRIPT) return ok(world.mode)
-      if (argv[2] === WORKTREE_SCRIPT) {
-        // the script, as it answers for a repository whose main checkout is /Users/u/dev/web-app (tested for real in host-check)
-        const [dir = '', branch = ''] = args
-        if (!/^[\w./-]+$/.test(branch) || branch.startsWith('-') || branch.includes('..')) return { exitCode: 10, stdout: 'error: bad-name\n', stderr: '' }
-        if (!dir.startsWith('/Users/u/dev/web-app')) return { exitCode: 11, stdout: 'error: not-a-repo\n', stderr: '' }
-        const target = `/Users/u/dev/web-app-worktrees/${branch.replace(/\//g, '-')}`
-        if (world.made.has(target)) return { exitCode: 12, stdout: `error: exists ${target}\n`, stderr: '' }
-        world.made.add(target)
-        return ok(`ok ${target}\n`)
+      if (argv[2] === CHECKOUT_SCRIPT) {
+        // web-app and api are repositories; anything else is not
+        const main = ['/Users/u/dev/web-app', '/Users/u/dev/api'].find(m => args[0] === m || args[0]?.startsWith(`${m}/`))
+        return main === undefined ? { exitCode: 11, stdout: 'error: not-a-repo\n', stderr: '' } : ok(`ok ${main}\n`)
+      }
+      if (argv[2] === PROJECTS_SCRIPT) return ok('/Users/u/dev/web-app\n/Users/u/dev/api\n/Users/u/dev/build\n/Users/u/dev/résumé\n')
+      if (argv[2] === TURN_SCRIPT) {
+        return ok(args.map(f => `==> ${f}\n${Object.entries(world.turns).filter(([k]) => f.includes(k)).map(([, line]) => `${line}\n`).join('')}`).join(''))
+      }
+      if (argv[2] === RELAY_SCRIPT) {
+        // the ledger takes each key once; a pass types only into a pane running an allowed command
+        const [kind, , key = '', pane = '', allow = ''] = args
+        if (world.ledger.has(key)) return ok('taken\n')
+        world.ledger.add(key)
+        if (kind === 'tell') return ok('told\n')
+        const cmd = world.paneCommands[pane]
+        if (cmd === undefined) return ok('gone\n')
+        return ok(allow.split('|').includes(cmd) ? 'passed\n' : `not-agent ${cmd}\n`)
       }
       if (argv[2] === RECENT_SCRIPT) return ok(args.map(f => `==> ${f}\n${(RECENT[f] ?? []).map(l => `${l}\n`).join('')}`).join(''))
       if (argv[2] !== ENV_SCRIPT) return { exitCode: 2, stdout: '', stderr: 'unexpected script' }
@@ -247,8 +268,8 @@ function engine(
     selfId = 'session-elsewhere',
     termProgram,
     moveTakesMs = 0,
-    worktreeTakesMs = 0,
-  }: { canWrite?: boolean; selfId?: string; termProgram?: string; moveTakesMs?: number; worktreeTakesMs?: number } = {},
+    checkoutTakesMs = 0,
+  }: { canWrite?: boolean; selfId?: string; termProgram?: string; moveTakesMs?: number; checkoutTakesMs?: number } = {},
 ) {
   resetWorld()
   on('session.start', async ($, e) => ({ cwd: e.cwd }))
@@ -291,7 +312,7 @@ function engine(
     runs.push([...e.argv])
     const isMove = e.argv[0] === '/bin/sh' && e.argv[2] === MOVE_SCRIPT
     if (isMove && moveTakesMs > 0) await clock.sleep(moveTakesMs)
-    if (e.argv[2] === WORKTREE_SCRIPT && worktreeTakesMs > 0) await clock.sleep(worktreeTakesMs)
+    if (e.argv[2] === CHECKOUT_SCRIPT && checkoutTakesMs > 0) await clock.sleep(checkoutTakesMs)
     if (isMove && world.move === 'reject') return { deny: 'timed out after 40000 ms' }
     return { value: { ...run(e.argv, e.init?.env), isStdoutTruncated: false, isStderrTruncated: false } }
   })
@@ -304,10 +325,10 @@ function engine(
     if (world.gone.has(e.path)) return { value: false }
     const at = e.path.lastIndexOf('/')
     const isListed = LISTINGS[e.path.slice(0, at)]?.some(entry => entry.name === e.path.slice(at + 1)) ?? false
-    return { value: LISTINGS[e.path] !== undefined || isListed || files.has(e.path) || world.made.has(e.path) }
+    return { value: LISTINGS[e.path] !== undefined || isListed || files.has(e.path) }
   })
   on('fs.stat', async ($, e) => {
-    const isDir = LISTINGS[e.path] !== undefined || GIT[e.path] !== undefined || world.made.has(e.path)
+    const isDir = LISTINGS[e.path] !== undefined || GIT[e.path] !== undefined
     return isDir ? { value: { kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false } } : { deny: `ENOENT ${e.path}` }
   })
   on('fs.read', async ($, e) => {
@@ -673,7 +694,7 @@ describe('pane', () => {
     expect(placedAt('NIGHTLY')).toBe(':/Users/u')
     // the shared snapshot holds what is shown and nothing of the processes' arguments
     const shared = files.get(SHARED) ?? ''
-    expect(JSON.parse(shared).version).toBe(6)
+    expect(JSON.parse(shared).version).toBe(7)
     for (const leak of ['opt/homebrew', 'dangerously', '--cd', 'CODEX_HOME']) expect(shared).not.toContain(leak)
 
     for (const surface of ['terminal', 'desktop'] as const) {
@@ -1062,7 +1083,7 @@ describe('pane', () => {
       checkedAt: NOW - 10_000,
       problems: [],
     }
-    files.set(SHARED, JSON.stringify({ version: 6, snapshot: theirs }))
+    files.set(SHARED, JSON.stringify({ version: 7, snapshot: theirs }))
     await $.session.start(START)
     await clock.settle()
     expect(collections()).toBe(0)
@@ -1137,15 +1158,15 @@ describe('workspaces', () => {
     expect(slugOf('Practice RBAC', ['practice-rbac', 'practice-rbac-2'])).toBe('practice-rbac-3')
     expect(slugOf('***')).toBe('workspace')
     expect(words(`new "~/my dir" work Practice 'R B'`)).toEqual(['new', '~/my dir', 'work', 'Practice', 'R B'])
-    expect(parseWorkspaceArgs('new ~/dev/web-app work Practice RBAC', ['work'], HOME)).toEqual({ action: 'new', dir: '/Users/u/dev/web-app', env: 'work', name: 'Practice RBAC', branch: '' })
-    expect(parseWorkspaceArgs('new /x default Name', ['work'], HOME)).toEqual({ action: 'new', dir: '/x', env: '', name: 'Name', branch: '' })
-    expect(parseWorkspaceArgs('new /x work Practice --branch feat/rbac RBAC', ['work'], HOME)).toEqual({ action: 'new', dir: '/x', env: 'work', name: 'Practice RBAC', branch: 'feat/rbac' })
-    expect(parseWorkspaceArgs('new /x work Name --branch', ['work'], HOME)).toEqual({ action: 'help', error: '--branch needs a branch name' })
-    expect(parseWorkspaceArgs('new /x work Name --branch=feat/a', ['work'], HOME)).toMatchObject({ name: 'Name', branch: 'feat/a' })
-    expect(parseWorkspaceArgs('new /x work -b feat/a Name', ['work'], HOME)).toMatchObject({ name: 'Name', branch: 'feat/a' })
-    expect(parseWorkspaceArgs('new /x work Name --brnach feat/a', ['work'], HOME)).toEqual({ action: 'help', error: '"--brnach" is not an option /workspace takes' })
+    expect(parseWorkspaceArgs('new ~/dev/web-app work Practice RBAC', ['work'], HOME)).toEqual({ action: 'new', dir: '/Users/u/dev/web-app', env: 'work', name: 'Practice RBAC', purpose: '' })
+    expect(parseWorkspaceArgs('new /x default Name', ['work'], HOME)).toEqual({ action: 'new', dir: '/x', env: '', name: 'Name', purpose: '' })
+    // every word after --for is the purpose, -- words and all
+    expect(parseWorkspaceArgs('new /x work Practice RBAC --for roles and permissions --for admins', ['work'], HOME))
+      .toEqual({ action: 'new', dir: '/x', env: 'work', name: 'Practice RBAC', purpose: 'roles and permissions --for admins' })
+    expect(parseWorkspaceArgs('new /x work Name --for', ['work'], HOME)).toEqual({ action: 'help', error: '--for needs what the workspace is for' })
+    expect(parseWorkspaceArgs('new /x work Name --branch feat/a', ['work'], HOME)).toEqual({ action: 'help', error: '"--branch" is not an option /workspace takes' })
     // a dash word is part of a name
-    expect(parseWorkspaceArgs('new /x work RBAC - phase -2', ['work'], HOME)).toMatchObject({ name: 'RBAC - phase -2', branch: '' })
+    expect(parseWorkspaceArgs('new /x work RBAC - phase -2', ['work'], HOME)).toMatchObject({ name: 'RBAC - phase -2', purpose: '' })
     // a folder is absolute or starts with ~/; ~name (another person's home) is neither
     for (const folder of ['dev/web-app', '~u/web-app', './web-app']) {
       expect(parseWorkspaceArgs(`new ${folder} work Name`, ['work'], HOME)).toEqual({ action: 'help', error: 'the folder must be absolute or start with ~/' })
@@ -1168,13 +1189,21 @@ describe('workspaces', () => {
     expect(agentStart('claude', '', HOME)).toBe(`env ${MARKERS} claude`)
     expect(agentStart('claude', 'work', HOME)).toBe(`env ${MARKERS} CLAUDE_CONFIG_DIR='/Users/u/.claude-work' claude`)
     expect(agentStart('codex', 'work', HOME)).toBe(`env ${MARKERS} CODEX_HOME='/Users/u/.codex-work' codex`)
-    expect(openCommand(practice, HOME)).toBe([
-      "tmux has-session -t '=ws-practice-rbac' 2>/dev/null ||",
-      `tmux new-session -d -s 'ws-practice-rbac' -c '/Users/u/dev/web-app' -n claude 'env ${MARKERS} CLAUDE_CONFIG_DIR='\\''/Users/u/.claude-work'\\'' claude; exec "$SHELL" -l'`,
-      `\\; new-window -t '=ws-practice-rbac:' -c '/Users/u/dev/web-app' -n codex 'env ${MARKERS} CODEX_HOME='\\''/Users/u/.codex-work'\\'' codex; exec "$SHELL" -l'`,
-      `\\; set-option -t 'ws-practice-rbac' @live-sessions-workspace '${NOW}';`,
-      "tmux attach -t '=ws-practice-rbac'",
-    ].join(' '))
+    // one window, Claude on the left and Codex on the right, each pane marked with its agent
+    const cmd = openCommand(practice, HOME)
+    expect(cmd.startsWith("tmux has-session -t '=ws-practice-rbac' 2>/dev/null || tmux new-session -d -s 'ws-practice-rbac' -c '/Users/u/dev/web-app' -n peers ")).toBe(true)
+    expect(cmd.indexOf('\\; set-option -p @live-sessions-agent claude \\; split-window -h -c \'/Users/u/dev/web-app\' ')).toBeGreaterThan(0)
+    expect(cmd.indexOf('\\; set-option -p @live-sessions-agent codex \\; set-option -t \'ws-practice-rbac\' @live-sessions-workspace')).toBeGreaterThan(cmd.indexOf('split-window'))
+    expect(cmd.endsWith("; tmux attach -t '=ws-practice-rbac'")).toBe(true)
+    // its agents may work in the worktrees folder beside the checkout; Claude takes the first prompt once
+    const withCheckout = openCommand({ ...practice, checkout: '/Users/u/dev/web-app' }, HOME)
+    expect(withCheckout.match(/--add-dir/g)).toHaveLength(2)
+    expect(withCheckout).toContain('/Users/u/dev/web-app-worktrees')
+    expect(withCheckout).toContain('Application Support/live-sessions/prompts/practice-rbac-claude.txt')
+    expect(withCheckout).toContain('Application Support/live-sessions/prompts/practice-rbac-codex.txt')
+    expect(cmd).not.toContain('--add-dir')
+    // Codex starts without its update offer, whose default answer on Enter installs a new version
+    expect(cmd).toContain('codex -c check_for_update_on_startup=false')
     expect(openCommand({ ...practice, env: '', dir: "/Users/u/it's" }, HOME, { attach: false })).toContain(`-c '/Users/u/it'\\''s'`)
     expect(openCommand(practice, HOME, { attach: false })).not.toContain('attach')
     // tmux would expand #{...} in -c: a literal # goes in doubled
@@ -1182,8 +1211,10 @@ describe('workspaces', () => {
   })
 
   test('tmux panes and clients; the environments on disk', async () => {
-    expect(parsePanes('ws-a\tclaude\t/dev/ttys050\nws-a\tcodex\t/dev/ttys051\nauth\tzsh\t/dev/ttys052\n')).toEqual({
-      ttys050: { session: 'ws-a', window: 'claude' }, ttys051: { session: 'ws-a', window: 'codex' }, ttys052: { session: 'auth', window: 'zsh' },
+    // a pane's mark names its agent; a workspace made before the marks had a window per agent
+    expect(parsePanes('ws-a\tpeers\t/dev/ttys050\t%1\tclaude\nws-a\tpeers\t/dev/ttys051\t%2\tcodex\nws-b\tcodex\t/dev/ttys053\t%4\t\nauth\tzsh\t/dev/ttys052\t%3\t\n')).toEqual({
+      ttys050: { session: 'ws-a', window: 'claude', pane: '%1' }, ttys051: { session: 'ws-a', window: 'codex', pane: '%2' },
+      ttys053: { session: 'ws-b', window: 'codex', pane: '%4' }, ttys052: { session: 'auth', window: 'zsh', pane: '%3' },
     })
     expect(parseClients('ws-a\t/dev/ttys060\n')).toEqual({ 'ws-a': ['ttys060'] })
     // an environment is offered only with both a Claude and a Codex profile
@@ -1229,9 +1260,13 @@ describe('workspaces', () => {
     await $.session.start(START)
     const text = (await $.command.run({ ...SESSIONS, command: 'workspace', args: 'new ~/dev/web-app work Practice RBAC' })).text
     expect(text).toMatch(/^Created Practice RBAC \(work, \/Users\/u\/dev\/web-app\).*Opened ws-practice-rbac in a new Terminal window\.$/)
-    expect(JSON.parse(files.get(WORKSPACES)!).workspaces).toEqual([{ ...practice, createdAt: expect.any(Number) }])
+    // its repository's main checkout is kept: the agents may work in the worktrees folder beside it
+    expect(JSON.parse(files.get(WORKSPACES)!).workspaces).toEqual([{ ...practice, checkout: '/Users/u/dev/web-app', createdAt: expect.any(Number) }])
+    expect(runs.find(r => r[2] === CHECKOUT_SCRIPT)?.slice(4)).toEqual(['/Users/u/dev/web-app'])
     const opened = runs.filter(r => r[0] === '/usr/bin/osascript' && r[4] === OPEN_SCRIPT).map(r => r[5])
-    expect(opened).toEqual([openCommand({ ...practice, createdAt: JSON.parse(files.get(WORKSPACES)!).workspaces[0].createdAt }, HOME)])
+    expect(opened).toEqual([openCommand(JSON.parse(files.get(WORKSPACES)!).workspaces[0], HOME)])
+    // no purpose: no first prompt, and no relay
+    expect(files.has(promptPath(HOME, 'practice-rbac', 'claude')) || files.has(promptPath(HOME, 'practice-rbac', 'codex'))).toBe(false)
     // listed in the pane, stopped until tmux reports its session
     await $.command.run(SESSIONS)
     const shown = (await shownOn($, 'terminal', 110)).join('\n')
@@ -1242,7 +1277,7 @@ describe('workspaces', () => {
   test('/workspace open focuses the terminal already attached, else opens one; rm forgets it', async ($, on) => {
     const { runs, files } = engine(on, machine, { termProgram: 'Apple_Terminal' })
     files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [practice] }))
-    world.tmuxPanes = 'ws-practice-rbac\tclaude\t/dev/ttys004\nws-practice-rbac\tcodex\t/dev/ttys045\n'
+    world.tmuxPanes = 'ws-practice-rbac\tpeers\t/dev/ttys004\t%1\tclaude\nws-practice-rbac\tpeers\t/dev/ttys045\t%2\tcodex\n'
     world.tmuxClients = 'ws-practice-rbac\t/dev/ttys001\n'
     world.tmuxOwner = String(NOW)
     await $.session.start(START)
@@ -1256,7 +1291,8 @@ describe('workspaces', () => {
     expect(shown).toContain('Practice RBAC')
     expect(shown).toContain('open')
     await ui.press({ key: 'open codex-' + RESUMED_A })
-    expect(runs.find(r => r[0] === 'tmux' && r[1] === 'select-window')).toEqual(['tmux', 'select-window', '-t', '=ws-practice-rbac:codex'])
+    // its pane: its window, then the pane itself
+    expect(runs.filter(r => r[0] === 'tmux' && (r[1] === 'select-window' || r[1] === 'select-pane'))).toEqual([['tmux', 'select-window', '-t', '%2'], ['tmux', 'select-pane', '-t', '%2']])
     await ui.unmount()
     // with no terminal attached it opens one
     world.tmuxClients = ''
@@ -1364,12 +1400,25 @@ describe('workspaces', () => {
 })
 
 describe('workspaces, from the pane', () => {
-  test('helpers: the worktree script\'s answers; assigning a session to one workspace; members kept', async () => {
-    expect(worktreeResult('ok /Users/u/dev/web-app-worktrees/feat-rbac-v2\n', 'feat/rbac/v2')).toEqual({ dir: '/Users/u/dev/web-app-worktrees/feat-rbac-v2' })
-    expect(worktreeResult('error: bad-name\n', 'a..b')).toEqual({ error: '"a..b" is not a branch name git takes' })
-    expect(worktreeResult('error: exists /r-worktrees/x\n', 'x')).toEqual({ error: '/r-worktrees/x is already there' })
-    expect(worktreeResult("error: git fatal: 'feat/a' is already used by worktree at '/r'\n", 'feat/a')).toEqual({ error: "git could not make the worktree (fatal: 'feat/a' is already used by worktree at '/r')" })
-    expect(worktreeResult('', 'x')).toEqual({ error: 'git could not make the worktree' })
+  test('helpers: the checkout script\'s answers; projects ranked; assigning a session to one workspace; members kept', async () => {
+    expect(checkoutResult('ok /Users/u/dev/web-app\n')).toEqual({ checkout: '/Users/u/dev/web-app' })
+    expect(checkoutResult('error: not-a-repo\n')).toEqual({ error: 'that folder is not in a git checkout; peer coding works on a git repository' })
+    expect(checkoutResult('error: no-main\n')).toEqual({ error: 'git cannot tell where this repository\'s main checkout is; pick the main checkout' })
+    expect(checkoutResult('')).toEqual({ error: 'its worktrees folder could not be made beside the repository' })
+    // the projects with a session most recently first (in the checkout, under it or in its worktrees), then by path
+    const paths = ['/Users/u/z', '/Users/u/dev/api', '/Users/u/dev/web-app', '/Users/u/a']
+    const activity = [{ cwd: '/Users/u/dev/web-app-worktrees/feat-x', at: 5 }, { cwd: '/Users/u/dev/api/src', at: 9 }, { cwd: '/Users/u/dev/web-apps', at: 99 }]
+    expect(rankProjects(paths, activity, '', HOME).map(p => p.label)).toEqual(['~/dev/api', '~/dev/web-app', '~/a', '~/z'])
+    expect(rankProjects(paths, activity, 'WEB', HOME)).toEqual([{ path: '/Users/u/dev/web-app', label: '~/dev/web-app' }])
+    expect(rankProjects(paths, [], '~/dev/', HOME, 1).map(p => p.label)).toEqual(['~/dev/api'])
+    // Claude's first prompt: the purpose, the rules, a branch named for the purpose (never the workspace's name)
+    const prompt = setupPrompt({ name: 'Practice RBAC', purpose: 'roles and permissions for admins', checkout: '/Users/u/dev/web-app' })
+    expect(prompt).toContain('What it is for: roles and permissions for admins')
+    expect(prompt).toContain('peer-coding skill')
+    expect(prompt).toContain('never from the workspace\'s name')
+    expect(prompt).toContain('/Users/u/dev/web-app-worktrees/')
+    // Codex's: it is the peer, the relay will bring Claude's hand-off; it answers that it is ready
+    expect(peerPrompt({ name: 'Practice RBAC', purpose: 'roles' })).toMatch(/^This is the workspace "Practice RBAC"\. What it is for: roles\n[\s\S]*You are Codex[\s\S]*reply with one short line saying you are ready\.$/)
     // a profile pair named `default` would mean two things
     expect(envsFrom(['.claude-default', '.codex-default', '.claude-work', '.codex-work'], () => true)).toEqual(['', 'work'])
     const two = [practice, { ...practice, id: 'other', name: 'Other' }]
@@ -1402,7 +1451,7 @@ describe('workspaces, from the pane', () => {
     expect(view.repos.flatMap(r => r.trees.flatMap(t => t.items)).find(i => i.title === 'session (thread not found)')?.memberId).toBeUndefined()
   })
 
-  test('+ workspace opens the form; it creates the workspace from what was typed and picked', async ($, on) => {
+  test('+ workspace opens the form: a project searched and picked, an environment, a purpose; Claude gets it ready', async ($, on) => {
     const { files, runs } = engine(on, machine, { termProgram: 'Apple_Terminal' })
     await $.session.start(START)
     await $.command.run(SESSIONS)
@@ -1412,41 +1461,47 @@ describe('workspaces, from the pane', () => {
     await ui.press({ key: 'form:create' })
     expect((await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')).toContain('Not done: a workspace needs a name.')
     await ui.input({ key: 'form:name', text: 'Practice RBAC', kind: 'change' })
-    await ui.input({ key: 'form:dir', text: '~/dev/web-app', kind: 'change' })
+    // the repositories on this Mac, searched by what is typed; those worked in lately first
+    expect(runs.filter(r => r[2] === PROJECTS_SCRIPT).map(r => r[4])).toEqual([HOME])
+    const offered = async () => ((await ui.find({ key: 'form:pick' }))?.props.options as { label: string }[] | undefined)?.map(o => o.label)
+    expect(await offered()).toEqual(['~/dev/web-app', '~/dev/api', '~/dev/build', '~/dev/résumé'])
+    await ui.input({ key: 'form:project', text: 'ap', kind: 'change' })
+    expect(await offered()).toEqual(['~/dev/web-app', '~/dev/api'])
+    await ui.select({ key: 'form:pick', value: '/Users/u/dev/web-app' })
+    expect((await ui.find({ key: 'form:project' }))?.props.value).toBe('~/dev/web-app')
+    expect(await ui.find({ key: 'form:pick' })).toBeUndefined()
     await ui.select({ key: 'form:env', value: 'work' })
+    await ui.input({ key: 'form:purpose', text: 'roles and permissions for admins', kind: 'change' })
     await ui.press({ key: 'form:create' })
     const saved = JSON.parse(files.get(WORKSPACES)!).workspaces
-    expect(saved.map((w: Workspace) => [w.id, w.env, w.dir])).toEqual([['practice-rbac', 'work', '/Users/u/dev/web-app']])
-    expect(runs.some(r => r[0] === '/usr/bin/osascript' && r[4] === OPEN_SCRIPT)).toBe(true)
+    expect(saved.map((w: Workspace) => [w.id, w.env, w.dir, w.checkout, w.purpose, w.relay])).toEqual([
+      ['practice-rbac', 'work', '/Users/u/dev/web-app', '/Users/u/dev/web-app', 'roles and permissions for admins', { mode: 'auto', since: saved[0].createdAt, streak: 0 }],
+    ])
+    // each agent's first prompt waits in its file; the window opens with Claude and Codex side by side
+    expect(files.get(promptPath(HOME, 'practice-rbac', 'claude'))).toBe(setupPrompt(saved[0]))
+    expect(files.get(promptPath(HOME, 'practice-rbac', 'codex'))).toBe(peerPrompt(saved[0]))
+    expect(runs.filter(r => r[0] === '/usr/bin/osascript' && r[4] === OPEN_SCRIPT).map(r => r[5])).toEqual([openCommand(saved[0], HOME)])
     // the form closes once it is made
     expect(await ui.find({ key: 'form:name' })).toBeUndefined()
     await ui.unmount()
   })
 
-  test('+ ws on a branch row fills in its folder; a new branch gets its own worktree beside the repository', async ($, on) => {
-    const { files, runs } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+  test('+ ws on a branch row fills in its folder; a purpose needs a git repository', async ($, on) => {
+    const { files } = engine(on, machine, { termProgram: 'Apple_Terminal' })
     await $.session.start(START)
     await $.command.run(SESSIONS)
     const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
     await ui.press({ key: 'new-from:/Users/u/dev/web-app' })
-    expect((await ui.find({ key: 'form:dir' }))?.props.value).toBe('/Users/u/dev/web-app')
+    expect((await ui.find({ key: 'form:project' }))?.props.value).toBe('~/dev/web-app')
     await ui.input({ key: 'form:name', text: 'RBAC v2', kind: 'change' })
-    await ui.input({ key: 'form:branch', text: 'feat/rbac', kind: 'change' })
     await ui.press({ key: 'form:create' })
-    expect(runs.find(r => r[2] === WORKTREE_SCRIPT)).toEqual(['/bin/sh', '-c', WORKTREE_SCRIPT, 'sh', '/Users/u/dev/web-app', 'feat/rbac'])
-    expect(JSON.parse(files.get(WORKSPACES)!).workspaces[0].dir).toBe('/Users/u/dev/web-app-worktrees/feat-rbac')
+    expect(JSON.parse(files.get(WORKSPACES)!).workspaces[0].dir).toBe('/Users/u/dev/web-app')
     await ui.unmount()
-  })
-
-  test('the command takes --branch too; a bad name, a folder outside git, a worktree already there refused', async ($, on) => {
-    const { runs } = engine(on, machine, { termProgram: 'Apple_Terminal' })
-    await $.session.start(START)
+    // a folder outside git takes a workspace, but not one for a purpose
     const run = async (args: string) => (await $.command.run({ ...SESSIONS, command: 'workspace', args })).text
-    expect(await run('new ~/dev/web-app work Old --branch feat/old')).toMatch(/^Created Old \(work, \/Users\/u\/dev\/web-app-worktrees\/feat-old\)/)
-    expect(runs.filter(r => r[2] === WORKTREE_SCRIPT).map(r => r.slice(4))).toEqual([['/Users/u/dev/web-app', 'feat/old']])
-    expect(await run('new ~/dev/web-app work Bad --branch a..b')).toBe('Not done: "a..b" is not a branch name git takes.')
-    expect(await run('new ~ work Out --branch feat/x')).toBe('Not done: that folder is not in a git checkout, so it has no branches.')
-    expect(await run('new ~/dev/web-app work Again --branch feat/old')).toBe('Not done: /Users/u/dev/web-app-worktrees/feat-old is already there.')
+    expect(await run('new ~ work Plain')).toMatch(/^Created Plain/)
+    expect(await run('new ~ work Peers --for a thing')).toBe('Not done: that folder is not in a git checkout; peer coding works on a git repository.')
+    expect(await run('new ~/dev/api work Peers --for a thing')).toMatch(/Claude gets peer coding ready for it/)
   })
 
   test('the form refuses a relative folder, a gone environment and an unreadable list, before any git or tmux', async ($, on) => {
@@ -1455,14 +1510,13 @@ describe('workspaces, from the pane', () => {
     await $.command.run(SESSIONS)
     const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
     const error = async () => (await ui.findAll({ type: 'Text' })).map(t => t.text).find(t => t.startsWith('Not done')) ?? ''
-    const acting = () => runs.filter(r => r[2] === WORKTREE_SCRIPT || r[0] === 'tmux' && r[1] !== 'list-panes' && r[1] !== 'list-clients' || r[4] === OPEN_SCRIPT)
+    const acting = () => runs.filter(r => r[2] === CHECKOUT_SCRIPT || r[0] === 'tmux' && r[1] !== 'list-panes' && r[1] !== 'list-clients' || r[4] === OPEN_SCRIPT)
     await ui.press({ key: 'workspace:new' })
     await ui.input({ key: 'form:name', text: 'Rel', kind: 'change' })
-    await ui.input({ key: 'form:dir', text: 'dev/web-app', kind: 'change' })
+    await ui.input({ key: 'form:project', text: 'dev/web-app', kind: 'change' })
     await ui.press({ key: 'form:create' })
     expect(await error()).toBe('Not done: the folder must be absolute or start with ~/ ("dev/web-app" is neither).')
-    await ui.input({ key: 'form:dir', text: '~/dev/web-app', kind: 'change' })
-    await ui.input({ key: 'form:branch', text: 'feat/x', kind: 'change' })
+    await ui.input({ key: 'form:project', text: '~/dev/web-app', kind: 'change' })
     await ui.select({ key: 'form:env', value: 'work' })
     // the work profile went away after the form was opened
     world.gone.add('/Users/u/.codex-work/auth.json')
@@ -1479,48 +1533,47 @@ describe('workspaces, from the pane', () => {
     // picked back to default: the default accounts, ''
     world.unreadable = ''
     await ui.select({ key: 'form:env', value: 'default' })
-    await ui.input({ key: 'form:branch', text: '', kind: 'change' })
     await ui.press({ key: 'form:create' })
     expect(JSON.parse(files.get(WORKSPACES)!).workspaces.map((w: Workspace) => [w.env, w.dir])).toEqual([['', '/Users/u/dev/web-app']])
     await ui.unmount()
   })
 
   test('create pressed twice while the first is being made makes one workspace and one window', { timeoutMs: 4_000 }, async ($, on) => {
-    const { files, runs, clock } = engine(on, machine, { termProgram: 'Apple_Terminal', worktreeTakesMs: 5_000 })
+    const { files, runs, clock } = engine(on, machine, { termProgram: 'Apple_Terminal', checkoutTakesMs: 5_000 })
     await $.session.start(START)
     await $.command.run(SESSIONS)
     const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
     await ui.press({ key: 'workspace:new' })
     await ui.input({ key: 'form:name', text: 'Twice', kind: 'change' })
-    await ui.input({ key: 'form:dir', text: '~/dev/web-app', kind: 'change' })
-    await ui.input({ key: 'form:branch', text: 'feat/twice', kind: 'change' })
+    await ui.input({ key: 'form:project', text: '~/dev/web-app', kind: 'change' })
     const first = ui.press({ key: 'form:create' })
     await clock.settle()
     expect((await ui.find({ key: 'form:create' }))?.props.label).toBe('creating…')
     await ui.press({ key: 'form:create' })
-    await ui.input({ key: 'form:branch', text: 'feat/twice', kind: 'submit' })
+    await ui.input({ key: 'form:name', text: 'Twice', kind: 'submit' })
     // the command waits its turn too
     expect((await $.command.run({ ...SESSIONS, command: 'workspace', args: 'new ~/dev/web-app work Third' })).text).toBe('Not done: a workspace is already being made.')
     await clock.advance(5_000)
     await first
     await clock.settle()
     expect(JSON.parse(files.get(WORKSPACES)!).workspaces.map((w: Workspace) => w.id)).toEqual(['twice'])
-    expect(runs.filter(r => r[2] === WORKTREE_SCRIPT)).toHaveLength(1)
+    expect(runs.filter(r => r[2] === CHECKOUT_SCRIPT)).toHaveLength(1)
     expect(runs.filter(r => r[4] === OPEN_SCRIPT)).toHaveLength(1)
     await ui.unmount()
   })
 
   test('a reload of the plugin while a create is cut off never holds the next create back', { timeoutMs: 4_000 }, async ($, on) => {
-    const { files, clock } = engine(on, machine, { termProgram: 'Apple_Terminal', worktreeTakesMs: 5_000 })
+    const { files, clock } = engine(on, machine, { termProgram: 'Apple_Terminal', checkoutTakesMs: 5_000 })
     await $.session.start(START)
     const run = (args: string) => $.command.run({ ...SESSIONS, command: 'workspace', args })
-    const cut = run('new ~/dev/web-app work Cut --branch feat/cut')
+    const cut = run('new ~/dev/web-app work Cut')
     await clock.settle()
     expect((await run('new ~/dev/web-app work Waits')).text).toBe('Not done: a workspace is already being made.')
     // the plugin loads again (register runs, session.start fires): the flag of the cut-off create goes
     await $.session.start(START)
-    expect((await run('new ~/dev/web-app work After')).text).toMatch(/^Created After/)
+    const after = run('new ~/dev/web-app work After')
     await clock.advance(5_000)
+    expect((await after).text).toMatch(/^Created After/)
     await cut
     expect(JSON.parse(files.get(WORKSPACES)!).workspaces.map((w: Workspace) => w.id)).toContain('after')
   })
@@ -1542,6 +1595,150 @@ describe('workspaces, from the pane', () => {
     await ui.press({ key: 'assign claude-104' })
     await ui.press({ key: 'assign-to claude-104 -' })
     expect(JSON.parse(files.get(WORKSPACES)!).workspaces[0].members).toBeUndefined()
+    await ui.unmount()
+  })
+})
+
+const relayOn = (fields: Partial<Workspace['relay'] & object> = {}) => ({ mode: 'auto' as const, since: NOW - 3600_000, streak: 0, ...fields })
+const done = (id: string, cueLine: string, at = NOW - 60_000) => ({ state: 'done' as const, id, at, ...(cueOf(cueLine) === undefined ? {} : { cue: cueOf(cueLine)! }) })
+const READY_CODEX = 'READY FOR CODEX · peer-coding/feat-rbac ALIGN BRIEFED · feat/rbac@abc1234 · worktree: /Users/u/dev/web-app-worktrees/feat-rbac'
+const READY_CLAUDE = 'READY FOR CLAUDE · peer-coding/feat-rbac R1 · feat/rbac@def5678'
+
+describe('relay', () => {
+  test('cues: the rules\' three kinds, at the start of a line, marks around them dropped', async () => {
+    expect(cueOf(READY_CODEX)).toEqual({ kind: 'ready', to: 'codex', line: READY_CODEX })
+    expect(cueOf(`\`${READY_CLAUDE}\``)).toEqual({ kind: 'ready', to: 'claude', line: READY_CLAUDE })
+    expect(cueOf('1. **NEEDS USER · peer-coding/feat-rbac · feat/rbac@abc1234**')).toEqual({ kind: 'needs-user', line: 'NEEDS USER · peer-coding/feat-rbac · feat/rbac@abc1234' })
+    expect(cueOf('SCOPE CLOSED · peer-coding/x · x@1 · awaiting the owner')?.kind).toBe('scope-closed')
+    for (const not of ['', 'I am READY FOR CODEX · x', 'READY FOR CODEX now', 'READY FOR GEMINI · x']) expect(cueOf(not)).toBeUndefined()
+    // one line, never a control character, at most 1000 characters
+    expect(cueOf(`READY FOR CODEX · a\u001b[2Jb${'x'.repeat(2000)}`)?.line).toHaveLength(1000)
+    expect(cueOf(`READY FOR CODEX · a\u001b[2Jb`)?.line).toBe('READY FOR CODEX · a [2Jb')
+  })
+
+  test('turns: each file\'s last turn, done with its cue or under way', async () => {
+    const out = [
+      '==> /c.jsonl', `done\tu-1\t2026-10-09T10:05:00Z\t${READY_CODEX}`,
+      '==> /x.jsonl', 'busy\tturn-2\t2026-10-09T10:06:00Z\t',
+      '==> /n.jsonl', 'done\tturn-3\t2026-10-09T10:07:00Z\t',
+      '==> /bad.jsonl', 'done\tbad id;rm\t2026-10-09T10:07:00Z\t', 'done\tok-1\tnot a time\t',
+      '==> /none.jsonl',
+    ].join('\n')
+    const turns = parseTurns(out)
+    expect([...turns.keys()]).toEqual(['/c.jsonl', '/x.jsonl', '/n.jsonl'])
+    expect(turns.get('/c.jsonl')).toEqual({ state: 'done', id: 'u-1', at: Date.parse('2026-10-09T10:05:00Z'), cue: cueOf(READY_CODEX) })
+    expect(turns.get('/x.jsonl')).toEqual({ state: 'busy', id: 'turn-2', at: Date.parse('2026-10-09T10:06:00Z') })
+    expect(turns.get('/n.jsonl')?.cue).toBeUndefined()
+  })
+
+  test('steps: a hand-off passes once the other agent is free; the owner is told what is theirs', async () => {
+    const ws = { name: 'RBAC', relay: relayOn() }
+    // by default each has finished a turn (its first prompt) with no cue
+    // null: no turn finished yet
+    const claude = (turn: ReturnType<typeof done> | null = done('c0', 'Ready.'), isBusy = false): Side => ({ tool: 'claude', pane: '%1', isBusy, ...(turn === null ? {} : { turn }) })
+    const codex = (turn: ReturnType<typeof done> | null = done('x0', 'Ready.'), isBusy = false): Side => ({ tool: 'codex', pane: '%2', isBusy, ...(turn === null ? {} : { turn }) })
+    expect(relaySteps(ws, { claude: claude(done('c1', READY_CODEX)), codex: codex() })).toEqual([{ kind: 'pass', key: 'pass-c1', to: 'codex', pane: '%2', line: READY_CODEX }])
+    expect(relaySteps(ws, { claude: claude(), codex: codex(done('x1', READY_CLAUDE)) })).toEqual([{ kind: 'pass', key: 'pass-x1', to: 'claude', pane: '%1', line: READY_CLAUDE }])
+    // the other is at work: it waits; the sender still at work, or its turn under way: nothing yet
+    expect(relaySteps(ws, { claude: claude(done('c1', READY_CODEX)), codex: codex(done('x0', 'Ready.'), true) })).toEqual([])
+    // the other has not finished a turn: it may be at a question of its own (trust, an update) that Enter
+    // would answer, so nothing is typed; the owner is told once
+    expect(relaySteps(ws, { claude: claude(done('c1', READY_CODEX)), codex: codex(null) })).toEqual([
+      { kind: 'tell', key: 'wait-c1', text: 'RBAC: Claude handed over; the relay passes it once Codex has finished a turn. If Codex is waiting at a question in its pane, answer it.', isForOwner: false },
+    ])
+    expect(relaySteps(ws, { claude: claude(done('c1', READY_CODEX), true), codex: codex() })).toEqual([])
+    // a turn that ended before the relay was turned on, no cue, or a cue for itself: nothing
+    expect(relaySteps({ ...ws, relay: relayOn({ since: NOW }) }, { claude: claude(done('c1', READY_CODEX)), codex: codex() })).toEqual([])
+    expect(relaySteps(ws, { claude: claude(done('c1', 'All done.')), codex: codex() })).toEqual([])
+    expect(relaySteps(ws, { claude: claude(done('c1', READY_CLAUDE)), codex: codex() })).toEqual([])
+    // off: nothing; notify: the owner is told instead, with the line to paste
+    expect(relaySteps({ ...ws, relay: relayOn({ mode: 'off' }) }, { claude: claude(done('c1', READY_CODEX)), codex: codex() })).toEqual([])
+    expect(relaySteps({ name: 'RBAC' }, { claude: claude(done('c1', READY_CODEX)), codex: codex() })).toEqual([])
+    expect(relaySteps({ ...ws, relay: relayOn({ mode: 'notify' }) }, { claude: claude(done('c1', READY_CODEX)), codex: codex() }))
+      .toEqual([{ kind: 'tell', key: 'tell-c1', text: `RBAC: Claude handed over to Codex. Paste: ${READY_CODEX}`, isForOwner: false }])
+    // NEEDS USER and SCOPE CLOSED are the owner's, in either mode
+    const needs = 'NEEDS USER · peer-coding/feat-rbac · feat/rbac@abc1234'
+    expect(relaySteps(ws, { claude: claude(done('c2', needs)), codex: codex() })).toEqual([{ kind: 'tell', key: 'tell-c2', text: `RBAC: Claude needs you. ${needs}`, isForOwner: true }])
+    // the other agent is not running in the workspace: the owner is told
+    expect(relaySteps(ws, { claude: claude(done('c1', READY_CODEX)) })).toEqual([
+      { kind: 'tell', key: 'tell-c1', text: `RBAC: Claude handed over, but Codex is not running in the workspace. Paste: ${READY_CODEX}`, isForOwner: true },
+    ])
+    // after RELAY_CAP passes in a row it waits for the owner
+    expect(relaySteps({ ...ws, relay: relayOn({ streak: RELAY_CAP }) }, { claude: claude(done('c1', READY_CODEX)), codex: codex() }).map(s => s.key)).toEqual(['cap-c1'])
+    // the count: a pass adds one; a cue for the owner starts it again
+    const pass = { kind: 'pass' as const, key: 'pass-c1', to: 'codex' as const, pane: '%2', line: READY_CODEX }
+    expect(afterStep(relayOn({ streak: 3 }), pass, 'passed', NOW)).toEqual(relayOn({ streak: 4, status: 'passed to Codex', at: NOW }))
+    expect(afterStep(relayOn({ streak: 3 }), pass, 'not-agent zsh', NOW)).toEqual(relayOn({ streak: 3, status: 'could not pass to Codex', at: NOW }))
+    expect(afterStep(relayOn({ streak: 3 }), { kind: 'tell', key: 'tell-c2', text: '', isForOwner: true }, 'told', NOW)).toEqual(relayOn({ streak: 0, status: 'needs you', at: NOW }))
+  })
+
+  test('the collecting session passes Claude\'s hand-off into Codex\'s pane, once, and shows it', async ($, on) => {
+    const { files, runs } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, checkout: '/Users/u/dev/web-app', purpose: 'RBAC', relay: relayOn() }] }))
+    // WORKER (claude, idle) on the left, the Codex terminal resumed on ttys045 on the right
+    world.tmuxPanes = 'ws-practice-rbac\tpeers\t/dev/ttys022\t%1\tclaude\nws-practice-rbac\tpeers\t/dev/ttys045\t%2\tcodex\n'
+    world.tmuxOwner = String(NOW)
+    world.paneCommands = { '%1': 'claude', '%2': 'node' }
+    world.turns = { 'session-104': `done\tturn-c1\t${new Date(NOW - 60_000).toISOString()}\t${READY_CODEX}`, '/rollouts/a.jsonl': `done\tturn-x0\t${new Date(NOW - 120_000).toISOString()}\t` }
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const relayed = () => runs.filter(r => r[2] === RELAY_SCRIPT).map(r => r.slice(4, 10))
+    const ledger = '/Users/u/Library/Application Support/live-sessions/relayed'
+    expect(relayed()).toEqual([['pass', ledger, 'pass-turn-c1', '%2', 'node|codex', READY_CODEX]])
+    // only the two agents' own records are read
+    const read = runs.find(r => r[2] === TURN_SCRIPT)!.slice(4)
+    expect(read).toHaveLength(2)
+    expect(read.some(f => f.includes('session-104'))).toBe(true)
+    expect(read).toContain('/rollouts/a.jsonl')
+    const relay = JSON.parse(files.get(WORKSPACES)!).workspaces[0].relay
+    expect(relay).toEqual({ ...relayOn({ streak: 1, status: 'passed to Codex' }), at: expect.any(Number) })
+    // shown on the workspace's row, with its mode
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    const shown = (await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')
+    expect(shown).toMatch(/relay: passed to Codex/)
+    expect((await ui.find({ key: 'relay practice-rbac' }))?.props.label).toBe('relay auto')
+    // the next collection (here or in any session) finds the step taken
+    await $.command.run({ ...SESSIONS, args: 'reset' })
+    await $.command.run(SESSIONS)
+    await $.command.run(SESSIONS)
+    expect(JSON.parse(files.get(WORKSPACES)!).workspaces[0].relay.streak).toBe(1)
+    await ui.unmount()
+  })
+
+  test('never types into a pane that runs a shell; tells the owner instead', async ($, on) => {
+    const { files, runs } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, checkout: '/Users/u/dev/web-app', relay: relayOn() }] }))
+    world.tmuxPanes = 'ws-practice-rbac\tpeers\t/dev/ttys022\t%1\tclaude\nws-practice-rbac\tpeers\t/dev/ttys045\t%2\tcodex\n'
+    world.tmuxOwner = String(NOW)
+    // Codex exited: its pane is back at the shell
+    world.paneCommands = { '%1': 'claude', '%2': 'zsh' }
+    world.turns = { 'session-104': `done\tturn-c1\t${new Date(NOW - 60_000).toISOString()}\t${READY_CODEX}`, '/rollouts/a.jsonl': `done\tturn-x0\t${new Date(NOW - 120_000).toISOString()}\t` }
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const steps = runs.filter(r => r[2] === RELAY_SCRIPT).map(r => [r[4], r[6]])
+    expect(steps).toEqual([['pass', 'pass-turn-c1'], ['tell', 'failed-pass-turn-c1']])
+    expect(runs.filter(r => r[2] === RELAY_SCRIPT).at(-1)![9]).toBe(`Practice RBAC: the relay did not pass the hand-off to Codex: its pane runs zsh, not the agent. Paste: ${READY_CODEX}`)
+    expect(JSON.parse(files.get(WORKSPACES)!).workspaces[0].relay.status).toBe('could not pass to Codex')
+  })
+
+  test('the mode button goes auto, notify, off; after the cap, continue lets it go on', async ($, on) => {
+    const { files } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, relay: relayOn({ streak: RELAY_CAP, since: NOW - 1 }) }, { ...practice, id: 'plain', name: 'Plain' }] }))
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    const kept = () => JSON.parse(files.get(WORKSPACES)!).workspaces.map((w: Workspace) => w.relay)
+    expect((await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')).toContain(`relay: waits for you after ${RELAY_CAP} hand-offs`)
+    await ui.press({ key: 'relay-go practice-rbac' })
+    expect(kept()[0]).toEqual(relayOn({ since: NOW - 1, streak: 0, status: 'going on' }))
+    await ui.press({ key: 'relay practice-rbac' })
+    expect(kept()[0].mode).toBe('notify')
+    await ui.press({ key: 'relay practice-rbac' })
+    expect(kept()[0].mode).toBe('off')
+    // turned on, it counts cues from now: an earlier hand-off is never passed
+    await ui.press({ key: 'relay plain' })
+    expect(kept()[1]).toEqual({ mode: 'auto', since: expect.any(Number), streak: 0 })
+    expect((await ui.find({ key: 'relay plain' }))?.props.label).toBe('relay auto')
     await ui.unmount()
   })
 })

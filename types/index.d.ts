@@ -72,6 +72,24 @@ export type Workspace = {
    * form (a hand edit, a later version) is kept as it is.
    */
   members?: unknown[]
+  /** What it is for, in the owner's words: Claude's first prompt gets peer coding ready for it. */
+  purpose?: string
+  /** The repository's main checkout; the agents may also work in `<checkout>-worktrees/`. */
+  checkout?: string
+  /** Passing each agent's cue to the other: on (`auto`), only telling the owner (`notify`), or `off`. */
+  relay?: Relay
+}
+
+export type Relay = {
+  mode: 'auto' | 'notify' | 'off'
+  /** Since when cues count: a turn that ended before is never passed on. */
+  since: number
+  /** Cues passed on since the owner last answered; at the limit the relay waits for the owner. */
+  streak: number
+  /** The last thing it did, said for the owner: `passed to Codex`, `needs you`. */
+  status?: string
+  /** When it last did something. */
+  at?: number
 }
 
 export type Snapshot = {
@@ -85,7 +103,7 @@ export type Snapshot = {
   /** The environments on this machine: '' (the default) and each other's name. */
   envs: string[]
   /** tmux: which session and window each tty is, and the terminals attached to each session. */
-  tmux: { panes: Record<string, { session: string; window: string }>; clients: Record<string, string[]> }
+  tmux: { panes: Record<string, { session: string; window: string; pane?: string }>; clients: Record<string, string[]> }
   /** When this snapshot was taken; 0 before the first. */
   checkedAt: number
   /** What could not be read, one line each. */
@@ -105,7 +123,9 @@ declare module 'claude-code' {
       /** A move to the background pressed once: the row's key and when; a second press confirms it. */
       pendingMove: { key: string; at: number }
       /** The new-workspace form, while open. */
-      draft: { isOpen: boolean; name: string; dir: string; env: string; branch: string; error: string }
+      draft: { isOpen: boolean; name: string; query: string; dir: string; env: string; purpose: string; error: string }
+      /** The git repositories found on this Mac (main checkouts), for the form to offer; [] until looked for. */
+      projects: string[]
       /** The session whose workspace is being chosen: its row's key and lasting id; '' when none. */
       assigning: { key: string; member: string }
       /** A workspace is being made: a second create waits for it instead of making another. */

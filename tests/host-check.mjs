@@ -5,7 +5,7 @@
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { registerHooks } from 'node:module'
 // the plugin imports its own files without an extension, as its engine resolves them; Node needs `.ts`
 registerHooks({
@@ -20,6 +20,7 @@ registerHooks({
 })
 const c = await import('../hooks/collect.ts')
 const w = await import('../hooks/workspaces.ts')
+const r = await import('../hooks/relay.ts')
 
 
 const home = process.env.HOME
@@ -231,120 +232,156 @@ if (process.argv.includes('--slow')) {
   console.log('skip move exit 4 (20 s): run with --slow')
 }
 
-// 6. A workspace's tmux session, on a private tmux server (never the person's own): two windows in its
-// folder, each agent started under the workspace's environment without Claude Code's session markers.
-// Stand-ins record their environment where the agents would run.
+// 6. A workspace's tmux session, on a private tmux server (never the person's own): one window, Claude
+// on the left and Codex on the right, each pane marked, both in its folder, each agent started under the
+// workspace's environment without Claude Code's session markers, able to work in the worktrees folder,
+// Claude given the first prompt once. Stand-ins record their environment and arguments.
 {
   const socket = `live-sessions-check-${process.pid}`
-  const scratch = mkdtempSync(join(tmpdir(), 'live-sessions-ws-'))
-  const record = tool => `sh -c 'env > "${scratch}/${tool}.env"; pwd > "${scratch}/${tool}.pwd"; sleep 30'`
-  const ws = { id: 'check', env: 'checkenv', dir: scratch, createdAt: 1234 }
-  const line = w.openCommand(ws, home, { socket, attach: false, bins: { claude: record('claude'), codex: record('codex') } })
+  const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'live-sessions-ws-')))
+  // a home of its own, so the first prompt's file is never in the person's own folders
+  const fakeHome = join(scratch, 'home')
+  const record = (tool, tag = '') => `sh -c 'env > "${scratch}/${tag}${tool}.env"; pwd > "${scratch}/${tag}${tool}.pwd"; printf "%s\\n" "$@" > "${scratch}/${tag}${tool}.args"; sleep 30' rec`
+  const ws = { id: 'check', env: 'checkenv', dir: scratch, createdAt: 1234, checkout: '/x/app' }
+  const prompt = `It's "quoted" $(touch ${scratch}/RAN) \`touch ${scratch}/RAN\` ; touch ${scratch}/RAN`
+  mkdirSync(dirname(w.promptPath(fakeHome, 'check', 'claude')), { recursive: true })
+  writeFileSync(w.promptPath(fakeHome, 'check', 'claude'), prompt)
+  writeFileSync(w.promptPath(fakeHome, 'check', 'codex'), 'Say you are ready.')
+  const line = w.openCommand(ws, fakeHome, { socket, attach: false, bins: { claude: record('claude'), codex: record('codex') } })
   // run as a terminal would: by the person's shell, here carrying this session's own markers and
   // another account's config directories on purpose, which the tmux server then holds for every pane
   spawnSync(process.env.SHELL ?? '/bin/zsh', ['-c', line], {
     encoding: 'utf8',
     env: { ...process.env, CLAUDECODE: '1', CLAUDE_CODE_CHILD_SESSION: '1', CLAUDE_CONFIG_DIR: '/wrong/claude', CODEX_HOME: '/wrong/codex' },
   })
-  for (let i = 0; i < 30 && !(existsSync(`${scratch}/claude.env`) && existsSync(`${scratch}/codex.env`)); i++) await new Promise(r => setTimeout(r, 200))
-  const panes = w.parsePanes(spawnSync('tmux', ['-L', socket, 'list-panes', '-a', '-F', w.PANES_FORMAT], { encoding: 'utf8' }).stdout)
-  const windows = Object.values(panes).filter(p => p.session === 'ws-check').map(p => p.window).sort()
-  check('workspace: a claude and a codex window in its tmux session', JSON.stringify(windows) === '["claude","codex"]', windows.join(','))
-  const env = tool => (existsSync(`${scratch}/${tool}.env`) ? readFileSync(`${scratch}/${tool}.env`, 'utf8') : '')
-  const pwd = tool => (existsSync(`${scratch}/${tool}.pwd`) ? readFileSync(`${scratch}/${tool}.pwd`, 'utf8').trim() : '')
-  check('workspace: both start in its folder', pwd('claude').endsWith(scratch.split('/').pop()) && pwd('codex').endsWith(scratch.split('/').pop()))
-  check('workspace: Claude under its environment\'s config directory', env('claude').includes(`CLAUDE_CONFIG_DIR=${home}/.claude-checkenv`))
-  check('workspace: Codex under its environment\'s home', env('codex').includes(`CODEX_HOME=${home}/.codex-checkenv`))
-  check('workspace: no Claude Code session markers reach the agents', !/^(CLAUDECODE|CLAUDE_CODE_CHILD_SESSION)=/m.test(env('claude') + env('codex')))
-  check('workspace: marked as started for this workspace', spawnSync('tmux', ['-L', socket, 'show-options', '-t', 'ws-check', '-qv', w.OWNER_OPTION], { encoding: 'utf8' }).stdout.trim() === '1234')
+  for (let i = 0; i < 30 && !(existsSync(`${scratch}/claude.args`) && existsSync(`${scratch}/codex.args`)); i++) await new Promise(r => setTimeout(r, 200))
+  const panes = w.parsePanes(spawnSync('tmux', ['-L', socket, '-f', '/dev/null', 'list-panes', '-a', '-F', w.PANES_FORMAT], { encoding: 'utf8' }).stdout)
+  const agents = Object.values(panes).filter(p => p.session === 'ws-check').map(p => p.window).sort()
+  const windows = spawnSync('tmux', ['-L', socket, '-f', '/dev/null', 'list-panes', '-t', '=ws-check', '-s', '-F', '#{window_name}'], { encoding: 'utf8' }).stdout.trim().split('\n')
+  check('workspace: Claude and Codex side by side, each pane marked', JSON.stringify(agents) === '["claude","codex"]' && JSON.stringify(windows) === '["peers","peers"]', `${agents} in ${windows}`)
+  const file = name => (existsSync(`${scratch}/${name}`) ? readFileSync(`${scratch}/${name}`, 'utf8') : '')
+  check('workspace: both start in its folder', file('claude.pwd').trim() === scratch && file('codex.pwd').trim() === scratch)
+  check('workspace: Claude under its environment\'s config directory', file('claude.env').includes(`CLAUDE_CONFIG_DIR=${fakeHome}/.claude-checkenv`))
+  check('workspace: Codex under its environment\'s home', file('codex.env').includes(`CODEX_HOME=${fakeHome}/.codex-checkenv`))
+  check('workspace: no Claude Code session markers reach the agents', !/^(CLAUDECODE|CLAUDE_CODE_CHILD_SESSION)=/m.test(file('claude.env') + file('codex.env')))
+  check('workspace: both may work in the worktrees folder; Codex without its update offer', file('claude.args').startsWith('--add-dir\n/x/app-worktrees\n') && file('codex.args') === '-c\ncheck_for_update_on_startup=false\n--add-dir\n/x/app-worktrees\nSay you are ready.\n', JSON.stringify(file('codex.args')))
+  check('workspace: Claude takes the first prompt as it is, as one argument, running nothing in it', file('claude.args') === `--add-dir\n/x/app-worktrees\n${prompt}\n` && !existsSync(`${scratch}/RAN`))
+  check('workspace: each first prompt is taken once', !existsSync(w.promptPath(fakeHome, 'check', 'claude')) && !existsSync(w.promptPath(fakeHome, 'check', 'codex')))
+  check('workspace: marked as started for this workspace', spawnSync('tmux', ['-L', socket, '-f', '/dev/null', 'show-options', '-t', 'ws-check', '-qv', w.OWNER_OPTION], { encoding: 'utf8' }).stdout.trim() === '1234')
   // a default workspace on the same server, whose global environment holds another account, in a folder with # in its name
   const hashed = join(scratch, 'C#{session_name}')
   mkdirSync(hashed)
-  const record2 = tool => `sh -c 'env > "${scratch}/d-${tool}.env"; pwd > "${scratch}/d-${tool}.pwd"; sleep 30'`
-  spawnSync(process.env.SHELL ?? '/bin/zsh', ['-c', w.openCommand({ id: 'check2', env: '', dir: hashed, createdAt: 5 }, home, { socket, attach: false, bins: { claude: record2('claude'), codex: record2('codex') } })], { encoding: 'utf8' })
-  for (let i = 0; i < 30 && !(existsSync(`${scratch}/d-claude.env`) && existsSync(`${scratch}/d-codex.env`)); i++) await new Promise(r => setTimeout(r, 200))
-  const denv = existsSync(`${scratch}/d-claude.env`) ? readFileSync(`${scratch}/d-claude.env`, 'utf8') + readFileSync(`${scratch}/d-codex.env`, 'utf8') : 'missing'
-  check('workspace: a default one runs under no other account, whatever the tmux server holds', !/^(CLAUDE_CONFIG_DIR|CODEX_HOME)=/m.test(denv))
-  const dpwd = existsSync(`${scratch}/d-claude.pwd`) ? readFileSync(`${scratch}/d-claude.pwd`, 'utf8').trim() : ''
-  check('workspace: a folder with # in its name is the folder it starts in', dpwd.endsWith('C#{session_name}'), dpwd.split('/').pop())
+  spawnSync(process.env.SHELL ?? '/bin/zsh', ['-c', w.openCommand({ id: 'check2', env: '', dir: hashed, createdAt: 5 }, fakeHome, { socket, attach: false, bins: { claude: record('claude', 'd-'), codex: record('codex', 'd-') } })], { encoding: 'utf8' })
+  for (let i = 0; i < 30 && !(existsSync(`${scratch}/d-claude.args`) && existsSync(`${scratch}/d-codex.args`)); i++) await new Promise(r => setTimeout(r, 200))
+  check('workspace: a default one runs under no other account, whatever the tmux server holds', !/^(CLAUDE_CONFIG_DIR|CODEX_HOME)=/m.test(file('d-claude.env') + file('d-codex.env')) && file('d-claude.env') !== '')
+  check('workspace: a folder with # in its name is the folder it starts in', file('d-claude.pwd').trim().endsWith('C#{session_name}'), file('d-claude.pwd').trim().split('/').pop())
+  check('workspace: no checkout, no first prompt: nothing more on the command line', file('d-claude.args').trim() === '' && file('d-codex.args') === '-c\ncheck_for_update_on_startup=false\n')
   // opened again while it runs: nothing new is created
   spawnSync(process.env.SHELL ?? '/bin/zsh', ['-c', line], { encoding: 'utf8' })
-  const again = Object.values(w.parsePanes(spawnSync('tmux', ['-L', socket, 'list-panes', '-a', '-F', w.PANES_FORMAT], { encoding: 'utf8' }).stdout)).length
+  const again = Object.values(w.parsePanes(spawnSync('tmux', ['-L', socket, '-f', '/dev/null', 'list-panes', '-a', '-F', w.PANES_FORMAT], { encoding: 'utf8' }).stdout)).length
   check('workspace: opening it again creates nothing more', again === 4, `${again} panes in two workspaces`)
-  spawnSync('tmux', ['-L', socket, 'kill-server'])
+  spawnSync('tmux', ['-L', socket, '-f', '/dev/null', 'kill-server'])
   // kill-server leaves its socket file behind
   rmSync(join(process.env.TMUX_TMPDIR ?? '/tmp', `tmux-${process.getuid()}`, socket), { force: true })
   rmSync(scratch, { recursive: true, force: true })
 }
 
-// 7. A workspace on a branch: the plugin's own WORKTREE_SCRIPT, on throwaway repositories
+// 7. The main checkout a workspace's agents put worktrees beside: CHECKOUT_SCRIPT on throwaway repositories
 {
   const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'live-sessions-git-')))
   const env = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_AUTHOR_NAME: 'check', GIT_AUTHOR_EMAIL: 'check@example.invalid', GIT_COMMITTER_NAME: 'check', GIT_COMMITTER_EMAIL: 'check@example.invalid' }
   const git = (...args) => spawnSync('git', args, { encoding: 'utf8', env })
-  const make = (dir, branch) => {
-    const out = spawnSync('/bin/sh', ['-c', w.WORKTREE_SCRIPT, 'sh', dir, branch], { encoding: 'utf8', env })
-    return { code: out.status, result: w.worktreeResult(out.stdout, branch) }
-  }
-  const head = (dir, ref = 'HEAD') => git('-C', dir, 'rev-parse', ref).stdout.trim()
-  const branchOf = dir => git('-C', dir, 'branch', '--show-current').stdout.trim()
+  const find = dir => w.checkoutResult(spawnSync('/bin/sh', ['-c', w.CHECKOUT_SCRIPT, 'sh', dir], { encoding: 'utf8', env }).stdout)
   const newRepo = path => {
     mkdirSync(path, { recursive: true })
     git('-C', path, 'init', '-q', '-b', 'main')
     git('-C', path, 'commit', '-q', '--allow-empty', '-m', 'base')
     return path
   }
-  // a remote with a branch the clone has only as origin/feat/pr
-  const remote = newRepo(join(scratch, 'remote'))
-  git('-C', remote, 'checkout', '-q', '-b', 'feat/pr')
-  git('-C', remote, 'commit', '-q', '--allow-empty', '-m', 'PR work')
-  git('-C', remote, 'checkout', '-q', 'main')
-  const repo = join(scratch, 'app')
-  git('clone', '-q', remote, repo)
-  git('-C', repo, 'branch', 'feat/old')
+  const repo = newRepo(join(scratch, 'app'))
   mkdirSync(join(repo, 'sub'))
-
-  check('worktree: a bad branch name, refused', ['a..b', '-x', '--orphan', 'HEAD', 'a b'].every(b => make(repo, b).result.error?.includes('not a branch name')))
-  check('worktree: a folder outside git, refused', make(scratch, 'feat/x').result.error?.includes('not in a git checkout'))
-  const fresh = make(join(repo, 'sub'), 'feat/new')
-  check('worktree: a new branch, from a subfolder, beside the main checkout', fresh.result.dir === `${scratch}/app-worktrees/feat-new` && branchOf(fresh.result.dir) === 'feat/new' && head(fresh.result.dir) === head(repo), fresh.result.dir?.slice(scratch.length) ?? fresh.result.error)
-  const old = make(repo, 'feat/old')
-  check('worktree: a local branch already there, checked out', branchOf(old.result.dir ?? scratch) === 'feat/old')
-  const pr = make(repo, 'feat/pr')
-  const upstream = git('-C', pr.result.dir ?? scratch, 'rev-parse', '--abbrev-ref', '@{upstream}').stdout.trim()
-  check('worktree: a branch only on the remote, checked out at its commit and tracking it', head(pr.result.dir ?? scratch) === head(remote, 'feat/pr') && upstream === 'origin/feat/pr', upstream || pr.result.error)
-  // from a worktree on its own branch: the new branch starts there, and still goes beside the main checkout
-  git('-C', old.result.dir, 'commit', '-q', '--allow-empty', '-m', 'old work')
-  const stacked = make(old.result.dir, 'feat/stacked')
-  check('worktree: a new branch from a worktree starts at that worktree\'s commit', stacked.result.dir === `${scratch}/app-worktrees/feat-stacked` && head(stacked.result.dir) === head(old.result.dir))
-  check('worktree: one already there, refused', make(repo, 'feat/old').result.error === `${scratch}/app-worktrees/feat-old is already there`)
-  const busy = make(repo, 'main')
-  check('worktree: git\'s own refusal reads as its fatal line', busy.code !== 0 && /^git could not make the worktree \((fatal|error): /.test(busy.result.error ?? ''), busy.result.error)
-  // a submodule: its worktrees go beside its checkout, never inside the parent's .git
+  check('checkout: from a subfolder, the main checkout, its worktrees folder made beside it', find(join(repo, 'sub')).checkout === repo && existsSync(`${repo}-worktrees`))
+  git('-C', repo, 'worktree', 'add', '-q', '-b', 'feat/a', `${repo}-worktrees/feat-a`)
+  check('checkout: from a linked worktree, the main checkout', find(`${repo}-worktrees/feat-a`).checkout === repo)
+  check('checkout: a folder outside git, refused', find(scratch).error?.includes('not in a git checkout') === true)
   const parent = newRepo(join(scratch, 'parent'))
   const lib = newRepo(join(scratch, 'lib'))
   git('-C', parent, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', lib, 'vendor/lib')
-  const sub = make(join(parent, 'vendor/lib'), 'feat/s')
-  check('worktree: in a submodule, beside its checkout', sub.result.dir === `${parent}/vendor/lib-worktrees/feat-s`, sub.result.dir?.slice(scratch.length) ?? sub.result.error)
-  const subAgain = make(sub.result.dir ?? scratch, 'feat/s2')
-  check('worktree: from a submodule\'s worktree, beside the submodule\'s checkout', subAgain.result.dir === `${parent}/vendor/lib-worktrees/feat-s2`, subAgain.result.dir?.slice(scratch.length) ?? subAgain.result.error)
-  // a repository whose .git is kept elsewhere
+  check('checkout: in a submodule, its own checkout', find(join(parent, 'vendor/lib')).checkout === join(parent, 'vendor/lib'))
   const apart = join(scratch, 'apart')
   mkdirSync(apart)
   git('-C', apart, 'init', '-q', '-b', 'main', '--separate-git-dir', join(scratch, 'store.git'))
   git('-C', apart, 'commit', '-q', '--allow-empty', '-m', 'base')
-  const sep = make(apart, 'feat/sep')
-  check('worktree: with a separate git dir, beside the checkout', sep.result.dir === `${scratch}/apart-worktrees/feat-sep`, sep.result.dir?.slice(scratch.length) ?? sep.result.error)
-  // from its linked worktree git cannot say where the checkout is: refused, never put by the git store
-  const sepAgain = make(sep.result.dir ?? scratch, 'feat/sep2')
-  check('worktree: from a separate git dir\'s worktree, refused', sepAgain.result.error?.includes('main checkout') === true, sepAgain.result.error)
-  // the repository's own hooks never run: the engine keeps them off for git, and so does the script
-  const hooked = newRepo(join(scratch, 'hooked'))
-  mkdirSync(join(hooked, '.husky'))
-  writeFileSync(join(hooked, '.husky/post-checkout'), `#!/bin/sh\ntouch "${scratch}/HOOK-RAN"\n`, { mode: 0o755 })
-  git('-C', hooked, 'config', 'core.hooksPath', '.husky')
-  const viaHook = make(hooked, 'feat/h')
-  check('worktree: the repository\'s hooks do not run', viaHook.result.dir !== undefined && !existsSync(join(scratch, 'HOOK-RAN')), viaHook.result.error)
+  check('checkout: with a separate git dir, the checkout, not the store', find(apart).checkout === apart)
+  git('-C', apart, 'worktree', 'add', '-q', '-b', 'feat/s', join(scratch, 'apart-wt'))
+  check('checkout: from a separate git dir\'s worktree, refused rather than guessed', find(join(scratch, 'apart-wt')).error?.includes('main checkout') === true)
+  rmSync(scratch, { recursive: true, force: true })
+}
+
+// 8. The relay: how a turn stands, read from records of both kinds; a cue typed into a pane, once, and
+// never into a shell. On a private tmux server; a pane running `cat` stands in for the agent.
+{
+  const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'live-sessions-relay-')))
+  const jsonl = (name, records) => {
+    writeFileSync(join(scratch, name), records.map(o => JSON.stringify(o)).join('\n') + '\n')
+    return join(scratch, name)
+  }
+  const cue = 'READY FOR CODEX · peer-coding/feat-x ALIGN BRIEFED · feat/x@abc1234'
+  const claudeDone = jsonl('c-done.jsonl', [
+    { type: 'user', uuid: 'u1', timestamp: '2026-10-09T10:00:00Z', message: { content: 'set it up' } },
+    { type: 'assistant', uuid: 'a1', timestamp: '2026-10-09T10:01:00Z', message: { stop_reason: 'tool_use', content: [{ type: 'tool_use' }] } },
+    { type: 'user', uuid: 'u2', timestamp: '2026-10-09T10:01:01Z', message: { content: [{ type: 'tool_result' }] } },
+    { type: 'assistant', uuid: 'a2', timestamp: '2026-10-09T10:05:00Z', message: { stop_reason: 'end_turn', content: [{ type: 'text', text: `Ready.\n\n\`${cue}\`` }] } },
+    { type: 'assistant', uuid: 'side', isSidechain: true, timestamp: '2026-10-09T10:06:00Z', message: { stop_reason: 'end_turn', content: [{ type: 'text', text: 'NEEDS USER · x · y@1' }] } },
+    { type: 'system', subtype: 'turn_duration', timestamp: '2026-10-09T10:05:01Z' },
+  ])
+  const claudeBusy = jsonl('c-busy.jsonl', [
+    { type: 'assistant', uuid: 'a2', timestamp: '2026-10-09T10:05:00Z', message: { stop_reason: 'end_turn', content: [{ type: 'text', text: cue }] } },
+    { type: 'user', uuid: 'u3', timestamp: '2026-10-09T10:07:00Z', message: { content: [{ type: 'text', text: 'and now?' }] } },
+  ])
+  const codexDone = jsonl('x-done.jsonl', [
+    { type: 'event_msg', timestamp: '2026-10-09T11:00:00Z', payload: { type: 'task_started', turn_id: 't-1' } },
+    { type: 'event_msg', timestamp: '2026-10-09T11:09:00Z', payload: { type: 'task_complete', turn_id: 't-1', last_agent_message: 'Confirmed.\n\n1. READY FOR CLAUDE · peer-coding/feat-x ALIGN CONFIRMED · feat/x@def5678\n' } },
+  ])
+  const codexBusy = jsonl('x-busy.jsonl', [
+    { type: 'event_msg', timestamp: '2026-10-09T11:09:00Z', payload: { type: 'task_complete', turn_id: 't-1', last_agent_message: 'x' } },
+    { type: 'event_msg', timestamp: '2026-10-09T11:10:00Z', payload: { type: 'task_started', turn_id: 't-2' } },
+  ])
+  const out = spawnSync('/bin/sh', ['-c', r.TURN_SCRIPT, 'sh', claudeDone, claudeBusy, codexDone, codexBusy, join(scratch, 'none.jsonl')], { encoding: 'utf8' })
+  const turns = r.parseTurns(out.stdout)
+  check('turns: Claude\'s last turn done, its cue without the code marks; a subagent\'s turn not counted', turns.get(claudeDone)?.id === 'a2' && turns.get(claudeDone)?.cue?.line === cue, JSON.stringify(turns.get(claudeDone)?.cue?.line))
+  check('turns: a prompt after it is a turn under way', turns.get(claudeBusy)?.state === 'busy' && turns.get(claudeBusy)?.id === 'u3')
+  check('turns: Codex\'s last turn done, its cue from a numbered line', turns.get(codexDone)?.state === 'done' && turns.get(codexDone)?.cue?.kind === 'ready' && turns.get(codexDone)?.cue?.to === 'claude')
+  check('turns: a Codex task started after it is under way', turns.get(codexBusy)?.state === 'busy' && turns.get(codexBusy)?.id === 't-2')
+  check('turns: nothing more of what was said leaves the pipeline', !out.stdout.includes('Ready.') && !out.stdout.includes('Confirmed.') && !out.stdout.includes('set it up'))
+  // on this Mac's own records, read only: each answers in the expected form
+  const real = readdirSync(join(home, '.claude', 'projects'), { withFileTypes: true }).filter(d => d.isDirectory()).slice(0, 3)
+    .flatMap(d => readdirSync(join(home, '.claude', 'projects', d.name)).filter(f => f.endsWith('.jsonl')).slice(0, 2).map(f => join(home, '.claude', 'projects', d.name, f)))
+  const realOut = spawnSync('/bin/sh', ['-c', r.TURN_SCRIPT, 'sh', ...real], { encoding: 'utf8' }).stdout
+  check('turns: this Mac\'s own transcripts read in that form', realOut.split('\n').filter(l => l !== '').every(l => l.startsWith('==> ') || /^(done|busy)\t[A-Za-z0-9-]+\t\S+\t/.test(l)), `${real.length} files`)
+
+  const socket = `live-sessions-relay-${process.pid}`
+  // a private server that reads no tmux.conf: the person's plugins (a session restore) never run in it
+  const tmux = (...args) => spawnSync('tmux', ['-L', socket, '-f', '/dev/null', ...args], { encoding: 'utf8' })
+  tmux('new-session', '-d', '-s', 'ws-relay', '-n', 'peers', 'cat')
+  tmux('split-window', '-h', '-t', '=ws-relay:peers', '/bin/sh')
+  const [agentPane, shellPane] = tmux('list-panes', '-t', '=ws-relay:peers', '-F', '#{pane_id}').stdout.trim().split('\n')
+  await new Promise(res => setTimeout(res, 500))
+  const ledger = join(scratch, 'ledger')
+  const line = `READY FOR CODEX · it's "x" $(touch ${scratch}/RAN) ; touch ${scratch}/RAN`
+  const relay = (key, pane, allow) => spawnSync('/bin/sh', ['-c', r.RELAY_SCRIPT, 'sh', 'pass', ledger, key, pane, allow, line, socket, 'check'], { encoding: 'utf8' }).stdout.trim()
+  const first = relay('pass-t1', agentPane, 'cat')
+  await new Promise(res => setTimeout(res, 300))
+  // -J: the narrow pane wraps the line; joined, it is the line as typed
+  const typed = tmux('capture-pane', '-p', '-J', '-t', agentPane).stdout
+  check('relay: the cue typed into the agent\'s pane and entered', first === 'passed' && typed.split('\n').filter(l => l === line).length === 2, first)
+  check('relay: taken once, whichever session tries again', relay('pass-t1', agentPane, 'cat') === 'taken' && tmux('capture-pane', '-p', '-J', '-t', agentPane).stdout.split('\n').filter(l => l === line).length === 2)
+  const refused = relay('pass-t2', shellPane, 'claude')
+  await new Promise(res => setTimeout(res, 300))
+  check('relay: never into a pane that runs a shell', /^not-agent (sh|bash)$/.test(refused) && !tmux('capture-pane', '-p', '-J', '-t', shellPane).stdout.includes('READY FOR') && !existsSync(`${scratch}/RAN`), refused)
+  check('relay: a pane that is gone, said', relay('pass-t3', '%999', 'cat') === 'gone')
+  tmux('kill-server')
+  rmSync(join(process.env.TMUX_TMPDIR ?? '/tmp', `tmux-${process.getuid()}`, socket), { force: true })
   rmSync(scratch, { recursive: true, force: true })
 }
 

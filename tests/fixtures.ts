@@ -147,7 +147,7 @@ const thread = (fields: Record<string, unknown>) => ({
 
 export const THREADS: Record<string, unknown[]> = {
   '/Users/u/.codex': [
-    thread({ id: RESUMED_A, title: 'where are reports written', name: 'Find the report writer', updated_at_ms: NOW - 10_000, agents: 2 }),
+    thread({ id: RESUMED_A, title: 'where are reports written', name: 'Find the report writer', rollout_path: '/rollouts/a.jsonl', updated_at_ms: NOW - 10_000, agents: 2 }),
     thread({ id: HELD, name: 'Execute research', created_at_ms: NOW - 9 * 86_400_000, updated_at_ms: NOW - 9 * 86_400_000 }),
     // newer in the same folder: what matching by folder alone would give 201
     thread({ id: 'g', name: 'Newer in web-app', created_at_ms: NOW - 3 * 86_400_000, updated_at_ms: NOW - 2 * 86_400_000 }),
