@@ -128,6 +128,8 @@ const world = {
   openFails: false,
   /** A file that turns unreadable right after it is read once (another writer). */
   spoilsAfterRead: '',
+  /** A file that is there but cannot be read (too large, no permission). */
+  unreadable: '',
 }
 const resetWorld = () => {
   world.stat.clear()
@@ -142,6 +144,7 @@ const resetWorld = () => {
   world.tmuxOwner = ''
   world.openFails = false
   world.spoilsAfterRead = ''
+  world.unreadable = ''
 }
 const changed = (pid: number, line: string) => {
   const stat = world.stat.get(pid)
@@ -284,6 +287,7 @@ function engine(
     return isDir ? { value: { kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false } } : { deny: `ENOENT ${e.path}` }
   })
   on('fs.read', async ($, e) => {
+    if (e.path === world.unreadable) return { deny: 'EFBIG: file too large' }
     const text = files.get(e.path)
     if (text !== undefined && e.path === world.spoilsAfterRead) {
       files.set(e.path, '{ broken')
@@ -1289,11 +1293,25 @@ describe('workspaces', () => {
     expect(files.get(WORKSPACES)).toBe('{"version": 1, "workspaces": [ {"id": "kept"}, ]')
     // nor does removing one, even when the list went bad after it was read
     files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [practice] }))
+    // a list that cannot be read is said to be so, not taken for an empty one
+    files.set(WORKSPACES, '{ broken')
+    expect((await $.command.run({ ...SESSIONS, command: 'workspace', args: 'rm practice-rbac' })).text).toMatch(/^Not done: its list cannot be read/)
+    expect((await $.command.run({ ...SESSIONS, command: 'workspace', args: 'open practice-rbac' })).text).toMatch(/^Not done: its list cannot be read/)
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [practice] }))
     world.spoilsAfterRead = WORKSPACES
     expect((await $.command.run({ ...SESSIONS, command: 'workspace', args: 'rm practice-rbac' })).text).toMatch(/^Not done: its list cannot be read/)
     expect(files.get(WORKSPACES)).toBe('{ broken')
     await $.command.run(SESSIONS)
     expect((await shownOn($, 'terminal', 110)).join('\n')).toContain('! workspaces: its list cannot be read')
+  })
+
+  test('a workspaces file that is there but cannot be read is never overwritten', async ($, on) => {
+    const { files } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [practice] }))
+    world.unreadable = WORKSPACES
+    await $.session.start(START)
+    expect((await $.command.run({ ...SESSIONS, command: 'workspace', args: 'new ~/dev/web-app work Other' })).text).toMatch(/^Not done: its list cannot be read/)
+    expect(JSON.parse(files.get(WORKSPACES)!).workspaces).toEqual([practice])
   })
 
   test('the header counts working agents in workspaces too', async ($, on) => {

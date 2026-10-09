@@ -360,8 +360,10 @@ const isSnapshot = (v: unknown): v is Snapshot => {
 
 /** The workspaces; `isReadable` false when the file is there but is not one, which nothing then overwrites. */
 async function readWorkspaces($: EngineInterface, home: string): Promise<{ list: Workspace[]; isReadable: boolean }> {
+  // only a file that is not there is an empty list: one there but unreadable (too large, no permission) is kept
+  if (!(await $.fs.exists(workspacesPath(home)))) return { list: [], isReadable: true }
   const text = await $.fs.read(workspacesPath(home)).catch(() => undefined)
-  if (text === undefined) return { list: [], isReadable: true }
+  if (text === undefined) return { list: [], isReadable: false }
   try {
     const raw = JSON.parse(text) as unknown
     return { list: workspacesFrom(raw), isReadable: Array.isArray((raw as { workspaces?: unknown } | null)?.workspaces) }
@@ -696,6 +698,11 @@ export const register: Register = on => {
         return { text: `${command.error === undefined ? '' : `Not done: ${command.error}. `}${usage}` }
       case 'list':
         return { text: list.length === 0 ? `No workspaces yet. ${usage}` : `Workspaces: ${list.map(label).join('; ')}. ${usage}` }
+      case 'open':
+      case 'rm':
+        if (!isReadable) return { text: `Not done: ${UNREADABLE}.` }
+    }
+    switch (command.action) {
       case 'open': {
         const ws = findWorkspace(list, command.ref)
         if (ws === undefined) return { text: `No workspace named "${command.ref}".` }
