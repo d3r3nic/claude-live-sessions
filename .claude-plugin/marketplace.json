@@ -1,0 +1,13 @@
+{
+  "name": "claude-live-sessions",
+  "description": "live-sessions: a Claude Code pane of the live Claude Code and Codex sessions on this Mac",
+  "owner": {
+    "name": "d3r3nic"
+  },
+  "plugins": [
+    {
+      "name": "live-sessions",
+      "source": "./"
+    }
+  ]
+}
