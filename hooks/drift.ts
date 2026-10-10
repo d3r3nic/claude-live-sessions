@@ -62,16 +62,22 @@ export function recordFolderOf(cueLine: string): string | undefined {
  * written last. Its CURRENT.md, the latest round's notes (each assistant's,
  * whatever it is called), its alignment and findings, each cut, then the
  * branch's last commit subjects. Each part under a `==> <name>` line;
- * nothing when there are none. A symbolic link is never followed (it could
- * reach anything), and no program a repository's settings name ever runs.
+ * nothing when there are none. Nothing outside the checkout and its
+ * worktrees is read (a folder whose real place is elsewhere, through a
+ * symbolic link anywhere on its path, is passed over; a linked file is never
+ * read), and no program a repository's settings name ever runs.
  */
 export const RECORDS_SCRIPT = [
   'checkout=$1; folder=$2; branch=$3',
   'case $folder in ""|*/*|*..*) exit 0;; esac',
   'g() { /usr/bin/git -c core.hooksPath=/dev/null -c core.fsmonitor= -c log.showSignature=false -c gpg.program=/usr/bin/false "$@"; }',
+  'root=$(cd "$checkout" 2>/dev/null && pwd -P) || exit 0',
+  'trees=$(cd "$checkout-worktrees" 2>/dev/null && pwd -P)',
+  // a folder whose real place is inside the checkout or the worktrees folder beside it
+  'inside() { real=$(cd "$1" 2>/dev/null && pwd -P) || return 1; case $real in "$root"/*) return 0;; esac; [ -n "$trees" ] || return 1; case $real in "$trees"/*) return 0;; esac; return 1; }',
   'best=; bestAt=0; onBranch=',
   'for d in "$checkout/peer-coding/$folder" "$checkout"-worktrees/*/peer-coding/"$folder"; do',
-  '  [ -f "$d/CURRENT.md" ] && [ ! -L "$d" ] && [ ! -L "$d/CURRENT.md" ] || continue',
+  '  [ -f "$d/CURRENT.md" ] && [ ! -L "$d/CURRENT.md" ] && inside "$d" || continue',
   '  if [ -n "$branch" ] && [ "$(g -C "$d" rev-parse --abbrev-ref HEAD 2>/dev/null)" = "$branch" ]; then onBranch=$d; fi',
   '  at=$(/usr/bin/stat -f %m "$d/CURRENT.md" 2>/dev/null || echo 0)',
   '  [ "$at" -gt "$bestAt" ] && { best=$d; bestAt=$at; }',
@@ -81,7 +87,7 @@ export const RECORDS_SCRIPT = [
   'part() { [ -f "$1" ] && [ ! -L "$1" ] || return 0; printf "==> %s\\n" "$2"; /usr/bin/head -c "$3" "$1"; printf "\\n"; }',
   'part "$best/CURRENT.md" CURRENT.md 6000',
   'round=$(/bin/ls -1 "$best/rounds" 2>/dev/null | /usr/bin/grep -E "^R[0-9]+$" | /usr/bin/sort -t R -k 2 -n | /usr/bin/tail -n 1)',
-  'if [ -n "$round" ] && [ ! -L "$best/rounds/$round" ]; then',
+  'if [ -n "$round" ] && inside "$best/rounds/$round"; then',
   '  n=0; for f in "$best/rounds/$round"/*.md; do [ "$n" -lt 3 ] || break; part "$f" "rounds/$round/$(basename "$f")" 4000; n=$((n + 1)); done',
   'fi',
   'part "$best/ALIGNMENT.md" ALIGNMENT.md 4000',

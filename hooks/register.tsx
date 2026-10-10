@@ -1099,6 +1099,8 @@ async function ownEnv($: EngineInterface, home: string): Promise<string | undefi
 
 /** The workspaces being checked in this session: one check of each at a time. */
 const checking = new Set<string>()
+/** The workspaces of another account this session has said it does not check. */
+const toldAccount = new Set<string>()
 
 /**
  * A drift check: one model call (Opus) holds what a workspace's agents are
@@ -1116,7 +1118,16 @@ async function checkDrift($: EngineInterface, home: string, id: string): Promise
     if (ws.purpose === undefined) return `${ws.name} has no purpose to check against: it was made without one.`
     // under the workspace's own account: its records never go out through another's
     const env = await ownEnv($, home)
-    if (env !== ws.env) return `${ws.name} is checked from a Claude session of its own account (${ws.env === '' ? 'the default one' : ws.env}).`
+    if (env !== ws.env) {
+      // said once a session in the event log too, so a workspace no session of its account checks is not left unsaid
+      // (its count stays due: the next pass a session of its account makes checks it)
+      const account = ws.env === '' ? 'the default one' : ws.env
+      if (!toldAccount.has(id)) {
+        toldAccount.add(id)
+        await logEvent($, home, { kind: 'check', text: `${ws.name}: not checked from this session: its checks run in a Claude session of its own account (${account}).`, workspace: id })
+      }
+      return `${ws.name} is checked from a Claude session of its own account (${account}).`
+    }
     // the passes counted when it began: the ones made while it runs count toward the next check
     const counted = ws.relay?.sinceCheck ?? 0
     // a check done or not, the next is at the next milestone (a failed one is never tried again at every hand-off)

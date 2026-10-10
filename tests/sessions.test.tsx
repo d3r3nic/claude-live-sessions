@@ -2743,25 +2743,29 @@ describe('the drift check', () => {
       JSON.stringify({ at: NOW - 9_000, kind: 'relay', text: `Practice RBAC: Claude → Codex: READY FOR CODEX · peer-coding/feat-console R3 · feat/console@a1b2c3d`, workspace: 'practice-rbac' }),
       JSON.stringify({ at: NOW - 8_000, kind: 'relay', text: 'Other: Claude → Codex: READY FOR CODEX · peer-coding/feat-other R1 · x@1', workspace: 'other' }),
       JSON.stringify({ at: NOW - 7_000, kind: 'waits', text: 'Practice RBAC: the relay passed 10 hand-offs in a row and waits for you', workspace: 'practice-rbac' }),
+      JSON.stringify({ at: NOW - 6_000, kind: 'needs', text: 'Practice RBAC: Claude needs you. NEEDS USER · peer-coding/feat-console · feat/console@a1b2c3d · which login provider?', workspace: 'practice-rbac' }),
       'not json',
     ].join('\n'))
     await $.session.start(START)
     await $.command.run(SESSIONS)
     const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
     await reveal(ui, 'ws:practice-rbac')
+    // a hand-off the relay passes while the check runs counts toward the next check
+    during = () => files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...saved(), relay: { ...saved().relay, sinceCheck: 3 } }] }))
     await ui.press({ key: 'check practice-rbac' })
+    during = () => {}
     // one Opus call: the purpose, then this workspace's hand-offs and its records as one JSON value
     expect(asked.map(a => a.model)).toEqual(['opus'])
     const prompt = String(asked[0]!.prompt)
     expect(prompt).toContain('What the owner said it is for: finish the console')
     const data = JSON.parse(prompt.split('\n').at(-1)!)
-    expect(data.handoffs).toEqual(['READY FOR CLAUDE · peer-coding/feat-console R2 · feat/console@a0', 'READY FOR CODEX · peer-coding/feat-console R3 · feat/console@a1b2c3d'])
+    expect(data.handoffs).toEqual(['READY FOR CLAUDE · peer-coding/feat-console R2 · feat/console@a0', 'READY FOR CODEX · peer-coding/feat-console R3 · feat/console@a1b2c3d', 'NEEDS USER · peer-coding/feat-console · feat/console@a1b2c3d · which login provider?'])
     expect(data.records).toContain("Round 3: the console's sign-in.")
     // the records of the folder the latest hand-off names, from the worktree on its branch
     expect(runs.find(r => r[2] === RECORDS_SCRIPT)?.slice(4)).toEqual(['/Users/u/dev/web-app', 'feat-console', 'feat/console'])
     // kept, logged, notified, shown
     expect(saved().check).toEqual({ at: expect.any(Number), status: 'drifting', brief: 'They are tuning the build, not the console.', ask: 'Stop the build work?' })
-    expect(saved().relay.sinceCheck).toBe(0)
+    expect(saved().relay.sinceCheck).toBe(1)
     expect(world.events.at(-1)).toMatchObject({ kind: 'drift', workspace: 'practice-rbac', text: 'Practice RBAC: drifting: They are tuning the build, not the console. Ask: Stop the build work?' })
     const told = runs.filter(r => r[2] === RELAY_SCRIPT && r[4] === 'tell' && String(r[6]).startsWith('drift-practice-rbac-'))
     expect(told.map(r => r[9])).toEqual(['The agents may need your help. Practice RBAC: drifting: They are tuning the build, not the console. Ask: Stop the build work?'])
@@ -2832,6 +2836,9 @@ describe('the drift check', () => {
     await ui.press({ key: 'check other-acct' })
     expect(asked).toEqual([])
     expect(toasts.at(-1)).toBe('Other account is checked from a Claude session of its own account (mmm).')
+    // said in the event log too, once a session
+    await ui.press({ key: 'check other-acct' })
+    expect(world.events.filter(e => e.workspace === 'other-acct')).toEqual([{ at: expect.any(Number), kind: 'check', workspace: 'other-acct', text: 'Other account: not checked from this session: its checks run in a Claude session of its own account (mmm).' }])
     await reveal(ui, 'ws:dflt')
     await ui.press({ key: 'check dflt' })
     expect(toasts.at(-1)).toBe('Default one is checked from a Claude session of its own account (the default one).')

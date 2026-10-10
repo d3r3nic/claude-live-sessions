@@ -1089,8 +1089,34 @@ except ChildProcessError: pass
     symlinkSync(secret, join(linkedNote, 'rounds', 'R1', 'claude.md'))
     symlinkSync(join(checkout, 'peer-coding', 'feat-n'), join(checkout, 'peer-coding', 'feat-d'))
     const notes = read('feat-n')
-    check('drift: symbolic links never followed; a round\'s notes read whatever the assistant is called',
-      read('feat-l') === '' && read('feat-d') === '' && !notes.includes('SECRET') && notes.includes('==> rounds/R1/gemini.md\na note by another assistant'), notes.split('\n').filter(l => l.startsWith('==> ')).join(' | '))
+    // a linked file is never read; a folder linked to another inside the repository is read as that one
+    check('drift: a linked file never read; a round\'s notes read whatever the assistant is called',
+      read('feat-l') === '' && read('feat-d').includes('==> CURRENT.md\nnote copy') && !read('feat-d').includes('SECRET') && !notes.includes('SECRET') && notes.includes('==> rounds/R1/gemini.md\na note by another assistant'), notes.split('\n').filter(l => l.startsWith('==> ')).join(' | '))
+    // a link anywhere on the path out of the repository: a linked peer-coding/ or rounds/, a worktree that is a link
+    const outside = join(scratch, 'outside')
+    mkdirSync(join(outside, 'feat-o', 'rounds', 'R1'), { recursive: true })
+    writeFileSync(join(outside, 'feat-o', 'CURRENT.md'), 'OUTSIDE CONTENT')
+    writeFileSync(join(outside, 'feat-o', 'rounds', 'R1', 'claude.md'), 'ROUNDS OUTSIDE')
+    const linkedRepo = join(scratch, 'linked')
+    mkdirSync(linkedRepo)
+    symlinkSync(outside, join(linkedRepo, 'peer-coding'))
+    const viaTree = join(scratch, 'via')
+    mkdirSync(join(`${viaTree}-worktrees`), { recursive: true })
+    mkdirSync(join(outside, 'tree', 'peer-coding', 'feat-o'), { recursive: true })
+    writeFileSync(join(outside, 'tree', 'peer-coding', 'feat-o', 'CURRENT.md'), 'OUTSIDE CONTENT')
+    symlinkSync(join(outside, 'tree'), join(`${viaTree}-worktrees`, 'linked-tree'))
+    mkdirSync(viaTree)
+    const roundsOut = join(checkout, 'peer-coding', 'feat-r')
+    mkdirSync(roundsOut, { recursive: true })
+    writeFileSync(join(roundsOut, 'CURRENT.md'), 'rounds copy')
+    symlinkSync(join(outside, 'feat-o', 'rounds'), join(roundsOut, 'rounds'))
+    const reads = [
+      spawnSync('/bin/sh', ['-c', dr.RECORDS_SCRIPT, 'sh', linkedRepo, 'feat-o'], { encoding: 'utf8' }).stdout,
+      spawnSync('/bin/sh', ['-c', dr.RECORDS_SCRIPT, 'sh', viaTree, 'feat-o'], { encoding: 'utf8' }).stdout,
+      read('feat-r'),
+    ]
+    check('drift: nothing read from outside the repository and its worktrees, a link anywhere on the way',
+      reads[0] === '' && reads[1] === '' && reads[2].includes('rounds copy') && !reads.join('').includes('OUTSIDE'), JSON.stringify(reads.map(r => r.slice(0, 40))))
   } finally {
     rmSync(scratch, { recursive: true, force: true })
   }
