@@ -2439,6 +2439,9 @@ describe('bringing running sessions into a workspace', () => {
     // resumed anew: the relay types into it only after a turn from now
     expect(JSON.parse(files.get(WORKSPACES)!).workspaces[0].threads.codex.since).toBeGreaterThan(NOW)
     expect(runs.filter(r => r[0] === '/usr/bin/osascript' && r[4] === OPEN_SCRIPT)).toHaveLength(1)
+  })
+})
+
 describe('the context guard', () => {
   test('an agent compacts once its cue is handed on, when its context is full enough; Claude is told what to keep', async () => {
     const ws = { name: 'RBAC', compactAt: undefined as number | undefined }
