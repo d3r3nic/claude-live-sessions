@@ -1,10 +1,11 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { ClaudeSession, CodexSession, Place, Relay, Snapshot, Workspace } from '../types'
+import type { ClaudeSession, CodexSession, Place, Relay, Snapshot, Thread, Workspace } from '../types'
 import type { Screen } from './workspaces'
 import { AGENT_COMMANDS, afterOwner, afterStep, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_SCRIPT } from './relay'
 import type { Side } from './relay'
+import { bringable, codexDir, codexFlags, CODEX_MODE_SCRIPT, envOfProfile, JOB_COMMANDS, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, toggled } from './bring'
 import {
   CHECKOUT_SCRIPT,
   CLIENTS_FORMAT,
@@ -30,6 +31,7 @@ import {
   shellQuote,
   sessionSetup,
   setupPrompt,
+  joinPrompt,
   defaultPlacement,
   isOnScreen,
   hideBinding,
@@ -148,7 +150,7 @@ const activeWindow = atom({ plugin: 'live-sessions', key: 'window' } as const, 0
 const pendingMove = atom({ plugin: 'live-sessions', key: 'pendingMove' } as const, { key: '', at: 0 })
 const CONFIRM_MS = 6_000
 
-const NO_DRAFT = { isOpen: false, name: '', query: '', dir: '', env: '', purpose: '', error: '' }
+const NO_DRAFT = { isOpen: false, name: '', query: '', dir: '', env: '', purpose: '', error: '', bring: [] as string[] }
 /** The new-workspace form. */
 const draft = atom({ plugin: 'live-sessions', key: 'draft' } as const, NO_DRAFT)
 /** The session whose workspace is being chosen. */
@@ -381,6 +383,11 @@ async function collect($: EngineInterface, home: string, now: number): Promise<S
   const [kept, tmux] = await Promise.all([readWorkspaces($, home), tmuxState($)])
   if (!kept.isReadable) problems.push(`workspaces: ${UNREADABLE}`)
   let workspaces = kept.list
+  // the conversation each pane runs, kept: opened again after its tmux session ended, it goes on with them
+  const seen = kept.isReadable ? seenThreads(workspaces, tmux.panes, claudeRows, started) : new Map()
+  if (seen.size > 0 && (await changeWorkspaces($, home, list => list.map(ws => (seen.has(ws.id) ? { ...ws, threads: seen.get(ws.id)! } : ws))))) {
+    workspaces = (await readWorkspaces($, home)).list
+  }
   try {
     await passCues($, home, now, { workspaces, tmux, claude: claudeRows, codex: started, fileOf })
     if (workspaces.some(ws => ws.relay !== undefined && ws.relay.mode !== 'off')) workspaces = (await readWorkspaces($, home)).list
@@ -614,6 +621,15 @@ async function openWorkspace($: EngineInterface, ws: Workspace, at?: { window: s
       await tmux(['select-window', '-t', `=${name}:${at.window}`])
     }
   }
+  // started now, each agent resumes its conversation: never one that runs somewhere else too
+  if (!wasRunning && ws.threads !== undefined) {
+    await refresh($, VISIBLE_MAX_AGE_MS)
+    const snap = await read($, snapshot)
+    const claude = ws.threads.claude === undefined ? undefined : snap.claude.find(s => s.sessionId === ws.threads!.claude!.id)
+    const codex = ws.threads.codex === undefined ? undefined : snap.codex.find(s => s.key === ws.threads!.codex!.id && s.surface === 'terminal')
+    const elsewhere = [...(claude === undefined ? [] : [`Claude's runs in ${claude.tty === '??' ? 'the background' : claude.tty}`]), ...(codex === undefined ? [] : [`Codex's runs in ${codex.tty}`])]
+    if (elsewhere.length > 0) return { isOpen: false, text: `Not opened: its agents go on with their own conversations, and ${elsewhere.join(' and ')}. Close it there first.` }
+  }
   // a terminal's login shell may be any shell: it is only given `/bin/sh <file>`, the file holding the command
   const file = openScriptPath(home, ws.id)
   await $.fs.write(file, `${openCommand(ws, home)}\n`)
@@ -779,7 +795,7 @@ async function moveChecked($: EngineInterface, move: NonNullable<Item['move']>) 
  */
 async function createWorkspace(
   $: EngineInterface,
-  w: { dir: string; env: string; name: string; purpose: string },
+  w: { dir: string; env: string; name: string; purpose: string; bring?: readonly string[] },
 ): Promise<{ isCreated: boolean; text: string }> {
   // one at a time: a second press of create, or Enter then create, never makes a second workspace
   let isMine = false
@@ -797,7 +813,7 @@ async function createWorkspace(
 
 async function makeWorkspace(
   $: EngineInterface,
-  w: { dir: string; env: string; name: string; purpose: string },
+  w: { dir: string; env: string; name: string; purpose: string; bring?: readonly string[] },
 ): Promise<{ isCreated: boolean; text: string }> {
   const home = (await $.env.get('HOME')) ?? ''
   const fail = (why: string) => ({ isCreated: false, text: `Not done: ${why}.` })
@@ -819,6 +835,19 @@ async function makeWorkspace(
   const checkout = 'checkout' in place ? place.checkout : undefined
   await refresh($, VISIBLE_MAX_AGE_MS)
   const snap = await read($, snapshot)
+  // the sessions brought in, each checked as it runs now; then closed where they run, so each conversation
+  // goes on in the workspace alone
+  const checked = await checkBring($, home, snap, w.bring ?? [], w.env)
+  if ('error' in checked) return fail(checked.error)
+  const threads: { claude?: Thread; codex?: Thread } = {}
+  const notBrought: string[] = []
+  for (const b of checked.bring) {
+    const out = await $.process
+      .run(['/bin/sh', '-c', STOP_SCRIPT, 'sh', b.tty, JOB_COMMANDS[b.tool], b.tool], { timeoutMs: 30_000 })
+      .catch(() => ({ stdout: 'failed' }))
+    if (out.stdout.trim() === 'stopped') threads[b.tool] = b.thread
+    else notBrought.push(`${b.label} (it did not close in ${b.tty}; it starts new here)`)
+  }
   // never the name of a tmux session already running: a new workspace never takes over an old one
   const running = Object.values(snap.tmux.panes).map(p => p.session).filter(s => s.startsWith('ws-')).map(s => s.slice(3))
   let ws: Workspace | undefined
@@ -827,16 +856,20 @@ async function makeWorkspace(
     ws = {
       id: slugOf(w.name, [...now.map(x => x.id), ...running]), name: w.name.trim(), env: w.env, dir, createdAt,
       ...(checkout === undefined ? {} : { checkout }),
+      ...(threads.claude === undefined && threads.codex === undefined ? {} : { threads }),
       // made for a purpose: Claude gets it ready, and the relay passes the cues from the start
       ...(purpose === '' ? {} : { purpose, relay: { mode: 'auto' as const, since: createdAt, streak: 0 } }),
     }
     return [...now, ws]
   })
-  if (!saved || ws === undefined) return fail(UNREADABLE)
+  if (!saved || ws === undefined) {
+    const closed = Object.entries(threads).map(([tool, t]) => `${tool === 'claude' ? `claude --resume ${t.id}` : `codex resume ${t.id}`} (in ${t.dir})`)
+    return fail(`${UNREADABLE}${closed.length > 0 ? `; to go on with what was closed: ${closed.join(', ')}` : ''}`)
+  }
   const made: Workspace = ws
   if (purpose !== '') {
-    await $.fs.write(promptPath(home, made.id, 'claude'), setupPrompt(made))
-    await $.fs.write(promptPath(home, made.id, 'codex'), peerPrompt(made))
+    await $.fs.write(promptPath(home, made.id, 'claude'), made.threads?.claude === undefined ? setupPrompt(made) : joinPrompt(made, 'claude'))
+    await $.fs.write(promptPath(home, made.id, 'codex'), made.threads?.codex === undefined ? peerPrompt(made) : joinPrompt(made, 'codex'))
   } else {
     // one left by a removed workspace of the same id never reaches this one's agents
     await removePrompts($, home, made.id)
@@ -844,9 +877,12 @@ async function makeWorkspace(
   await refresh($, 0)
   const label = `${made.name} (${made.env || 'default'}, ${made.dir})`
   const opened = await openWorkspace($, made)
-  const start = purpose === ''
+  const goOn = checked.bring.filter(b => made.threads?.[b.tool] !== undefined).map(b => b.label)
+  const start = (purpose === ''
     ? `Claude and Codex start side by side in tmux session ${tmuxName(made)}.`
-    : `Claude and Codex start side by side in tmux session ${tmuxName(made)}; Claude gets peer coding ready for it, and the relay passes each hand-over to the other.`
+    : `Claude and Codex start side by side in tmux session ${tmuxName(made)}; Claude gets peer coding ready for it, and the relay passes each hand-over to the other.`) +
+    (goOn.length > 0 ? ` ${goOn.join(' and ')} went on there, each in its own conversation.` : '') +
+    (notBrought.length > 0 ? ` Not brought in: ${notBrought.join('; ')}.` : '')
   return {
     isCreated: true,
     text: opened.isOpen
@@ -855,9 +891,58 @@ async function makeWorkspace(
   }
 }
 
+type Bring = { tool: 'claude' | 'codex'; label: string; tty: string; thread: Thread }
+
+/**
+ * The sessions to bring into a new workspace, each checked as it runs now:
+ * one of each agent at most, in a terminal, between turns, under the
+ * workspace's environment; with the conversation it resumes there and the
+ * flags that keep its permissions.
+ */
+async function checkBring($: EngineInterface, home: string, snap: Snapshot, members: readonly string[], env: string): Promise<{ bring: Bring[] } | { error: string }> {
+  const bring: Bring[] = []
+  const now = await $.clock.now()
+  const offered = bringable(snap, { now, selfId: await $.session.id() })
+  for (const member of members) {
+    const [tool = '', id = ''] = member.split(':')
+    if ((tool !== 'claude' && tool !== 'codex') || bring.some(b => b.tool === tool)) return { error: `"${member}" is not one session of each agent` }
+    const name = tool === 'claude' ? 'that Claude session' : 'that Codex terminal'
+    const offer = offered.find(b => b.member === member)
+    if (offer === undefined) return { error: `${name} cannot be brought in: it has ended, runs in the background or in a workspace already, or is this session` }
+    if (offer.env !== env) return { error: `${offer.label} runs under the ${offer.env || 'default'} environment; choose that one` }
+    if (tool === 'claude') {
+      const s = snap.claude.find(c => c.sessionId === id)!
+      // as it runs now: its registry entry and process, between turns, in front of its terminal
+      const raw = await $.fs.read(`${home}/.${s.profile}/sessions/${s.pid}.json`).then(text => JSON.parse(text) as unknown).catch(() => undefined)
+      const ps = await $.process.run(['/bin/ps', '-ww', '-o', PS_COLUMNS, '-p', String(s.pid)], { env: PS_ENV, timeoutMs: 10_000 })
+      const procs = parsePs(ps.stdout)
+      const proc = procs.get(s.pid)
+      const still = claudeFromRegistry(raw, s.profile, procs, home)
+      if (proc === undefined || still === undefined || still.sessionId !== s.sessionId || !isClaudeProcess(proc.args)) return { error: `${offer.label} has ended or its process changed` }
+      if (claudeState(still, now) !== 'idle') return { error: `${offer.label} is working: bring it in once its turn is done` }
+      if (!isForeground(proc.stat)) return { error: `${offer.label} is suspended (Ctrl+Z) or not in front of its terminal; bring it back first` }
+      const mode = await $.process.run(['/bin/sh', '-c', MODE_SCRIPT, 'sh', transcriptPath(`${home}/.${s.profile}`, still.startCwd, still.sessionId)], { timeoutMs: 10_000 })
+      const flags = modeFlags(mode.stdout)
+      if (flags === undefined) return { error: `${offer.label}'s permission mode is not one this knows` }
+      bring.push({ tool, label: offer.label, tty: proc.tty, thread: { id, dir: still.startCwd, ...(flags.length > 0 ? { flags } : {}) } })
+    } else {
+      const s = snap.codex.find(c => c.key === id && c.surface === 'terminal')!
+      const rollout = (await $.process.run(['/bin/sh', '-c', ROLLOUT_SCRIPT, 'sh', `${home}/.${s.profile}`, id], { timeoutMs: 15_000 })).stdout.trim()
+      if (!rollout.startsWith('/')) return { error: `${offer.label}'s conversation was not found under ~/.${s.profile}` }
+      const turn = parseTurns((await $.process.run(['/bin/sh', '-c', TURN_SCRIPT, 'sh', rollout], { timeoutMs: 20_000 })).stdout).get(rollout)
+      if (turn?.state === 'busy') return { error: `${offer.label} is working: bring it in once its turn is done` }
+      const mode = (await $.process.run(['/bin/sh', '-c', CODEX_MODE_SCRIPT, 'sh', rollout], { timeoutMs: 10_000 })).stdout
+      const dir = codexDir(mode) ?? s.cwd
+      if (!dir.startsWith('/')) return { error: `${offer.label}'s folder is not known` }
+      bring.push({ tool, label: offer.label, tty: s.tty, thread: { id, dir, flags: codexFlags(mode) } })
+    }
+  }
+  return { bring }
+}
+
 async function submitDraft($: EngineInterface) {
   const d = await read($, draft)
-  const made = await createWorkspace($, { name: d.name, dir: d.dir || d.query, env: d.env, purpose: d.purpose })
+  const made = await createWorkspace($, { name: d.name, dir: d.dir || d.query, env: d.env, purpose: d.purpose, bring: d.bring })
   if (made.isCreated) {
     await update($, draft, () => NO_DRAFT)
     $.ui.toast(made.text, { timeoutMs: 15_000 })
@@ -871,11 +956,11 @@ async function removePrompts($: EngineInterface, home: string, id: string) {
   await $.process.run(['/bin/rm', '-f', promptPath(home, id, 'claude'), promptPath(home, id, 'codex')], { timeoutMs: 10_000 }).catch(() => undefined)
 }
 
-/** Opens the form, with `dir` filled in when given, and looks for the projects to offer. */
-async function openDraft($: EngineInterface, dir: string) {
+/** Opens the form, with `dir` filled in when given (and a session to bring in, with its environment), and looks for the projects to offer. */
+async function openDraft($: EngineInterface, dir: string, with_?: { member: string; env: string }) {
   const home = (await $.env.get('HOME')) ?? ''
   const shown = dir.startsWith(`${home}/`) ? `~${dir.slice(home.length)}` : dir
-  await update($, draft, () => ({ ...NO_DRAFT, isOpen: true, dir, query: shown }))
+  await update($, draft, () => ({ ...NO_DRAFT, isOpen: true, dir, query: shown, ...(with_ === undefined ? {} : { bring: [with_.member], env: with_.env }) }))
   // while this pane has the keys (the form opened by its key), what is typed next goes into the name, not to the pane's keys
   await $.ui.focus({ requestId: PANE, key: 'form:name' }).catch(() => undefined)
   if ((await read($, projects)).length > 0) return
@@ -1137,6 +1222,10 @@ export const register: Register = on => {
     const openForm = (dir: string) => () => void openDraft($, dir)
     const setForm = (field: 'name' | 'purpose') => (value: string) => void update($, draft, d => ({ ...d, [field]: value, error: '' }))
     // typing in the project field searches; a pick sets the folder
+    // the running sessions the form can bring in: the project's, once one is chosen; any row's for its own action
+    const offeredAll = bringable(snap, { now, selfId })
+    const formDir = absoluteDir(form.dir || form.query, home)
+    const offered = form.isOpen && formDir !== undefined ? bringable(snap, { now, selfId }, formDir) : []
     const matches = form.isOpen ? rankProjects(await read($, projects), [...snap.claude, ...snap.codex].map(s => ({ cwd: s.cwd, at: 'lastActive' in s ? s.lastActive : s.since })), form.dir === '' ? form.query : '', home) : []
     const pending = await read($, pendingMove)
     const isPending = (key: string) => pending.key === key && now - pending.at < CONFIRM_MS
@@ -1236,11 +1325,14 @@ export const register: Register = on => {
       )
     }
     // a session's row and, while shown, its actions; while it is being assigned, the workspaces to choose from
-    const sessionRow = (i: Item, siblings: readonly string[], scope: string) => {
+    const sessionRow = (i: Item, siblings: readonly string[], scope: string, treeDir = '') => {
       const id = `item:${i.key}`
       const target = canOpen ? i.target : undefined
+      const offer = !treeDir.startsWith('/') || Input === undefined ? undefined : offeredAll.find(b => b.member === i.memberId)
       const actions = (): Element[] => [
         ...(target === undefined ? [] : [<Button key={`open-bar ${i.key}`} label="Open (o)" hotkey="o" variant="primary" onPress={() => void openSession($, target)} />]),
+        // a new workspace this session goes on in, in its own conversation
+        ...(offer === undefined ? [] : [<Button key={`bring ${i.key}`} label="New workspace with it (n)" hotkey="n" onPress={() => void openDraft($, treeDir, offer)} />]),
         ...(hasMove && i.move !== undefined
           ? [
               // a click, twice: no key, so no two keystrokes can move a session
@@ -1324,7 +1416,7 @@ export const register: Register = on => {
                 label="project"
                 value={form.query}
                 placeholder="type to search your repositories, or a folder"
-                onInput={value => void update($, draft, d => ({ ...d, query: value, dir: '', error: '' }))}
+                onInput={value => void update($, draft, d => ({ ...d, query: value, dir: '', bring: [], error: '' }))}
                 onSubmit={() => void submitDraft($)}
               />
               {form.dir === '' && matches.length > 0 && (
@@ -1332,9 +1424,23 @@ export const register: Register = on => {
                   key="form:pick"
                   label="pick"
                   options={matches.map(m => ({ value: m.path, label: m.label }))}
-                  onSelect={value => void update($, draft, d => ({ ...d, dir: value, query: rankProjects([value], [], '', home)[0]?.label ?? value, error: '' }))}
+                  onSelect={value => void update($, draft, d => ({ ...d, dir: value, query: rankProjects([value], [], '', home)[0]?.label ?? value, bring: [], error: '' }))}
                 />
               )}
+              {offered.length > 0 && <Text dimColor wrap="truncate-end">{'bring in (each closes where it runs and goes on here, in its own conversation):'}</Text>}
+              {offered.map(b => {
+                const isChosen = form.bring.includes(b.member)
+                return (
+                  <Box key={`form:bring-row ${b.member}`} marginLeft={2}>
+                    <Button
+                      key={`form:bring ${b.member}`}
+                      label={`${isChosen ? '[x]' : '[ ]'} ${b.label}${b.isIdle ? '' : ' · working: bring it in once its turn is done'}`}
+                      {...(isChosen ? { variant: 'primary' as const } : {})}
+                      onPress={() => void update($, draft, d => ({ ...d, bring: toggled(d.bring, b.member), ...(d.bring.includes(b.member) ? {} : { env: b.env }), error: '' }))}
+                    />
+                  </Box>
+                )
+              })}
               <Select
                 key="form:env"
                 label="environment"
@@ -1435,7 +1541,7 @@ export const register: Register = on => {
                     ...(Input === undefined ? [] : [<Button key={`new-from:${tree.key}`} label="New workspace here (n)" hotkey="n" variant="primary" onPress={openForm(tree.key)} />]),
                     ...moves(treesScope(repo.key), repo.trees.map(t => t.key), tree.key),
                   ])}
-                {tree.items.map(i => sessionRow(i, tree.items.map(x => x.key), itemsScope(tree.key)))}
+                {tree.items.map(i => sessionRow(i, tree.items.map(x => x.key), itemsScope(tree.key), tree.key))}
               </Box>
             ))}
           </Box>

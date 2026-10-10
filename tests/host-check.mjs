@@ -21,6 +21,7 @@ registerHooks({
 const c = await import('../hooks/collect.ts')
 const w = await import('../hooks/workspaces.ts')
 const r = await import('../hooks/relay.ts')
+const b = await import('../hooks/bring.ts')
 
 
 const home = process.env.HOME
@@ -761,6 +762,61 @@ except ChildProcessError: pass
     const background = relay('pass-t6', bgPane, 'cat')
     check('relay: an agent in the pane but not in its foreground is not typed into', /^not-agent /.test(background) && !background.includes('cat'), background)
 
+  } finally {
+    // a check that throws still ends the private server
+    tmux('kill-server')
+    rmSync(join(process.env.TMUX_TMPDIR ?? '/tmp', `tmux-${process.getuid()}`, socket), { force: true })
+    rmSync(scratch, { recursive: true, force: true })
+  }
+}
+
+// bringing a session into a workspace: its agent closed in front of its terminal, as a closing terminal does;
+// Codex's rollout found by its conversation's id, and how it last ran read from it
+{
+  const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'live-sessions-bring-')))
+  const socket = `live-sessions-bring-${process.pid}`
+  // a private server that reads no tmux.conf: the person's plugins (a session restore) never run in it
+  const tmux = (...args) => spawnSync('tmux', ['-L', socket, '-f', '/dev/null', ...args], { encoding: 'utf8' })
+  try {
+    // stand-ins named as the agents' commands, in a folder whose name has a space (a copied system binary is
+    // killed by macOS, so they are built): `codex` in front of its terminal with a `node` beside it in the same
+    // job, as Codex runs
+    const bin = join(scratch, 'My Tools')
+    mkdirSync(bin)
+    writeFileSync(join(scratch, 'wait.c'), '#include <unistd.h>\n#include <stdlib.h>\nint main(int c, char **v) { sleep(c > 1 ? atoi(v[1]) : 600); return 0; }\n')
+    for (const name of ['codex', 'node']) execFileSync('/usr/bin/cc', ['-o', join(bin, name), join(scratch, 'wait.c')])
+    writeFileSync(join(scratch, 'job.sh'), `#!/bin/sh\n'${bin}/node' 600 &\nexec '${bin}/codex' 600\n`)
+    tmux('new-session', '-d', '-s', 'agent', `/bin/sh '${scratch}/job.sh'`)
+    tmux('new-session', '-d', '-s', 'shell', '/bin/sh')
+    await new Promise(res => setTimeout(res, 500))
+    const ttyOf = name => tmux('display-message', '-p', '-t', `=${name}:`, '#{pane_tty}').stdout.trim().replace('/dev/', '')
+    const front = tty => spawnSync('/bin/ps', ['-t', tty, '-o', 'pid=,stat=,comm='], { encoding: 'utf8' }).stdout
+    const agentTty = ttyOf('agent')
+    const before = front(agentTty)
+    const stop = (tty, agent) => spawnSync('/bin/sh', ['-c', b.STOP_SCRIPT, 'sh', tty, b.JOB_COMMANDS[agent], agent], { encoding: 'utf8', timeout: 30_000 }).stdout.trim()
+    check('bring: nothing is hung up where the agent is not in front of its terminal', stop(ttyOf('shell'), 'codex') === 'not-running' && stop(agentTty, 'claude') === 'not-running' && stop('console', 'codex') === 'not-running')
+    // the relay too knows the agent by its command's whole name, its folder's space and all
+    const typedIn = spawnSync('/bin/sh', ['-c', r.RELAY_SCRIPT, 'sh', 'pass', join(scratch, 'ledger'), 'pass-b1', tmux('display-message', '-p', '-t', '=agent:', '#{pane_id}').stdout.trim(), 'codex', 'READY FOR CODEX · x', socket, 'check'], { encoding: 'utf8' }).stdout.trim()
+    check('relay: an agent run from a folder with a space in its name is the agent', typedIn === 'passed', typedIn)
+    const stopped = stop(agentTty, 'codex')
+    const after = front(agentTty)
+    check('bring: the agent\'s job in front of its terminal hung up, waited for until it has exited', stopped === 'stopped' && /codex/.test(before) && /node/.test(before) && !/codex|node/.test(after), `${stopped} | ${before.trim()} | ${after.trim()}`)
+    // a Codex home with a rollout: found by its id; how it last ran read from its last turn_context
+    const id = '01a1245d-224b-7f11-8b69-8cd540d257d9'
+    const day = join(scratch, 'codex-home', 'sessions', '2026', '10', '09')
+    mkdirSync(day, { recursive: true })
+    const rollout = join(day, `rollout-2026-10-09T22-50-45-${id}.jsonl`)
+    writeFileSync(rollout, [
+      { type: 'session_meta', payload: { id, cwd: '/Users/u/dev/old' } },
+      { type: 'turn_context', payload: { cwd: '/Users/u/dev/old', approval_policy: 'never', sandbox_policy: { type: 'read-only' } } },
+      { type: 'response_item', payload: { type: 'message', content: [{ type: 'input_text', text: '"type":"turn_context" quoted in a prompt' }] } },
+      { type: 'turn_context', payload: { cwd: '/Users/u/dev/web-app', approval_policy: 'on-request', sandbox_policy: { type: 'danger-full-access' } } },
+    ].map(o => JSON.stringify(o)).join('\n') + '\n')
+    const found = spawnSync('/bin/sh', ['-c', b.ROLLOUT_SCRIPT, 'sh', join(scratch, 'codex-home'), id], { encoding: 'utf8' }).stdout.trim()
+    const none = spawnSync('/bin/sh', ['-c', b.ROLLOUT_SCRIPT, 'sh', join(scratch, 'codex-home'), 'not-there'], { encoding: 'utf8' }).stdout.trim()
+    check('bring: Codex\'s rollout found by its conversation\'s id; none for another', found === rollout && none === '', found)
+    const mode = spawnSync('/bin/sh', ['-c', b.CODEX_MODE_SCRIPT, 'sh', rollout], { encoding: 'utf8' }).stdout
+    check('bring: how Codex last ran, from its own last turn_context', JSON.stringify(b.codexFlags(mode)) === JSON.stringify(['--sandbox', 'danger-full-access', '--ask-for-approval', 'on-request']) && b.codexDir(mode) === '/Users/u/dev/web-app', JSON.stringify(mode))
   } finally {
     // a check that throws still ends the private server
     tmux('kill-server')

@@ -78,7 +78,15 @@ export type Workspace = {
   checkout?: string
   /** Passing each agent's cue to the other: on (`auto`), only telling the owner (`notify`), or `off`. */
   relay?: Relay
+  /**
+   * The conversation each agent's pane resumes when it starts: one brought
+   * in from where it ran, or the one last seen in its pane. None: it starts new.
+   */
+  threads?: { claude?: Thread; codex?: Thread }
 }
+
+/** A conversation to resume: its id, the folder it runs from, and the flags that keep its permissions. */
+export type Thread = { id: string; dir: string; flags?: string[] }
 
 export type Relay = {
   mode: 'auto' | 'notify' | 'off'
@@ -125,7 +133,7 @@ declare module 'claude-code' {
       /** A move to the background pressed once: the row's key and when; a second press confirms it. */
       pendingMove: { key: string; at: number }
       /** The new-workspace form, while open. */
-      draft: { isOpen: boolean; name: string; query: string; dir: string; env: string; purpose: string; error: string }
+      draft: { isOpen: boolean; name: string; query: string; dir: string; env: string; purpose: string; error: string; bring: string[] }
       /** The row whose actions are shown under it: `item:<key>`, `tree:<key>`, `repo:<key>` or `ws:<id>`; '' for none. */
       selected: string
       /** The git repositories found on this Mac (main checkouts), for the form to offer; [] until looked for. */

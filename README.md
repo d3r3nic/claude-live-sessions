@@ -25,13 +25,20 @@ A workspace is a project with your own name: a repository, an environment, and C
   - **project**: type to search the git repositories on this Mac (their main checkouts, up to five folders down from your home folder, skipping Library, hidden folders and `*-worktrees`), those worked in lately first, and pick one; or type a folder (absolute, or starting with `~/`).
   - **environment**: one of the environments on this Mac (below).
   - **what it is for** (optional): a sentence or two.
-  `New workspace here`, in a branch or folder row's actions, opens the form with that folder as the project.
+  - **bring in** (shown once a project is chosen): the Claude sessions and Codex terminals already running in that repository (any of its worktrees), at most one of each. Each one brought in closes where it runs and goes on in the workspace, in its own conversation (below).
+  `New workspace here`, in a branch or folder row's actions, opens the form with that folder as the project. `New workspace with it`, in a running session's actions, opens it with that session's folder and environment, the session chosen to bring in.
 - `/workspace new <folder> <env> <name> [--for <what it is for>]` does the same from the prompt; every word after `--for` is the purpose.
 - Create opens a Terminal window on tmux session `ws-<id>` (the window runs `/bin/sh <file>`, the file in `~/Library/Application Support/live-sessions/open/` holding the command line, so any login shell works) (`<id>` is the name in lowercase with dashes), with one window: Claude on the left and Codex on the right, both in the project's folder. Each may also work in `<checkout>-worktrees/`, beside the repository's main checkout (made if it is not there), where branches' worktrees go. Create is taken once: a second press, or Enter, while one is being made, does not make another.
 - With a purpose (it needs a git repository), each agent starts with a first prompt, taken once (a restart never sends it again; `/workspace rm` deletes one never taken):
   - Claude gets peer coding ready under the peer-coding rules (the peer-coding skill): sets the repository up for it if it is not, starts a branch named for the purpose in its own worktree, makes its alignment move and ends its turn with the rules' cue line.
   - Codex is told it is the peer and that Claude's hand-off will come; it answers that it is ready.
   - The relay is on (below), so Claude's hand-off reaches Codex without copy and paste.
+- **Bringing running sessions in.** A Claude session in a terminal (not one in the background, nor the session you are in) or a Codex terminal whose conversation is known, not already in a workspace, can be brought into a new one:
+  - Each is checked first, all before anything is closed: it must be between turns, in front of its terminal, and under the form's environment. Claude's permission mode is read from its own records (an unknown one stops it); Codex's sandbox, approvals and folder from its rollout's last settings.
+  - Then each is closed where it runs, as closing its terminal would: its job in front of that terminal is hung up and waited for (20 s at most), and that terminal keeps its shell. One that does not close is not brought in: that agent starts new in the workspace, and you are told.
+  - In the workspace, each resumes its own conversation: Claude with `claude --resume <id>` from the folder it started in, with its permission flags; Codex with `codex resume <id>` in its folder, its full access kept if it had it (anything else runs `workspace-write`, as a new workspace's Codex does) and its approval policy kept.
+  - With a purpose, a brought-in agent's first prompt tells it the owner moved its conversation into the workspace and it keeps all it knows: Claude goes on with the work's peer-coding branch if it has one (or starts one, taking along work not yet committed) and tells Codex where the work stands; Codex waits for that hand-off and adds what its own work knows. An agent starting new is told the other was brought in.
+- **A workspace remembers each pane's conversation.** The conversation each of its panes runs is kept with it; when it is opened again after its tmux session ended (a restart), each agent goes on with its own. It is never opened while one of those conversations runs somewhere else: close it there first.
 - `<env>` is required, and picks the accounts the agents start under:
   - `default` uses `~/.claude` and `~/.codex`.
   - `work` uses `~/.claude-work` and `~/.codex-work`, through `CLAUDE_CONFIG_DIR` and `CODEX_HOME`.
@@ -108,10 +115,11 @@ To change it, edit this folder, then run `/reload-plugins` in a session.
 
 ```sh
 claude plugin validate .
-claude plugin test .                                         # 92 tests
+claude plugin test .                                         # 102 tests
 npx -p typescript@5.6.3 tsc -p .                             # after one load, which lays down .claude-plugin/types
 node --experimental-strip-types tests/host-check.mjs [2d] [--slow]   # on this Mac: SQL, pipelines, a full collection, the move script on throwaway processes, workspaces and the relay on a private tmux server (reading no tmux.conf), the checkout script on throwaway repositories
 E2E_TRUSTED_DIR=<a trusted folder> node --experimental-strip-types tests/e2e-terminal.mjs    # a Terminal window: move a throwaway session to the background
 E2E_TRUSTED_DIR=<a trusted folder> node --experimental-strip-types tests/e2e-workspace.mjs   # a Terminal window: open a throwaway workspace (private tmux server), hide it, agents keep running
 E2E_TRUSTED_DIR=<a trusted folder> node --experimental-strip-types tests/e2e-relay.mjs       # the real Claude and Codex on a private tmux server: first prompts, turns read, lines typed and taken (a few short turns)
+E2E_TRUSTED_DIR=<a trusted folder> node --experimental-strip-types tests/e2e-bring.mjs       # the real Claude and Codex on a private tmux server: each runs a turn, is closed where it ran and resumed in a workspace, its conversation kept (four short turns)
 ```

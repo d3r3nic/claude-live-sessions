@@ -1,6 +1,7 @@
 // Workspaces: named projects, each a folder, an environment and one tmux
 // session running its agents. Pure: no `$`, so the tests drive it directly.
 import type { Workspace } from '../types'
+import { threadFrom } from './bring'
 
 /** The tmux session a workspace runs in. */
 export const tmuxName = (ws: Pick<Workspace, 'id'>) => `ws-${ws.id}`
@@ -108,14 +109,26 @@ export const promptPath = (home: string, id: string, tool: 'claude' | 'codex') =
  * offer, whose default answer on Enter installs a new version, and in the
  * sandbox it uses for a trusted project (workspace-write), which lets it
  * write in the worktrees folder too; its approvals stay as configured.
+ * An agent with a conversation to resume (`threads`) resumes it, from the
+ * folder it ran in, with the flags that keep its permissions.
  */
-function paneScript(tool: 'claude' | 'codex', ws: Pick<Workspace, 'id' | 'env' | 'checkout'>, home: string, bin?: string): string {
-  const start = `${agentStart(tool, ws.env, home, bin)}${tool === 'codex' ? ' -c check_for_update_on_startup=false --sandbox workspace-write' : ''}`
+function paneScript(tool: 'claude' | 'codex', ws: Pick<Workspace, 'id' | 'env' | 'checkout' | 'threads'>, home: string, bin?: string): string {
+  const thread = ws.threads?.[tool]
   const addDir = ws.checkout === undefined ? '' : ` --add-dir ${shellWord(`${ws.checkout}-worktrees`)}`
   const prompt = shellWord(promptPath(home, ws.id, tool))
-  const run = `p=$(cat ${prompt} 2>/dev/null) && rm -f ${prompt}; ${start}${addDir} \${p:+--} \${p:+"$p"}`
+  const flags = (thread?.flags ?? []).map(f => ` ${shellWord(f)}`).join('')
+  const start = agentStart(tool, ws.env, home, bin)
+  const agent =
+    thread === undefined
+      ? `${start}${tool === 'codex' ? ` ${UPDATE_OFF} --sandbox workspace-write` : ''}${addDir} \${p:+--} \${p:+"$p"}`
+      : tool === 'claude'
+        // a Claude conversation is kept under the folder it started in: resumed from there
+        ? `cd ${shellWord(thread.dir)} && ${start} --resume ${thread.id}${flags}${addDir} \${p:+--} \${p:+"$p"}`
+        : `${start} resume ${UPDATE_OFF}${thread.flags?.includes('--sandbox') === true ? '' : ' --sandbox workspace-write'}${flags}${addDir} -C ${shellWord(thread.dir)} -- ${thread.id} \${p:+"$p"}`
+  const run = `p=$(cat ${prompt} 2>/dev/null) && rm -f ${prompt}; ${agent}`
   return `/bin/sh -c ${shellWord(`${run}; exec "$SHELL" -l`)}`
 }
+const UPDATE_OFF = '-c check_for_update_on_startup=false'
 
 /** The tmux pane option that says which agent a pane is for. */
 export const AGENT_OPTION = '@live-sessions-agent'
@@ -332,7 +345,7 @@ export const OWNER_OPTION = '@live-sessions-workspace'
  * only creates.
  */
 export function openCommand(
-  ws: Pick<Workspace, 'id' | 'env' | 'dir' | 'createdAt' | 'checkout'> & { name?: string },
+  ws: Pick<Workspace, 'id' | 'env' | 'dir' | 'createdAt' | 'checkout' | 'threads'> & { name?: string },
   home: string,
   o: { socket?: string; bins?: { claude: string; codex: string }; attach?: boolean } = {},
 ): string {
@@ -418,8 +431,15 @@ export function workspacesFrom(raw: unknown): Workspace[] {
   }).map(ws => {
     // a member this does not read (a hand edit, a later format) is kept as it is and never costs the workspace
     const members: unknown[] | undefined = Array.isArray(ws.members) ? ws.members : undefined
-    const { members: _, ...rest } = ws
-    return members !== undefined && members.length > 0 ? { ...rest, members } : rest
+    // a conversation to resume is run: one this does not read is dropped, and that agent starts new
+    const claude = threadFrom('claude', (ws.threads as Record<string, unknown> | undefined)?.claude)
+    const codex = threadFrom('codex', (ws.threads as Record<string, unknown> | undefined)?.codex)
+    const { members: _, threads: __, ...rest } = ws
+    return {
+      ...rest,
+      ...(members !== undefined && members.length > 0 ? { members } : {}),
+      ...(claude === undefined && codex === undefined ? {} : { threads: { ...(claude === undefined ? {} : { claude }), ...(codex === undefined ? {} : { codex }) } }),
+    }
   })
 }
 
@@ -477,11 +497,12 @@ export function checkoutResult(stdout: string): { checkout: string } | { error: 
  * workspace's name is the owner's label only), and hand over by its cue,
  * which the workspace's relay passes on.
  */
-export function setupPrompt(ws: Pick<Workspace, 'name' | 'purpose' | 'checkout'>): string {
+export function setupPrompt(ws: Pick<Workspace, 'name' | 'purpose' | 'checkout' | 'threads'>): string {
+  const codex = ws.threads?.codex === undefined ? 'Codex runs in the pane beside you' : 'Codex runs in the pane beside you, in its own conversation, which the owner brought in: it has been working on this already'
   return [
     `This is the workspace "${ws.name}". What it is for: ${ws.purpose ?? ''}`,
     '',
-    'You are Claude, one of two peers here; Codex runs in the pane beside you. The owner turned on this workspace\'s relay, which stands in for the owner\'s copy and paste: when your turn ends with a peer-coding cue line (READY FOR CODEX, NEEDS USER or SCOPE CLOSED), it types that exact line into Codex\'s chat, or tells the owner. The owner still answers every NEEDS USER.',
+    `You are Claude, one of two peers here; ${codex}. ${RELAY_FOR_CLAUDE}`,
     '',
     'Get the workspace ready for peer coding, using the peer-coding skill and the rules it leads to:',
     '1. If this repository is not set up for peer coding in the current layout, set it up. Record the owner\'s decisions you already know and ask for the rest with NEEDS USER.',
@@ -496,13 +517,49 @@ export function setupPrompt(ws: Pick<Workspace, 'name' | 'purpose' | 'checkout'>
  * hand-off. Its short answer is its first finished turn, which the relay
  * waits for before it types anything into Codex's pane.
  */
-export function peerPrompt(ws: Pick<Workspace, 'name' | 'purpose'>): string {
+export function peerPrompt(ws: Pick<Workspace, 'name' | 'purpose' | 'threads'>): string {
+  const claude = ws.threads?.claude === undefined ? 'Claude runs in the pane beside you' : 'Claude runs in the pane beside you, in its own conversation, which the owner brought in,'
   return [
     `This is the workspace "${ws.name}". What it is for: ${ws.purpose ?? ''}`,
     '',
-    'You are Codex, one of two peers here; Claude runs in the pane beside you and is getting peer coding ready now, under the peer-coding rules. The owner turned on this workspace\'s relay, which stands in for the owner\'s copy and paste: Claude\'s hand-off line (READY FOR CODEX · …) will be typed here when Claude\'s turn ends, and when your turn ends with a cue line the relay passes it to Claude or tells the owner.',
+    `You are Codex, one of two peers here; ${claude} and is getting peer coding ready now, under the peer-coding rules. ${RELAY_FOR_CODEX}`,
     '',
     'Nothing to do until then: reply with one short line saying you are ready.',
+  ].join('\n')
+}
+
+const RELAY_FOR_CLAUDE = 'The owner turned on this workspace\'s relay, which stands in for the owner\'s copy and paste: when your turn ends with a peer-coding cue line (READY FOR CODEX, NEEDS USER or SCOPE CLOSED), it types that exact line into Codex\'s chat, or tells the owner. The owner still answers every NEEDS USER.'
+const RELAY_FOR_CODEX = 'The owner turned on this workspace\'s relay, which stands in for the owner\'s copy and paste: Claude\'s hand-off line (READY FOR CODEX · …) will be typed here when Claude\'s turn ends, and when your turn ends with a cue line the relay passes it to Claude or tells the owner.'
+
+/**
+ * The first prompt of an agent whose conversation the owner brought into a
+ * workspace made for a purpose: it keeps everything it knows and goes on as
+ * a peer under the peer-coding rules. Claude gets peer coding ready (going on
+ * with a branch the work already has) and tells Codex where the work stands;
+ * Codex waits for that hand-off, then adds what its own work knows.
+ */
+export function joinPrompt(ws: Pick<Workspace, 'name' | 'purpose' | 'checkout' | 'threads'>, tool: 'claude' | 'codex'): string {
+  const moved = 'The owner moved this conversation into the workspace: everything above stays yours.'
+  if (tool === 'codex') {
+    const claude = ws.threads?.claude === undefined ? 'Claude runs in the pane beside you' : 'Claude runs in the pane beside you, in its own conversation, brought in too,'
+    return [
+      `This is the workspace "${ws.name}". What it is for: ${ws.purpose ?? ''}`,
+      '',
+      `${moved} You are Codex, one of two peers here; ${claude} and is getting peer coding ready now, under the peer-coding rules. ${RELAY_FOR_CODEX}`,
+      '',
+      'Nothing to do until then: reply with one short line saying you are ready. When Claude\'s hand-off comes, align with it, and add what you know from your own work above that it does not say.',
+    ].join('\n')
+  }
+  const codex = ws.threads?.codex === undefined ? 'Codex runs in the pane beside you, starting new' : 'Codex runs in the pane beside you, in its own conversation, brought in too'
+  return [
+    `This is the workspace "${ws.name}". What it is for: ${ws.purpose ?? ''}`,
+    '',
+    `${moved} You are Claude, one of two peers here; ${codex}. ${RELAY_FOR_CLAUDE}`,
+    '',
+    'From here, work as a peer under the peer-coding rules, using the peer-coding skill:',
+    '1. If this repository is not set up for peer coding in the current layout, set it up. Record the owner\'s decisions you already know and ask for the rest with NEEDS USER.',
+    `2. If the work above already has a peer-coding branch, go on with it. Otherwise start one for this purpose: name it from the purpose by the settings' branch naming, never from the workspace's name, in its own worktree in ${ws.checkout ?? '<checkout>'}-worktrees/, and take along work of yours that is not committed yet.`,
+    '3. Make your alignment move for that branch, telling Codex where the work stands, and end your turn with the line the rules\' cue prints.',
   ].join('\n')
 }
 

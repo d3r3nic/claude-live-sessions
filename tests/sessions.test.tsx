@@ -50,9 +50,10 @@ import {
   threadQuery,
 } from '../hooks/collect'
 import type { CodexProc, ThreadRow } from '../hooks/collect'
-import type { Workspace } from '../types'
+import type { Snapshot, Workspace } from '../types'
 import { afterOwner, afterStep, cueOf, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_MAX_AGE_MS, TURN_SCRIPT } from '../hooks/relay'
 import type { Side } from '../hooks/relay'
+import { bringable, codexDir, codexFlags, CODEX_MODE_SCRIPT, envOfProfile, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, threadFrom, toggled } from '../hooks/bring'
 import {
   absoluteDir,
   agentStart,
@@ -77,6 +78,7 @@ import {
   KEEPS_LABEL,
   mayBindHide,
   setupPrompt,
+  joinPrompt,
   envsFrom,
   findWorkspace,
   openCommand,
@@ -172,6 +174,13 @@ const world = {
   removed: [] as string[],
   /** Paths that are not there, though the fixtures have them. */
   gone: new Set<string>(),
+  /** What STOP_SCRIPT answers for a terminal (default `stopped`), and what it was run for. */
+  stop: {} as Record<string, string>,
+  stopped: [] as string[],
+  /** Processes that have exited (a terminal STOP_SCRIPT closed). */
+  exited: new Set<number>(),
+  /** What CODEX_MODE_SCRIPT prints for a rollout. */
+  codexMode: 'workspace-write\ton-request\t/Users/u/dev/web-app\n',
 }
 const resetWorld = () => {
   world.stat.clear()
@@ -195,6 +204,10 @@ const resetWorld = () => {
   world.statusClick = 'bind-key -T root MouseDown1Status switch-client -t ='
   world.inMode.clear()
   world.gone.clear()
+  world.stop = {}
+  world.stopped = []
+  world.exited.clear()
+  world.codexMode = 'workspace-write\ton-request\t/Users/u/dev/web-app\n'
 }
 const changed = (pid: number, line: string) => {
   const stat = world.stat.get(pid)
@@ -211,12 +224,12 @@ function machine(argv: readonly string[], env: unknown): Run {
   const pidsAfter = (flag: string) => (argv[argv.indexOf(flag) + 1] ?? '').split(',').map(Number)
   switch (argv[0]) {
     case '/usr/bin/pgrep':
-      return ok(PGREP)
+      return ok(PGREP.split('\n').filter(pid => !world.exited.has(Number(pid))).join('\n'))
     case '/bin/ps': {
       if (argv.includes('ppid=')) return ok(`${9000 + Number(argv[argv.length - 1])}\n`)
       if (argv.includes('stat=,comm=')) return ok(`${world.parent}\n`)
       const pids = pidsAfter('-p')
-      const lines = pids.flatMap(pid => (PS_LINES[pid] === undefined ? [] : [changed(pid, PS_LINES[pid]!)]))
+      const lines = pids.flatMap(pid => (PS_LINES[pid] === undefined || world.exited.has(pid) ? [] : [changed(pid, PS_LINES[pid]!)]))
       const text = lines.map(line => (isUtcEnglish(env) ? line : local(line))).join('\n')
       // ps exits 1 when a listed pid has gone, saying nothing on stderr
       return { exitCode: lines.length === pids.length ? 0 : 1, stdout: `${text}\n`, stderr: '' }
@@ -235,6 +248,15 @@ function machine(argv: readonly string[], env: unknown): Run {
       }
       if (argv[2] === MOVE_SCRIPT) return world.move === 0 ? ok('typed') : { exitCode: Number(world.move), stdout: '', stderr: '' }
       if (argv[2] === MODE_SCRIPT) return ok(world.mode)
+      if (argv[2] === STOP_SCRIPT) {
+        world.stopped.push(`${args[0]} ${args[1]} ${args[2]}`)
+        const answer = world.stop[args[0] ?? ''] ?? 'stopped'
+        // closed: the processes in front of that terminal have exited
+        if (answer === 'stopped') for (const [pid, line] of Object.entries(PS_LINES)) if (line.includes(` ${args[0]} `)) world.exited.add(Number(pid))
+        return ok(`${answer}\n`)
+      }
+      if (argv[2] === ROLLOUT_SCRIPT) return ok(args[1] === RESUMED_A && args[0] === '/Users/u/.codex' ? '/rollouts/a.jsonl\n' : '')
+      if (argv[2] === CODEX_MODE_SCRIPT) return ok(world.codexMode)
       if (argv[2] === CHECKOUT_SCRIPT) {
         // web-app and api are repositories; anything else is not
         const main = ['/Users/u/dev/web-app', '/Users/u/dev/api'].find(m => args[0] === m || args[0]?.startsWith(`${m}/`))
@@ -1398,7 +1420,10 @@ describe('workspaces', () => {
     await $.command.run(SESSIONS)
     expect((await $.command.run({ ...SESSIONS, command: 'workspace', args: 'open practice-rbac' })).text).toBe('Opened ws-practice-rbac in a new Terminal window.')
     expect(osa().at(-1)).toEqual(['open', `/bin/sh '${openScriptPath(HOME, 'practice-rbac')}'`])
-    expect(files.get(openScriptPath(HOME, 'practice-rbac'))).toBe(`${openCommand(practice, HOME)}\n`)
+    // the conversations its panes ran are kept: started again, each agent goes on with its own
+    const kept = JSON.parse(files.get(WORKSPACES)!).workspaces[0]
+    expect(kept.threads).toEqual({ claude: { id: 'session-101', dir: '/Users/u/dev/web-app' }, codex: { id: RESUMED_A, dir: '/Users/u/dev/web-app' } })
+    expect(files.get(openScriptPath(HOME, 'practice-rbac'))).toBe(`${openCommand(kept, HOME)}\n`)
     await $.command.run({ ...SESSIONS, command: 'workspace', args: 'rm practice-rbac' })
     expect(JSON.parse(files.get(WORKSPACES)!).workspaces).toEqual([])
     // its first prompts, window place and open file go with it: a later workspace of the same name never starts on them
@@ -2094,6 +2119,183 @@ describe('relay', () => {
     expect(kept()[0].since).toBeGreaterThan(NOW - 1)
     expect((await ui.find({ key: 'relay plain' }))?.props.label).toBe('Relay: auto')
     await ui.unmount()
+  })
+})
+
+describe('bringing running sessions into a workspace', () => {
+  test('helpers: environments by profile, one session of each agent, Codex flags and folder, saved threads read safely', async () => {
+    expect([envOfProfile('claude', 'claude'), envOfProfile('claude', 'claude-work'), envOfProfile('codex', 'codex-work'), envOfProfile('claude', 'codex'), envOfProfile('claude', 'claude-default')])
+      .toEqual(['', 'work', 'work', undefined, undefined])
+    expect(toggled([], 'claude:a')).toEqual(['claude:a'])
+    expect(toggled(['claude:a', 'codex:x'], 'claude:b')).toEqual(['codex:x', 'claude:b'])
+    expect(toggled(['claude:a', 'codex:x'], 'codex:x')).toEqual(['claude:a'])
+    // full access stays full access; anything else writes in the workspace; its approvals kept when Codex takes them
+    expect(codexFlags('danger-full-access\tnever\t/x\n')).toEqual(['--sandbox', 'danger-full-access', '--ask-for-approval', 'never'])
+    expect(codexFlags('read-only\ton-request\t/x\n')).toEqual(['--sandbox', 'workspace-write', '--ask-for-approval', 'on-request'])
+    expect(codexFlags('')).toEqual(['--sandbox', 'workspace-write'])
+    expect(codexFlags('workspace-write\tsomething-new\t/x')).toEqual(['--sandbox', 'workspace-write'])
+    expect([codexDir('a\tb\t/Users/u/dev/web-app\n'), codexDir('a\tb\trelative'), codexDir('a\tb\t/x\u0007y'), codexDir('')]).toEqual(['/Users/u/dev/web-app', undefined, undefined, undefined])
+    expect(threadFrom('claude', { id: 'session-1', dir: '/a', flags: ['--permission-mode', 'plan'] })).toEqual({ id: 'session-1', dir: '/a', flags: ['--permission-mode', 'plan'] })
+    expect(threadFrom('claude', { id: 'session-1', dir: '/a', flags: [] })).toEqual({ id: 'session-1', dir: '/a' })
+    for (const bad of [{ id: 'x;rm', dir: '/a' }, { id: 'x', dir: 'a' }, { id: 'x', dir: '/a\nb' }, { id: 'x', dir: '/a', flags: ['--dangerously-bypass-approvals-and-sandbox'] }, { id: 'x', dir: '/a', flags: 'plan' }, null, 'x']) {
+      expect(threadFrom('claude', bad)).toBeUndefined()
+    }
+    expect(threadFrom('codex', { id: 'x', dir: '/a', flags: ['--sandbox', 'danger-full-access'] })?.flags).toEqual(['--sandbox', 'danger-full-access'])
+    expect(threadFrom('claude', { id: 'x', dir: '/a', flags: ['--sandbox', 'danger-full-access'] })).toBeUndefined()
+    // a workspace keeps its readable threads; one it cannot read is dropped, never the workspace
+    const listed = workspacesFrom({ workspaces: [{ ...practice, threads: { claude: { id: 'session-1', dir: '/a' }, codex: { id: 'x;y', dir: '/b' } } }, { ...practice, id: 'b', threads: { codex: 'nope' } }] })
+    expect(listed.map(w => w.threads)).toEqual([{ claude: { id: 'session-1', dir: '/a' } }, undefined])
+  })
+
+  test('a pane started with a conversation resumes it, from where it ran, with its flags; the first prompt after it', async () => {
+    // a fragment of a pane's script as the command line holds it: quoted once in the pane's script, once more in tmux's command
+    const nested = (fragment: string) => fragment.replace(/'/g, `'\\''`).replace(/'/g, `'\\''`)
+    const ws = {
+      ...practice, env: '', checkout: '/Users/u/dev/web-app',
+      threads: {
+        claude: { id: 'session-101', dir: '/Users/u/dev/web-app/src', flags: ['--permission-mode', 'plan'] },
+        codex: { id: RESUMED_A, dir: '/Users/u/dev/web-app', flags: ['--sandbox', 'danger-full-access', '--ask-for-approval', 'never'] },
+      },
+    }
+    const line = openCommand(ws, HOME)
+    expect(line).toContain(nested(`; cd '/Users/u/dev/web-app/src' && env `))
+    expect(line).toContain(nested(` claude --resume session-101 '--permission-mode' 'plan' --add-dir '/Users/u/dev/web-app-worktrees' \${p:+--} \${p:+"$p"}; exec`))
+    expect(line).toContain(nested(` codex resume -c check_for_update_on_startup=false '--sandbox' 'danger-full-access' '--ask-for-approval' 'never' --add-dir '/Users/u/dev/web-app-worktrees' -C '/Users/u/dev/web-app' -- ${RESUMED_A} \${p:+"$p"}; exec`))
+    // no sandbox kept: the workspace's own; an agent with no conversation starts new
+    const plain = openCommand({ ...ws, threads: { codex: { id: RESUMED_A, dir: '/Users/u/dev/web-app' } } }, HOME)
+    expect(plain).toContain(nested(` codex resume -c check_for_update_on_startup=false --sandbox workspace-write --add-dir '/Users/u/dev/web-app-worktrees' -C '/Users/u/dev/web-app' -- ${RESUMED_A} `))
+    expect(plain).toContain(nested(` claude --add-dir '/Users/u/dev/web-app-worktrees' \${p:+--}`))
+  })
+
+  test('first prompts: a brought-in agent keeps what it knows and goes on as a peer; the other is told it was brought in', async () => {
+    const ws = { ...practice, purpose: 'roles for admins', checkout: '/Users/u/dev/web-app', threads: { claude: { id: 'a', dir: '/x' } } }
+    const claude = joinPrompt(ws, 'claude')
+    expect(claude).toContain('The owner moved this conversation into the workspace: everything above stays yours.')
+    expect(claude).toContain('Codex runs in the pane beside you, starting new.')
+    expect(claude).toContain('If the work above already has a peer-coding branch, go on with it.')
+    expect(claude).toContain('/Users/u/dev/web-app-worktrees/')
+    expect(peerPrompt(ws)).toContain('Claude runs in the pane beside you, in its own conversation, which the owner brought in, and is getting peer coding ready now')
+    const both = { ...ws, threads: { claude: { id: 'a', dir: '/x' }, codex: { id: 'b', dir: '/y' } } }
+    expect(joinPrompt(both, 'codex')).toContain('Claude runs in the pane beside you, in its own conversation, brought in too, and is getting peer coding ready now')
+    expect(joinPrompt(both, 'codex')).toContain('add what you know from your own work above that it does not say')
+    expect(setupPrompt({ ...ws, threads: { codex: { id: 'b', dir: '/y' } } })).toContain('Codex runs in the pane beside you, in its own conversation, which the owner brought in: it has been working on this already.')
+    expect(setupPrompt({ ...ws, threads: undefined })).toContain('You are Claude, one of two peers here; Codex runs in the pane beside you. The owner turned on')
+  })
+
+  test('the conversations a workspace\'s panes run are kept; a pane with no agent leaves what is kept', async () => {
+    const ws = { id: 'practice-rbac', threads: { claude: { id: 'session-1', dir: '/a', flags: ['--permission-mode', 'plan'] } } }
+    const panes = { ttys004: { session: 'ws-practice-rbac', window: 'claude', pane: '%1' }, ttys045: { session: 'ws-practice-rbac', window: 'codex', pane: '%2' }, ttys009: { session: 'other', window: 'claude', pane: '%3' } }
+    const claude = [{ tty: 'ttys004', sessionId: 'session-1', startCwd: '/a' }, { tty: 'ttys009', sessionId: 'session-9', startCwd: '/z' }]
+    const codex = [{ tty: 'ttys045', key: RESUMED_A, cwd: '/b', surface: 'terminal' }]
+    // the same Claude conversation keeps its flags; Codex's is learnt; another tmux session's pane is not this one's
+    expect(seenThreads([ws], panes, claude, codex)).toEqual(new Map([['practice-rbac', { claude: ws.threads.claude, codex: { id: RESUMED_A, dir: '/b' } }]]))
+    // nothing new: nothing to write
+    expect(seenThreads([{ ...ws, threads: { ...ws.threads, codex: { id: RESUMED_A, dir: '/b' } } }], panes, claude, codex).size).toBe(0)
+    // Claude started another conversation in its pane (/clear): that one, without the old flags
+    expect(seenThreads([ws], panes, [{ tty: 'ttys004', sessionId: 'session-2', startCwd: '/a' }], []).get('practice-rbac')).toEqual({ claude: { id: 'session-2', dir: '/a' } })
+    // its agent gone from the pane, or a terminal with no conversation found: kept as it was
+    expect(seenThreads([ws], panes, [], [{ tty: 'ttys045', key: 'pid-207', cwd: '/b', surface: 'terminal' }]).size).toBe(0)
+  })
+
+  test('the sessions a new workspace can bring in: in a terminal, of that repository, not in a workspace or this session', async () => {
+    const snap = snapshotOf()
+    const members = (dir?: string, selfId = 'session-elsewhere', s: Snapshot = snap) => bringable(s, { now: NOW, selfId }, dir).map(b => b.member)
+    // the background session (102) never; a Codex terminal with no conversation found never
+    expect(members()).not.toContain('claude:session-102')
+    expect(members().some(m => m.startsWith('codex:pid-'))).toBe(false)
+    expect(members()).toContain('claude:session-101')
+    expect(members()).toContain(`codex:${RESUMED_A}`)
+    // this session itself never
+    expect(members(undefined, 'session-101')).not.toContain('claude:session-101')
+    // of the repository asked for only
+    expect(members('/Users/u/dev/api')).not.toContain('claude:session-101')
+    // in a workspace's panes already: not offered
+    const inWs = { ...snap, workspaces: [practice], tmux: { panes: { ttys004: { session: 'ws-practice-rbac', window: 'claude', pane: '%1' } }, clients: {} } }
+    expect(members(undefined, '', inWs)).not.toContain('claude:session-101')
+  })
+
+  test('New workspace with it: the session is brought in; checked, closed where it ran, and resumed in the workspace', async ($, on) => {
+    const { files, runs } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    // WEB CONSOLE (ttys004, default environment) between turns, working in web-app
+    files.set('/Users/u/.claude/sessions/101.json', JSON.stringify({ ...JSON.parse(files.get('/Users/u/.claude/sessions/101.json')!), status: 'idle', statusUpdatedAt: NOW - 60_000 }))
+    world.turns = { '/rollouts/a.jsonl': `done\tturn-x0\t${new Date(NOW - 120_000).toISOString()}\t` }
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    await reveal(ui, 'item:claude-101')
+    expect((await ui.find({ key: 'bring claude-101' }))?.props.label).toBe('New workspace with it (n)')
+    await ui.press({ key: 'bring claude-101' })
+    // the form: its project, its environment, it chosen; the repository's Codex terminal offered too
+    expect((await ui.find({ key: 'form:project' }))?.props.value).toBe('~/dev/web-app')
+    expect((await ui.find({ key: 'form:bring claude:session-101' }))?.props.label).toBe('[x] Claude · WEB CONSOLE')
+    expect((await ui.find({ key: `form:bring codex:${RESUMED_A}` }))?.props.label).toMatch(/^\[ \] Codex · /)
+    await ui.press({ key: `form:bring codex:${RESUMED_A}` })
+    await ui.input({ key: 'form:name', text: 'Console', kind: 'change' })
+    await ui.input({ key: 'form:purpose', text: 'finish the console', kind: 'change' })
+    await ui.press({ key: 'form:create' })
+    // each closed where it ran, then the workspace made with their conversations
+    expect(world.stopped).toEqual(['ttys004 claude claude', 'ttys045 codex|node codex'])
+    const saved = JSON.parse(files.get(WORKSPACES)!).workspaces[0]
+    expect(saved.threads).toEqual({
+      claude: { id: 'session-101', dir: '/Users/u/dev/web-app', flags: ['--dangerously-skip-permissions'] },
+      codex: { id: RESUMED_A, dir: '/Users/u/dev/web-app', flags: ['--sandbox', 'workspace-write', '--ask-for-approval', 'on-request'] },
+    })
+    expect(files.get(promptPath(HOME, 'console', 'claude'))).toBe(joinPrompt(saved, 'claude'))
+    expect(files.get(promptPath(HOME, 'console', 'codex'))).toBe(joinPrompt(saved, 'codex'))
+    expect(files.get(openScriptPath(HOME, 'console'))).toBe(`${openCommand(saved, HOME)}\n`)
+    // every check ran before anything was closed
+    const order = runs.filter(r => r[2] === MODE_SCRIPT || r[2] === CODEX_MODE_SCRIPT || r[2] === STOP_SCRIPT).map(r => (r[2] === STOP_SCRIPT ? 'stop' : 'check'))
+    expect(order).toEqual(['check', 'check', 'stop', 'stop'])
+    await ui.unmount()
+  })
+
+  test('bringing in is refused, with nothing closed, for a session at work or under another environment; one that does not close starts new', async ($, on) => {
+    const { files } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    const said = async () => (await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')
+    const create = async (o: { codex?: boolean; env?: string } = {}) => {
+      if ((await ui.find({ key: 'bring claude-101' })) === undefined) await reveal(ui, 'item:claude-101')
+      await ui.press({ key: 'bring claude-101' })
+      await ui.input({ key: 'form:name', text: 'Console', kind: 'change' })
+      if (o.codex === true) await ui.press({ key: `form:bring codex:${RESUMED_A}` })
+      if (o.env !== undefined) await ui.select({ key: 'form:env', value: o.env })
+      await ui.press({ key: 'form:create' })
+      return said()
+    }
+    // WEB CONSOLE is at work
+    expect(await create()).toContain('Not done: Claude · WEB CONSOLE is working: bring it in once its turn is done.')
+    expect(world.stopped).toEqual([])
+    await ui.press({ key: 'form:cancel' })
+    // between turns, but the form's environment is another
+    files.set('/Users/u/.claude/sessions/101.json', JSON.stringify({ ...JSON.parse(files.get('/Users/u/.claude/sessions/101.json')!), status: 'idle', statusUpdatedAt: NOW - 60_000 }))
+    await $.command.run(SESSIONS)
+    expect(await create({ env: 'work' })).toContain('Not done: Claude · WEB CONSOLE runs under the default environment; choose that one.')
+    expect(world.stopped).toEqual([])
+    await ui.press({ key: 'form:cancel' })
+    // Codex at work by its own records: nothing closed, Claude neither
+    world.turns = { '/rollouts/a.jsonl': `busy\tturn-x1\t${new Date(NOW - 5_000).toISOString()}\t` }
+    expect(await create({ codex: true })).toMatch(/Not done: Codex · .* is working: bring it in once its turn is done\./)
+    expect(world.stopped).toEqual([])
+    await ui.press({ key: 'form:cancel' })
+    expect(files.get(WORKSPACES)).toBeUndefined()
+    // it does not close: the workspace is made with that agent starting new, and said so
+    world.stop = { ttys004: 'stuck' }
+    await create()
+    const saved = JSON.parse(files.get(WORKSPACES)!).workspaces[0]
+    expect(saved.threads).toBeUndefined()
+    expect(world.stopped).toEqual(['ttys004 claude claude'])
+    await ui.unmount()
+  })
+
+  test('opened again, a workspace never resumes a conversation that runs somewhere else', async ($, on) => {
+    const { files, runs } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, threads: { claude: { id: 'session-101', dir: '/Users/u/dev/web-app' } } }] }))
+    await $.session.start(START)
+    const text = (await $.command.run({ ...SESSIONS, command: 'workspace', args: 'open practice-rbac' })).text
+    expect(text).toBe('Not opened: its agents go on with their own conversations, and Claude\'s runs in ttys004. Close it there first.')
+    expect(runs.some(r => r[0] === '/usr/bin/osascript' && r[4] === OPEN_SCRIPT)).toBe(false)
   })
 })
 

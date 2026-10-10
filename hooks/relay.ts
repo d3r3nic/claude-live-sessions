@@ -211,7 +211,7 @@ export const RELAY_SCRIPT = [
   '  echo told; exit 0',
   'fi',
   `tty=$(t display-message -p -t "$pane" '#{pane_tty}' 2>/dev/null) && [ -n "$tty" ] || { echo gone; exit 0; }`,
-  `cmds=$(ps -t "\${tty#/dev/}" -o stat=,comm= 2>/dev/null | awk '$1 ~ /[+]/ { n = $2; sub(".*/", "", n); print n }' | sort -u)`,
+  `cmds=$(ps -t "\${tty#/dev/}" -o stat=,comm= 2>/dev/null | awk '$1 ~ /[+]/ { n = $0; sub(/^[ \\t]*[^ \\t]+[ \\t]+/, "", n); sub(".*/", "", n); print n }' | sort -u)`,
   'ok=; for c in $cmds; do case "|$allow|" in *"|$c|"*) ok=1;; esac; done',
   '[ -n "$ok" ] || { printf \'not-agent %s\\n\' "$(echo $cmds)"; exit 0; }',
   // typed only while the pane is not scrolled back, checked and done in one step of the tmux server; the
