@@ -678,6 +678,8 @@ except ChildProcessError: pass
     { type: 'event_msg', timestamp: '2026-10-09T15:00:05Z', payload: { type: 'token_count', info: { last_token_usage: { total_tokens: 64_600 }, model_context_window: 258_400 } } },
     { type: 'event_msg', timestamp: '2026-10-09T15:01:00Z', payload: { type: 'token_count', info: { last_token_usage: { total_tokens: 163_563 }, model_context_window: 258_400 } } },
     { type: 'event_msg', timestamp: '2026-10-09T15:01:01Z', payload: { type: 'token_count', info: null } },
+    { type: 'event_msg', timestamp: '2026-10-09T15:01:01Z', payload: { type: 'token_count', info: { last_token_usage: { total_tokens: 'many' }, model_context_window: '258k' } } },
+    { type: 'event_msg', timestamp: '2026-10-09T15:01:01Z', payload: { type: 'token_count', info: { model_context_window: 258_400 } } },
     { type: 'event_msg', timestamp: '2026-10-09T15:01:02Z', payload: { type: 'task_complete', turn_id: 't-9', last_agent_message: 'READY FOR CLAUDE · x · y@1' } },
   ])
   const typedPaste = jsonl('c-typed-paste.jsonl', [ended, { type: 'user', uuid: 'r1', origin: human, timestamp: '2026-10-09T12:00:00Z', message: { content: '<pasted_content id="p2">\nREADY FOR CLAUDE · peer-coding/feat-x R3 · feat/x@abc1234\n</pasted_content>\nand mind the login' } }])
@@ -688,6 +690,8 @@ except ChildProcessError: pass
     { type: 'response_item', timestamp: '2026-10-09T11:06:00Z', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '<environment_context>…</environment_context>' }] } },
     { type: 'event_msg', timestamp: '2026-10-09T11:07:00Z', payload: { type: 'item_completed', item: { type: 'UserMessage', content: [{ type: 'text', text: 'READY FOR CODEX · peer-coding/feat-x R1 · feat/x@abc1234' }] } } },
     { type: 'event_msg', timestamp: '2026-10-09T11:07:01Z', payload: { type: 'task_started', turn_id: 't-2' } },
+    // a compaction, should Codex log it as a message: not the owner's typing (the relay sends it)
+    { type: 'event_msg', timestamp: '2026-10-09T11:08:00Z', payload: { type: 'item_completed', item: { type: 'UserMessage', content: [{ type: 'text', text: '/compact' }] } } },
   ])
   // an earlier Codex writes the prompt as a user_message event
   const typedCodexOld = jsonl('x-typed-old.jsonl', [
@@ -714,7 +718,7 @@ except ChildProcessError: pass
   check('typed: marked records: the owner\'s prompt queued while the agent worked; no notice, queued notice, cue (pasted or not) or subagent\'s', typedAt(typedMarked) === Date.parse('2026-10-09T11:10:00Z'), new Date(typedAt(typedMarked)).toISOString())
   check('typed: a pasted cue with words of the owner\'s own is theirs', typedAt(typedPaste) === Date.parse('2026-10-09T12:00:00Z'))
   check('turns: a prompt quoting a /compact record is the owner\'s, and starts a turn', turns.get(quotesCompact)?.state === 'busy' && typedAt(quotesCompact) === Date.parse('2026-10-09T14:10:00Z'), JSON.stringify(turns.get(quotesCompact)))
-  check('turns: how full Codex\'s context is, from its last count; none for Claude\'s records', turns.get(codexFilled)?.filled === 63 && turns.get(codexFilled)?.cue?.to === 'claude' && turns.get(claudeDone)?.filled === undefined, String(turns.get(codexFilled)?.filled))
+  check('turns: how full Codex\'s context is, from its last count with figures (one with none, or not numbers, breaks nothing); none for Claude\'s records', turns.get(codexFilled)?.filled === 63 && turns.get(codexFilled)?.cue?.to === 'claude' && turns.get(claudeDone)?.filled === undefined, String(turns.get(codexFilled)?.filled))
   check('turns: a compaction (/compact, as Claude Code records it) starts no turn and is not the owner\'s typing; the cue before it stands', turns.get(compacted)?.state === 'done' && turns.get(compacted)?.id === 'k2' && turns.get(compacted)?.cue?.line === cue && typedAt(compacted) === Date.parse('2026-10-09T14:00:00Z'), JSON.stringify(turns.get(compacted)))
   check('typed: a prompt queued with an image counts by its text; a cue with a long run of spaces stays the relay\'s, read at once; an odd origin breaks nothing', typedAt(typedOdd) === Date.parse('2026-10-09T13:10:00Z') && turns.get(typedOdd)?.state === 'busy', `${typedAt(typedOdd)} ${out.error ?? ''}`)
   check('typed: a command and a shell command typed in the session are the owner\'s', typedAt(typedCommand) === Date.parse('2026-10-09T10:06:00Z') && typedAt(typedBash) === Date.parse('2026-10-09T10:07:00Z'))

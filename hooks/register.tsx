@@ -3,7 +3,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { ClaudeSession, CodexSession, Place, Relay, Snapshot, Thread, Workspace } from '../types'
 import type { Screen } from './workspaces'
-import { AGENT_COMMANDS, afterOwner, afterStep, compactStep, COMPACT_AT, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_SCRIPT } from './relay'
+import { AGENT_COMMANDS, afterOwner, afterStep, claudeKeep, compactStep, COMPACT_AT, cueOf, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_SCRIPT } from './relay'
 import type { Side, Step } from './relay'
 import { bringable, codexDir, codexFlags, CODEX_MODE_SCRIPT, CODEX_TASK_SCRIPT, codexTaskState, JOB_COMMANDS, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, toggled, withThreads } from './bring'
 import {
@@ -1095,8 +1095,8 @@ async function passCues(
       const tool = p.window as 'claude' | 'codex'
       const known = fileFor(tool, tty)
       const turn = known?.file === undefined ? undefined : turns.get(known.file)
-      // how full its context is: Codex's own records say; Claude's session says, where this plugin runs in it
-      const filled = tool === 'codex' ? turn?.filled : await claudeFilled($, home, o.claude.find(c => c.tty === tty)?.sessionId)
+      // how full Codex's context is, by its own records (Claude compacts itself: compactAtHandOff)
+      const filled = tool === 'codex' ? turn?.filled : undefined
       sides[tool] = { tool, pane: p.pane!, isBusy: (known?.isBusy ?? false) || turn?.state === 'busy', ...(turn === undefined ? {} : { turn }), ...(filled === undefined ? {} : { filled }) }
     }
     if (ws.relay !== undefined && afterOwner(ws.relay, sides) !== undefined) {
@@ -1133,42 +1133,65 @@ async function passCues(
           .catch(() => undefined)
       }
     }
+    // the panes typed into this collection: an agent given a line may be starting a turn, so nothing more goes there
+    const typedInto = new Set<string>()
     for (const step of relaySteps(ws, sides, now)) {
       const outcome = await run(step)
+      if (step.kind === 'pass' && (outcome === 'passed' || outcome === 'unsent')) typedInto.add(step.pane)
       await settle(step, outcome)
-      // its cue handed on, an agent whose context is full enough compacts now, once for that turn
-      const compact = compactStep(ws, sides, step, outcome)
-      if (compact !== undefined) await settle(compact, await run(compact))
+      // Codex's hand-off passed: if its context is full enough, it compacts now, once for that turn
+      const compact = compactStep(ws, sides, step, outcome, typedInto)
+      if (compact?.kind === 'compact') {
+        const compacted = await run(compact)
+        typedInto.add(compact.pane)
+        await settle(compact, compacted)
+        // scrolled back as it was typed: `/compact` waits in Codex's input, where the next hand-off would be added to it
+        if (compacted === 'unsent') {
+          await $.process
+            .run(['/bin/sh', '-c', RELAY_SCRIPT, 'sh', 'tell', ledgerPath(home), `unsent-${compact.key}`, '', '', `${ws.name}: /compact waits in Codex's input (its pane was scrolled back): leave copy mode (q) and press Enter there, or clear it.`, '', 'Workspace relay'], { timeoutMs: 20_000 })
+            .catch(() => undefined)
+        }
+      }
     }
   }
 }
 
-/** Where a Claude session in a workspace keeps how full its context is, for the relay: written at each turn's end. */
-const contextPath = (home: string, sessionId: string) => `${home}/Library/Caches/live-sessions/context/${sessionId}.json`
-
-/** How full a Claude session's context is, in percent, as it last wrote it; undefined when it wrote none. */
-async function claudeFilled($: EngineInterface, home: string, sessionId: string | undefined): Promise<number | undefined> {
-  if (sessionId === undefined || !/^[A-Za-z0-9-]{1,64}$/.test(sessionId)) return undefined
-  const kept = await $.fs.read(contextPath(home, sessionId)).then(text => JSON.parse(text) as { percent?: unknown }).catch(() => undefined)
-  const percent = kept?.percent
-  return typeof percent === 'number' && Number.isInteger(percent) && percent >= 0 && percent <= 100 ? percent : undefined
-}
-
 /**
- * In a Claude session that is a workspace's agent: how full its context is,
- * written at each of its turns' ends, so the relay (in whichever session
- * collects) knows when to have it compact.
+ * In a Claude session that is a workspace's agent: once a turn of its ends
+ * with a hand-off to Codex (READY FOR CODEX) and the relay is on (auto), and
+ * its context is at least the workspace's `compactAt` percent full, it
+ * compacts itself, told what to keep, between turns (refused while one runs):
+ * after the relay has passed that hand-off (its ledger step), so Codex starts
+ * at once, and only while that turn is still its last. Never after a cue for
+ * the owner (NEEDS USER, SCOPE CLOSED): it waits for the owner's answer.
  */
-async function recordFilled($: EngineInterface) {
+async function compactAtHandOff($: EngineInterface, answer: string) {
+  const cue = answer.split('\n').map(cueOf).filter(c => c !== undefined).at(-1)
+  if (cue?.kind !== 'ready' || cue.to !== 'codex') return
   const home = (await $.env.get('HOME')) ?? ''
   const id = await $.session.id()
   const snap = await read($, snapshot)
   const self = snap.claude.find(s => s.sessionId === id)
   const pane = self === undefined ? undefined : snap.tmux.panes[self.tty]
-  if (pane === undefined || !snap.workspaces.some(ws => tmuxName(ws) === pane.session) || pane.window !== 'claude') return
+  const ws = pane === undefined ? undefined : snap.workspaces.find(w => tmuxName(w) === pane.session)
+  if (self === undefined || ws === undefined || pane?.window !== 'claude' || ws.relay?.mode !== 'auto') return
+  const at = ws.compactAt ?? COMPACT_AT
+  if (at <= 0) return
   const { context } = await $.session.usage()
-  if (context.percent === undefined) return
-  await $.fs.write(contextPath(home, id), JSON.stringify({ percent: Math.round(context.percent), at: await $.clock.now() }))
+  if (context.percent === undefined || context.percent < at) return
+  // its last turn, as the relay reads its records
+  const file = transcriptPath(`${home}/.${self.profile}`, self.startCwd, id)
+  const lastTurn = async () => parseTurns((await $.process.run(['/bin/sh', '-c', TURN_SCRIPT, 'sh', file], { timeoutMs: 20_000 }).catch(() => ({ stdout: '' }))).stdout).get(file)
+  const turn = await lastTurn()
+  if (turn?.state !== 'done' || turn.cue?.line !== cue.line) return
+  for (let waited = 0; !(await $.fs.exists(`${ledgerPath(home)}/pass-${turn.id}`)); waited += 2_000) {
+    // not passed in two minutes (Codex at work, the relay waiting for you): left for a later hand-off
+    if (waited >= 120_000) return
+    await $.clock.sleep(2_000)
+  }
+  const still = await lastTurn()
+  if (still?.id !== turn.id || still.state !== 'done') return
+  await $.session.compact({ instructions: claudeKeep(ws.name) }).catch(() => undefined)
 }
 
 /** Forgets a workspace (the command's `rm` and the pane's Remove): its tmux session keeps running. */
@@ -1219,10 +1242,10 @@ async function tick($: EngineInterface, hasStatusLine: boolean) {
 }
 
 export const register: Register = on => {
-  // a workspace's Claude says how full its context is at each of its turns' ends: the relay has it compact at a hand-off
+  // a workspace's Claude compacts itself after a hand-off, when its context is full enough: never holds up the turn
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
-    if (e.agentId === undefined) await recordFilled($).catch(() => undefined)
+    if (e.agentId === undefined && e.reason === 'answer') void compactAtHandOff($, e.answer).catch(() => undefined)
     return result
   })
 

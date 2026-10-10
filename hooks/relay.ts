@@ -91,11 +91,11 @@ export const TURN_SCRIPT = [
   '        and ((.origin | kindOf) as $k | if $k != null then $k == "human" else (said | keyed) end) and (said | typed) and (said | compacting | not)',
   '      elif .type == "attachment" and .attachment.type == "queued_command" then (.attachment.commandMode // "prompt") == "prompt"',
   '        and ((.attachment.origin | kindOf) // "human") == "human" and (.attachment.prompt | textOf | keyed and typed and (compacting | not))',
-  '      elif .type == "event_msg" and .payload.type == "user_message" then .payload.message // "" | typed',
-  '      elif .type == "event_msg" and .payload.type == "item_completed" and .payload.item.type == "UserMessage" then .payload.item | text | typed',
+  '      elif .type == "event_msg" and .payload.type == "user_message" then .payload.message // "" | typed and (compacting | not)',
+  '      elif .type == "event_msg" and .payload.type == "item_completed" and .payload.item.type == "UserMessage" then .payload.item | text | typed and (compacting | not)',
   '      else false end;',
   // how full Codex's context is: its last count of tokens against its model's window, as a whole percentage
-  '    def filled: .payload.info | if type == "object" and (.model_context_window // 0) > 0 then ((.last_token_usage.total_tokens // 0) * 100 / .model_context_window | floor) else null end;',
+  '    def filled: try (.payload.info | .model_context_window as $w | .last_token_usage.total_tokens as $t | if ($w | type) == "number" and $w > 0 and ($t | type) == "number" then ($t * 100 / $w | floor) else null end) catch null;',
   '    reduce (inputs | fromjson? | select(type == "object" and .isSidechain != true)) as $o ({t: null, o: null, c: null};',
   '      {t: (.t | step($o)), o: (if ($o | owner) then $o.timestamp else .o end),',
   '       c: (if $o.type == "event_msg" and $o.payload.type == "token_count" then ($o | filled) // .c else .c end)})',
@@ -192,26 +192,28 @@ export function relaySteps(ws: Pick<Workspace, 'name' | 'relay'> & Partial<Pick<
 export const COMPACT_AT = 50
 
 /**
- * Compacting an agent at a point that suits it: once its turn's cue is
- * handed on (passed to the other agent, or told to the owner), its records
- * are written and it waits, so when its context is at least the workspace's
- * `compactAt` percent full (COMPACT_AT unless set; 0 is off), `/compact` is
- * typed into its pane, once for that turn. Claude is told what to keep; the
- * rest is in the peer-coding records. `handed` is the step that handed the
- * cue on and how it went.
+ * Compacting Codex at a point that suits it: right after this session passed
+ * its hand-off to Claude (typed and entered, so its cue is delivered and a
+ * compaction, which Codex runs as a turn of its own, cannot lose it), when its
+ * context is at least the workspace's `compactAt` percent full (COMPACT_AT
+ * unless set; 0 is off): `/compact` typed into its pane, once for that turn.
+ * Never into a pane typed into during this collection (it may be starting a
+ * turn), never after a cue for the owner (it waits for the owner's answer).
+ * Claude compacts itself, in its own session (compactAtHandOff).
  */
-export function compactStep(ws: Pick<Workspace, 'name' | 'compactAt'>, sides: Partial<Record<Tool, Side>>, handed: Step, outcome: string): Step | undefined {
-  if (handed.kind === 'compact' || handed.from === undefined || !/^(pass|tell)-/.test(handed.key) || !['passed', 'told', 'taken'].includes(outcome)) return undefined
-  const side = sides[handed.from]
+export function compactStep(ws: Pick<Workspace, 'compactAt'>, sides: Partial<Record<Tool, Side>>, handed: Step, outcome: string, typedInto: ReadonlySet<string>): Step | undefined {
+  if (handed.kind !== 'pass' || handed.from !== 'codex' || outcome !== 'passed') return undefined
+  const side = sides.codex
   const at = ws.compactAt ?? COMPACT_AT
   const turn = side?.turn
-  if (side === undefined || at <= 0 || turn?.state !== 'done' || turn.cue === undefined || side.filled === undefined || side.filled < at) return undefined
-  // one line, as typed: no control character from the workspace's name
-  const name = ws.name.replace(/[\u0000-\u001f\u007f]/g, ' ')
-  const line = side.tool === 'codex'
-    ? '/compact'
-    : `/compact Peer-coding workspace "${name}": keep what it is for, the peer-coding branch and its worktree, the round, where the peer-coding records are (CURRENT.md), what the owner decided, and the cue you last sent; the details stay in those records.`
-  return { kind: 'compact', key: `compact-${turn.id}`, to: side.tool, pane: side.pane, line, filled: side.filled }
+  if (side === undefined || at <= 0 || typedInto.has(side.pane) || turn?.state !== 'done' || turn.cue?.kind !== 'ready' || side.filled === undefined || side.filled < at) return undefined
+  return { kind: 'compact', key: `compact-${turn.id}`, to: 'codex', pane: side.pane, line: '/compact', filled: side.filled }
+}
+
+/** What Claude is told to keep when it compacts in a workspace: the rest is in the peer-coding records. */
+export function claudeKeep(name: string): string {
+  // one line: no control character from the workspace's name
+  return `Peer-coding workspace "${name.replace(/[\u0000-\u001f\u007f]/g, ' ')}": keep what it is for, the peer-coding branch and its worktree, the round, where the peer-coding records are (CURRENT.md), what the owner decided, and the cue you last sent; the details stay in those records.`
 }
 
 /** The agent a pane must have in its foreground for the relay to type into it: never only a shell. */
@@ -294,7 +296,8 @@ export function afterOwner(relay: Relay, sides: Partial<Record<Tool, Side>>): Re
 
 /** The relay's state after a step: a pass counts toward the cap; a cue for the owner starts the count again. */
 export function afterStep(relay: Relay, step: Step, outcome: string, now: number): Relay {
-  if (step.kind === 'compact') return outcome === 'passed' ? { ...relay, status: `compacting ${NAME[step.to]} (its context ${step.filled}% full)`, at: now } : relay
+  // said after what the pass said, which it follows
+  if (step.kind === 'compact') return outcome === 'passed' ? { ...relay, status: `${relay.status ?? ''}${relay.status === undefined ? '' : '; '}${NAME[step.to]} compacting (its context ${step.filled}% full)`, at: now } : relay
   if (step.kind === 'pass' && outcome === 'passed') return { ...relay, streak: relay.streak + 1, status: `passed to ${NAME[step.to]}`, at: now }
   if (step.kind === 'pass' && outcome === 'in-mode') return { ...relay, status: `waits: ${NAME[step.to]}'s pane is scrolled back (copy mode; q leaves it)`, at: now }
   if (step.kind === 'pass') return { ...relay, status: `could not pass to ${NAME[step.to]}`, at: now }
