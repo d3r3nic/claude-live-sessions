@@ -38,6 +38,7 @@ A workspace is a project with your own name: a repository, an environment, and C
   An environment is offered only when both its Claude and Codex profiles exist, and a misspelt one is an error, never another account.
 - Each agent starts with Claude Code's session variables and any inherited `CLAUDE_CONFIG_DIR` or `CODEX_HOME` cleared, so its transcript is kept and it runs on its own environment's account. Codex starts without its update offer (whose default answer, on Enter, installs a new version) and always in the `workspace-write` sandbox, whatever your Codex config says, so it can write in the project and its worktrees folder: the sandbox Codex itself uses for a trusted project, and more than its read-only default for a folder it does not trust (where it would refuse the worktrees folder and exit). Its approvals stay as you set them. When an agent exits, its pane leaves a shell.
 - Each side is used on its own: in a workspace's tmux session (that session alone; tmux.conf and other sessions are left as they are) the mouse is on. A click on a side gives it your keys; the wheel scrolls the side under it (back at the bottom, or `q`, it is live again). Each side's border names its agent, and the side that takes your keys says `your keys go here`. A workspace made before this gets the same, in each of its windows, when it is opened. With the mouse on, tmux also has its own uses for it in that session: a drag selects into tmux's copy buffer, a right-click opens tmux's pane menu, a middle-click pastes tmux's buffer.
+- **Hiding a workspace's window** (its agents keep running, like a session moved to the background): click `Hide window · agents keep running` at the right of the window's bottom bar, or `Hide window` in the workspace's actions in the pane. It detaches the window from tmux, then closes it: only a window of that one tab, back at its shell, so nothing running is ever closed. `Open` brings it back. The click is tmux's (bound for the whole tmux server, over tmux's own binding for a click on a status bar, which every other click there keeps); if you bound that click to something of your own, it is left as it is and the bar only says that closing the window leaves the agents running.
 - Closing the window only detaches, and both agents keep running. `/workspace open <name>`, or `Open` on its row in the pane, brings it back:
   - It focuses a Terminal tab already attached, or opens a new one.
   - From inside tmux, it switches that terminal to the workspace.
@@ -106,10 +107,10 @@ To change it, edit this folder, then run `/reload-plugins` in a session.
 
 ```sh
 claude plugin validate .
-claude plugin test .                                         # 85 tests
+claude plugin test .                                         # 88 tests
 npx -p typescript@5.6.3 tsc -p .                             # after one load, which lays down .claude-plugin/types
 node --experimental-strip-types tests/host-check.mjs [2d] [--slow]   # on this Mac: SQL, pipelines, a full collection, the move script on throwaway processes, workspaces and the relay on a private tmux server (reading no tmux.conf), the checkout script on throwaway repositories
 E2E_TRUSTED_DIR=<a trusted folder> node --experimental-strip-types tests/e2e-terminal.mjs    # a Terminal window: move a throwaway session to the background
-E2E_TRUSTED_DIR=<a trusted folder> node --experimental-strip-types tests/e2e-workspace.mjs   # a Terminal window: open a throwaway workspace, close it, agents keep running
+E2E_TRUSTED_DIR=<a trusted folder> node --experimental-strip-types tests/e2e-workspace.mjs   # a Terminal window: open a throwaway workspace (private tmux server), hide it, agents keep running
 E2E_TRUSTED_DIR=<a trusted folder> node --experimental-strip-types tests/e2e-relay.mjs       # the real Claude and Codex on a private tmux server: first prompts, turns read, lines typed and taken (a few short turns)
 ```

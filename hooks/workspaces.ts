@@ -137,14 +137,89 @@ export const BORDER_FORMAT =
  * agent takes the mouse); and each side's border naming its agent.
  * tmux.conf and other sessions are left as they are.
  */
-export function sessionSetup(name: string, windows: readonly string[]): string[][] {
+export function sessionSetup(name: string, windows: readonly string[], canHide = false): string[][] {
   return [
     ['set-option', '-t', name, 'mouse', 'on'],
+    ['set-option', '-t', name, 'status-right-length', '60'],
+    ['set-option', '-t', name, 'status-right', canHide ? HIDE_LABEL : KEEPS_LABEL],
     ...windows.flatMap(window => [
       ['set-window-option', '-t', window, 'pane-border-status', 'top'],
       ['set-window-option', '-t', window, 'pane-border-format', BORDER_FORMAT],
     ]),
   ]
+}
+
+/** The status bar's right end, which a click hides the window by (HIDE_RANGE), or, where it cannot, what closing it does. */
+export const HIDE_RANGE = 'ls-hide'
+export const HIDE_LABEL = `#[range=user|${HIDE_RANGE}]#[reverse] Hide window · agents keep running #[norange default] `
+export const KEEPS_LABEL = ' closing this window leaves the agents running '
+
+/** The script a Hide runs, kept beside the workspaces: `/bin/sh <it> <the terminal's tty>`. */
+export const hidePath = (home: string) => `${home}/Library/Application Support/live-sessions/hide.sh`
+
+/**
+ * Closes the Terminal.app window of terminal "$1" (`ttys012`): only a window
+ * of that one tab, once the tab is back at its shell (a tmux client just
+ * detached), so nothing running is ever closed. Answers `closed`, `none`
+ * (no Terminal tab is that terminal), `shared` (its window has other tabs)
+ * or `busy` (something still runs in it).
+ */
+export const CLOSE_SCRIPT = `function run(argv) {
+  const tty = '/dev/' + argv[0]
+  const terminal = Application('Terminal')
+  for (let i = 0; i < 30; i++) {
+    const w = terminal.windows().find(x => x.tabs().some(t => t.tty() === tty))
+    if (w === undefined) return 'none'
+    const tabs = w.tabs()
+    if (tabs.length !== 1) return 'shared'
+    if (!tabs[0].busy()) {
+      w.close()
+      return 'closed'
+    }
+    delay(0.1)
+  }
+  return 'busy'
+}`
+
+/**
+ * hide.sh: hides a workspace's window. Detaches the terminal "$1"
+ * (`/dev/ttys012`) from tmux, so its agents keep running, then closes its
+ * Terminal.app window (CLOSE_SCRIPT). Run by a click on the status bar (in
+ * the tmux server, whose own socket `tmux` then reaches) or by the pane.
+ */
+export const HIDE_SCRIPT = [
+  '#!/bin/sh',
+  'tty=$1',
+  'case $tty in /dev/ttys[0-9]*) ;; *) exit 0;; esac',
+  'tmux detach-client -t "$tty" 2>/dev/null',
+  `exec /usr/bin/osascript -l JavaScript - "\${tty#/dev/}" <<'JXA'`,
+  CLOSE_SCRIPT,
+  'JXA',
+  '',
+].join('\n')
+
+/**
+ * The click on the status bar's Hide (for every tmux session: bindings are
+ * the server's), keeping tmux's own answer to any other click there. Its
+ * command names hide.sh, so a path tmux would read otherwise (a quote, `#`)
+ * gets none.
+ */
+export function hideBinding(path: string): string[] | undefined {
+  if (/['"#\\]/.test(path)) return undefined
+  return ['bind-key', '-T', 'root', 'MouseDown1Status', 'if-shell', '-F', `#{==:#{mouse_status_range},${HIDE_RANGE}}`,
+    `run-shell -b "/bin/sh '${path}' '#{client_tty}'"`, STATUS_CLICK]
+}
+/** tmux's own answer to a click on the status bar. */
+export const STATUS_CLICK = 'switch-client -t ='
+
+/**
+ * Whether the Hide click may be bound, from `tmux list-keys -T root
+ * MouseDown1Status`: only over tmux's own binding, or this one (a path that
+ * changed). One the person made is theirs, left as it is.
+ */
+export function mayBindHide(listed: string): boolean {
+  const command = listed.trim().replace(/^bind-key\s+-T\s+root\s+MouseDown1Status\s+/, '')
+  return command === '' || command === STATUS_CLICK || command.includes(HIDE_RANGE)
 }
 
 /** The tmux session option that marks a session as started for one workspace (its createdAt). */

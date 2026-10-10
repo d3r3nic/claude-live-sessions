@@ -29,6 +29,10 @@ import {
   shellQuote,
   sessionSetup,
   setupPrompt,
+  hideBinding,
+  hidePath,
+  HIDE_SCRIPT,
+  mayBindHide,
 } from './workspaces'
 import {
   ACTIVE_MS,
@@ -514,6 +518,38 @@ async function move($: EngineInterface, scope: string, shown: readonly string[],
   await $.store.set('order', next)
 }
 
+/**
+ * Sets a running workspace session up for use by hand (sessionSetup) in
+ * each of its windows, with its status bar's Hide: hide.sh written, and the
+ * click bound unless the person bound that click to something of their own.
+ */
+async function prepareSession($: EngineInterface, home: string, name: string) {
+  const tmux = (args: string[]) =>
+    $.process.run(['tmux', ...args], { timeoutMs: 10_000 }).catch((error: unknown) => ({ exitCode: -1, stdout: '', stderr: message(error) }))
+  const path = hidePath(home)
+  await $.fs.write(path, HIDE_SCRIPT)
+  const binding = hideBinding(path)
+  const listed = await tmux(['list-keys', '-T', 'root', 'MouseDown1Status'])
+  const canHide = binding !== undefined && listed.exitCode === 0 && mayBindHide(listed.stdout) && (await tmux(binding)).exitCode === 0
+  const windows = (await tmux(['list-windows', '-t', `=${name}`, '-F', '#{window_id}'])).stdout.split('\n').filter(id => /^@\d+$/.test(id.trim())).map(id => id.trim())
+  for (const args of sessionSetup(name, windows, canHide)) await tmux(args)
+}
+
+/** Hides a workspace's windows: each terminal attached to it detached and its Terminal window closed; the agents keep running. */
+async function hideWorkspace($: EngineInterface, ws: Workspace) {
+  const home = (await $.env.get('HOME')) ?? ''
+  await $.fs.write(hidePath(home), HIDE_SCRIPT)
+  const listed = await $.process
+    .run(['tmux', 'list-clients', '-F', CLIENTS_FORMAT], { timeoutMs: 10_000 })
+    .catch(() => ({ exitCode: -1, stdout: '', stderr: '' }))
+  const ttys = parseClients(listed.stdout)[tmuxName(ws)] ?? []
+  for (const tty of ttys) {
+    await $.process.run(['/bin/sh', hidePath(home), `/dev/${tty}`], { timeoutMs: 15_000 }).catch(() => undefined)
+  }
+  $.ui.toast(ttys.length === 0 ? `${ws.name} has no window open.` : `${ws.name} hidden: its agents keep running; Open brings it back.`)
+  await refresh($, 0)
+}
+
 /** Brings a session's Terminal tab to the front, or opens a background session in a new window. */
 /**
  * Brings a workspace up: the Terminal tab already attached to its tmux
@@ -534,9 +570,8 @@ async function openWorkspace($: EngineInterface, ws: Workspace, at?: { window: s
     if (owner !== String(ws.createdAt)) {
       return { isOpen: false, text: `Not opened: tmux session ${name} was not started for this workspace; end it (tmux kill-session -t ${name}) or remove this workspace.` }
     }
-    // one made before the mouse and the side labels were set up gets them now, in each of its windows
-    const windows = (await tmux(['list-windows', '-t', `=${name}`, '-F', '#{window_id}'])).stdout.split('\n').filter(id => /^@\d+$/.test(id.trim())).map(id => id.trim())
-    for (const args of sessionSetup(name, windows)) await tmux(args)
+    // one made before the mouse, the side labels and Hide were set up gets them now, in each of its windows
+    await prepareSession($, home, name)
     // its agent's pane (a workspace made before panes were marked has a window per agent)
     if (at?.pane !== undefined && /^%\d+$/.test(at.pane)) {
       await tmux(['select-window', '-t', at.pane])
@@ -753,6 +788,17 @@ async function makeWorkspace(
   await refresh($, 0)
   const label = `${made.name} (${made.env || 'default'}, ${made.dir})`
   const opened = await openWorkspace($, made)
+  // the window makes the session; once it is there, it gets its status bar's Hide
+  if (opened.isOpen) {
+    for (let i = 0; i < 20; i++) {
+      const has = await $.process.run(['tmux', 'has-session', '-t', `=${tmuxName(made)}`], { timeoutMs: 5_000 }).catch(() => ({ exitCode: -1 }))
+      if (has.exitCode === 0) {
+        await prepareSession($, home, tmuxName(made))
+        break
+      }
+      await $.clock.sleep(250)
+    }
+  }
   const start = purpose === ''
     ? `Claude and Codex start side by side in tmux session ${tmuxName(made)}.`
     : `Claude and Codex start side by side in tmux session ${tmuxName(made)}; Claude gets peer coding ready for it, and the relay passes each hand-over to the other.`
@@ -886,6 +932,11 @@ async function assignTo($: EngineInterface, member: string, id: string) {
   await update($, assigning, () => ({ key: '', member: '' }))
   if (!isSaved) $.ui.toast(`Not assigned: ${UNREADABLE}.`)
   await refresh($, 0)
+}
+
+async function hideWorkspaceById($: EngineInterface, id: string) {
+  const ws = (await read($, snapshot)).workspaces.find(w => w.id === id)
+  if (ws !== undefined) await hideWorkspace($, ws)
 }
 
 async function openWorkspaceById($: EngineInterface, id: string) {
@@ -1279,6 +1330,7 @@ export const register: Register = on => {
                 bar(`ws:${ws.key}`, 4, [
                   <Button key={`wsopen-bar ${ws.key}`} label="Open (o)" hotkey="o" variant="primary" onPress={() => void openWorkspaceById($, ws.key)} />,
                   // by a click only: turned on, the relay types into the agents
+                  ...(ws.isAttached ? [<Button key={`hide ${ws.key}`} label="Hide window" onPress={() => void hideWorkspaceById($, ws.key)} />] : []),
                   <Button key={`relay-bar ${ws.key}`} label={`Relay: ${ws.relay.mode} → ${RELAY_NEXT[ws.relay.mode]}`} onPress={() => void cycleRelay($, ws.key)} />,
                   ...moves(WORKSPACES_SCOPE, view.workspaces.map(w => w.key), ws.key),
                   <Button

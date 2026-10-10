@@ -65,6 +65,12 @@ import {
   peerPrompt,
   rankProjects,
   sessionSetup,
+  hideBinding,
+  hidePath,
+  HIDE_LABEL,
+  HIDE_SCRIPT,
+  KEEPS_LABEL,
+  mayBindHide,
   setupPrompt,
   envsFrom,
   findWorkspace,
@@ -151,6 +157,10 @@ const world = {
   paneCommands: {} as Record<string, string>,
   /** Panes scrolled back (tmux copy mode). */
   inMode: new Set<string>(),
+  /** tmux sessions a window opened by the mod made. */
+  started: new Set<string>(),
+  /** What `tmux list-keys -T root MouseDown1Status` prints: tmux's own binding, or one of the person's. */
+  statusClick: 'bind-key -T root MouseDown1Status switch-client -t =',
   /** What /bin/rm was given. */
   removed: [] as string[],
   /** Paths that are not there, though the fixtures have them. */
@@ -174,6 +184,8 @@ const resetWorld = () => {
   world.ledger.clear()
   world.paneCommands = {}
   world.removed = []
+  world.started.clear()
+  world.statusClick = 'bind-key -T root MouseDown1Status switch-client -t ='
   world.inMode.clear()
   world.gone.clear()
 }
@@ -245,14 +257,25 @@ function machine(argv: readonly string[], env: unknown): Run {
       if (argv[1] === 'list-clients') return ok(world.tmuxClients)
       if (argv[1] === 'list-windows') return ok('@1\n@2\n')
       if (argv[1] === 'select-window' || argv[1] === 'switch-client') return ok('')
-      if (argv[1] === 'has-session') return world.tmuxPanes.includes(`${(argv[3] ?? '').slice(1)}\t`) ? ok('') : { exitCode: 1, stdout: '', stderr: '' }
+      if (argv[1] === 'has-session') {
+        const name = (argv[3] ?? '').slice(1)
+        return world.tmuxPanes.includes(`${name}\t`) || world.started.has(name) ? ok('') : { exitCode: 1, stdout: '', stderr: '' }
+      }
+      if (argv[1] === 'list-keys') return ok(`${world.statusClick}\n`)
+      if (argv[1] === 'bind-key' || argv[1] === 'set-option' || argv[1] === 'set-window-option') return ok('')
       if (argv[1] === 'show-options') return ok(`${world.tmuxOwner}\n`)
       return { exitCode: 1, stdout: '', stderr: `unexpected tmux ${argv.join(' ')}` }
     case '/usr/sbin/lsof':
       return { exitCode: 1, stdout: LSOF, stderr: '' }
     case '/usr/bin/osascript':
       if (argv[4] === FOCUS_SCRIPT) return ok(TABS.has(argv[5] ?? '') ? 'shown\n' : '\n')
-      if (argv[4] === OPEN_SCRIPT) return world.openFails ? { exitCode: 1, stdout: '', stderr: 'execution error: Not authorized to send Apple events to Terminal. (-1743)\n' } : ok('opened\n')
+      if (argv[4] === OPEN_SCRIPT) {
+        if (world.openFails) return { exitCode: 1, stdout: '', stderr: 'execution error: Not authorized to send Apple events to Terminal. (-1743)\n' }
+        // the window it opens makes the workspace's tmux session
+        const id = /\/open\/([a-z0-9-]+)\.sh'$/.exec(argv[5] ?? '')?.[1]
+        if (id !== undefined) world.started.add(`ws-${id}`)
+        return ok('opened\n')
+      }
       if (argv[4] === HAS_TAB_SCRIPT) return ok(TABS.has(argv[5] ?? '') && !world.noTab.has(argv[5] ?? '') ? 'yes\n' : '\n')
       if (argv[4] !== BACKGROUND_SCRIPT) return { exitCode: 1, stdout: '', stderr: 'unexpected script' }
       // Terminal.app's tab on ttys022 has the Novel profile's background; the others another
@@ -1339,9 +1362,10 @@ describe('workspaces', () => {
     const setUp = runs.filter(r => r[0] === 'tmux' && (r[1] === 'set-option' || r[1] === 'set-window-option'))
     // each of its windows, by id: the agents' windows whatever window is current
     expect(runs.find(r => r[0] === 'tmux' && r[1] === 'list-windows')).toEqual(['tmux', 'list-windows', '-t', '=ws-practice-rbac', '-F', '#{window_id}'])
-    expect(setUp.slice(0, 5)).toEqual(sessionSetup('ws-practice-rbac', ['@1', '@2']).map(a => ['tmux', ...a]))
-    expect(sessionSetup('ws-practice-rbac', ['@1', '@2']).map(a => `${a[0]} ${a[2]} ${a[3]}`)).toEqual([
-      'set-option ws-practice-rbac mouse', 'set-window-option @1 pane-border-status', 'set-window-option @1 pane-border-format',
+    expect(setUp.slice(0, 7)).toEqual(sessionSetup('ws-practice-rbac', ['@1', '@2'], true).map(a => ['tmux', ...a]))
+    expect(sessionSetup('ws-practice-rbac', ['@1', '@2'], true).map(a => `${a[0]} ${a[2]} ${a[3]}`)).toEqual([
+      'set-option ws-practice-rbac mouse', 'set-option ws-practice-rbac status-right-length', 'set-option ws-practice-rbac status-right',
+      'set-window-option @1 pane-border-status', 'set-window-option @1 pane-border-format',
       'set-window-option @2 pane-border-status', 'set-window-option @2 pane-border-format',
     ])
     // its pane: its window, then the pane itself
@@ -1973,6 +1997,50 @@ describe('relay', () => {
     expect(kept()[0]).toEqual({ mode: 'auto', since: kept()[1].since, streak: 0 })
     expect(kept()[0].since).toBeGreaterThan(NOW - 1)
     expect((await ui.find({ key: 'relay plain' }))?.props.label).toBe('Relay: auto')
+    await ui.unmount()
+  })
+})
+
+describe('hiding a workspace window', () => {
+  test('its status bar hides it: hide.sh written, the click bound over tmux\'s own, the bar says so', async ($, on) => {
+    const { files, runs } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    await $.session.start(START)
+    expect((await $.command.run({ ...SESSIONS, command: 'workspace', args: 'new ~/dev/web-app work Practice RBAC' })).text).toMatch(/^Created Practice RBAC/)
+    // once the window made the session, it is prepared
+    expect(files.get(hidePath(HOME))).toBe(HIDE_SCRIPT)
+    expect(runs.find(r => r[0] === 'tmux' && r[1] === 'bind-key')).toEqual(['tmux', ...hideBinding(hidePath(HOME))!])
+    const right = runs.filter(r => r[0] === 'tmux' && r[1] === 'set-option' && r[4] === 'status-right').map(r => r[5])
+    expect(right).toEqual([HIDE_LABEL])
+    // the click on Hide runs hide.sh with the terminal; any other click on the bar is still tmux's own
+    expect(hideBinding('/h/hide.sh')).toEqual(['bind-key', '-T', 'root', 'MouseDown1Status', 'if-shell', '-F', '#{==:#{mouse_status_range},ls-hide}', `run-shell -b "/bin/sh '/h/hide.sh' '#{client_tty}'"`, 'switch-client -t ='])
+    expect(hideBinding("/it's/hide.sh")).toBeUndefined()
+    expect(hideBinding('/a#b/hide.sh')).toBeUndefined()
+  })
+
+  test('a click on the bar the person bound to something of theirs stays theirs; the bar then only says closing keeps the agents', async ($, on) => {
+    const { runs } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    world.statusClick = 'bind-key -T root MouseDown1Status select-pane -t ='
+    await $.session.start(START)
+    await $.command.run({ ...SESSIONS, command: 'workspace', args: 'new ~/dev/web-app work Practice RBAC' })
+    expect(runs.filter(r => r[0] === 'tmux' && r[1] === 'bind-key')).toEqual([])
+    expect(runs.filter(r => r[0] === 'tmux' && r[1] === 'set-option' && r[4] === 'status-right').map(r => r[5])).toEqual([KEEPS_LABEL])
+    expect([mayBindHide('bind-key -T root MouseDown1Status switch-client -t ='), mayBindHide(`bind-key -T root MouseDown1Status if-shell -F "#{==:#{mouse_status_range},ls-hide}" x y`), mayBindHide('bind-key -T root MouseDown1Status select-pane -t =')]).toEqual([true, true, false])
+  })
+
+  test('Hide window in a workspace\'s actions hides each window attached to it; the agents keep running', async ($, on) => {
+    const { files, runs, toasts } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [practice] }))
+    world.tmuxPanes = 'ws-practice-rbac\tpeers\t/dev/ttys004\t%1\tclaude\nws-practice-rbac\tpeers\t/dev/ttys045\t%2\tcodex\n'
+    world.tmuxClients = 'ws-practice-rbac\t/dev/ttys001\nws-practice-rbac\t/dev/ttys002\nother\t/dev/ttys003\n'
+    world.tmuxOwner = String(NOW)
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    await reveal(ui, 'ws:practice-rbac')
+    await ui.press({ key: 'hide practice-rbac' })
+    expect(runs.filter(r => r[0] === '/bin/sh' && r[1] === hidePath(HOME)).map(r => r[2])).toEqual(['/dev/ttys001', '/dev/ttys002'])
+    expect(files.get(hidePath(HOME))).toBe(HIDE_SCRIPT)
+    expect(toasts.at(-1)).toBe('Practice RBAC hidden: its agents keep running; Open brings it back.')
     await ui.unmount()
   })
 })

@@ -308,6 +308,48 @@ if (process.argv.includes('--slow')) {
   `, socket], { encoding: 'utf8' }).stdout.trim().split(' ')
     check('workspace: a click picks the side that takes the keys', mouse[0] === sides.codex && mouse[1] === sides.claude, mouse.slice(0, 2).join(' → '))
     check('workspace: the wheel scrolls the side under it alone', mouse.includes(`${sides.codex}=1`) && mouse.includes(`${sides.claude}=0`), mouse.slice(2).join(' '))
+  // Hide on the status bar, bound as the mod binds it over tmux's own, with a stand-in for hide.sh that
+  // records the terminal and detaches it: a click there detaches that terminal; the session keeps running
+  const standIn = join(scratch, 'hide-stand-in.sh')
+  writeFileSync(standIn, `#!/bin/sh\necho "$1" > "${scratch}/hidden"\ntmux detach-client -t "$1"\n`)
+  check('hide: the click is tmux\'s own before the mod binds it', w.mayBindHide(t6('list-keys', '-T', 'root', 'MouseDown1Status')))
+  t6(...w.hideBinding(standIn))
+  for (const args of w.sessionSetup('ws-check', [], true)) t6(...args)
+  const hid = spawnSync('python3', ['-c', `
+import os, pty, select, subprocess, time, struct, fcntl, termios, sys
+S = sys.argv[1]
+t = lambda *a: subprocess.run(['tmux', '-L', S, '-f', '/dev/null', *a], capture_output=True, text=True).stdout.strip()
+pid, fd = pty.fork()
+if pid == 0:
+    os.environ['TERM'] = 'xterm-256color'
+    os.execvp('tmux', ['tmux', '-L', S, '-f', '/dev/null', 'attach', '-t', '=ws-check'])
+fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack('HHHH', 30, 100, 0, 0))
+def pump(s):
+    end = time.time() + s
+    while time.time() < end:
+        r, _, _ = select.select([fd], [], [], 0.1)
+        if r:
+            try: os.read(fd, 65536)
+            except OSError: return
+pump(1.5)
+before = t('list-clients', '-t', '=ws-check', '-F', '#{client_tty}')
+os.write(fd, b'\\x1b[<0;90;30M\\x1b[<0;90;30m'); pump(1.5)
+after = t('list-clients', '-t', '=ws-check', '-F', '#{client_tty}')
+print(before or '-', after or '-')
+os.close(fd)
+try: os.waitpid(pid, 0)
+except ChildProcessError: pass
+`, socket], { encoding: 'utf8' }).stdout.trim().split(' ')
+  const hiddenTty = existsSync(join(scratch, 'hidden')) ? readFileSync(join(scratch, 'hidden'), 'utf8').trim() : ''
+  check('hide: a click on the bar\'s Hide detaches that terminal; the session keeps running', hid[0].startsWith('/dev/') && hid[1] === '-' && hiddenTty === hid[0] &&
+    spawnSync('tmux', ['-L', socket, '-f', '/dev/null', 'has-session', '-t', '=ws-check']).status === 0, `${hid.join(' → ')} (${hiddenTty})`)
+  check('hide: other clicks on the bar stay tmux\'s own', t6('list-keys', '-T', 'root', 'MouseDown1Status').includes(w.STATUS_CLICK))
+  // hide.sh itself, on a terminal that is no Terminal.app tab: detached; no window touched
+  const hideFile = join(scratch, 'hide.sh')
+  writeFileSync(hideFile, w.HIDE_SCRIPT)
+  const fakeClient = spawnSync('/bin/sh', [hideFile, '/dev/ttys999'], { encoding: 'utf8', env: { ...process.env, TMUX: '' } })
+  check('hide: hide.sh on a terminal no Terminal tab holds closes nothing', fakeClient.stdout.trim() === 'none', fakeClient.stdout.trim() || fakeClient.stderr.trim())
+  check('hide: hide.sh refuses what is not a terminal', spawnSync('/bin/sh', [hideFile, '/etc/passwd'], { encoding: 'utf8' }).stdout === '')
     // a workspace made before the marks (a window per agent), with a window of the owner's own now current:
     // set up at Open, each window gets the borders, the agents' named by their windows
     t6('new-session', '-d', '-s', 'ws-old', '-n', 'claude', 'sleep 30')
