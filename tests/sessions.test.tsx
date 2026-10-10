@@ -1600,33 +1600,53 @@ describe('workspaces', () => {
 describe('workspaces, from the pane', () => {
   test('each workspace in a box of its own, a line apart; its border marked while it waits on the owner', async ($, on) => {
     const { files } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    const ws = (id: string, fields: Partial<Workspace>) => ({ ...practice, id, name: id, ...fields })
     files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [
-      { ...practice, relay: relayOn({ streak: RELAY_CAP, status: 'waits for you' }) },
-      { ...practice, id: 'quiet', name: 'Quiet', relay: relayOn({ status: 'passed to Codex', at: NOW }) },
-      { ...practice, id: 'asks', name: 'Asks', relay: relayOn({ status: 'needs you', at: NOW }) },
-      { ...practice, id: 'drift', name: 'Drift', check: { at: NOW, status: 'drifting', brief: 'off course' } },
+      { ...practice, relay: relayOn({ streak: RELAY_CAP, status: 'waits for you', at: NOW }), check: { at: NOW, status: 'on-track', brief: 'fine' } },
+      ws('quiet', { relay: relayOn({ status: 'passed to Codex', at: NOW }) }),
+      ws('asks', { relay: relayOn({ status: 'needs you', at: NOW }) }),
+      ws('answered', { relay: relayOn({ status: 'needs you', at: NOW - 60_000, typedAt: NOW }) }),
+      ws('off', { relay: relayOn({ mode: 'off', status: 'needs you', at: NOW }) }),
+      ws('unpassed', { relay: relayOn({ status: 'could not pass to Claude', at: NOW }) }),
+      ws('scrolled', { relay: relayOn({ status: 'waits: Codex\'s pane is scrolled back (copy mode; q leaves it)', at: NOW }) }),
+      ws('drift', { check: { at: NOW, status: 'drifting', brief: 'off course' } }),
     ] }))
-    // WEB CONSOLE (ttys004) runs in the first one's tmux session
+    // WEB CONSOLE (ttys004), its name long, runs in the first one's tmux session
+    files.set('/Users/u/.claude/sessions/101.json', JSON.stringify({ ...JSON.parse(files.get('/Users/u/.claude/sessions/101.json')!), name: 'W'.repeat(90) }))
     world.tmuxPanes = 'ws-practice-rbac\tpeers\t/dev/ttys004\t%1\tclaude\n'
     await $.session.start(START)
     await $.command.run(SESSIONS)
     const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
-    const box = async (id: string) => (await ui.find({ key: `ws-${id}` }))?.props as Record<string, unknown> | undefined
+    const props = async (key: string) => (await ui.find({ key }))?.props as Record<string, unknown> | undefined
     const looks = async (id: string) => {
-      const p = await box(id)
+      const p = await props(`ws-${id}`)
       return [p?.borderStyle, p?.borderColor ?? (p?.borderDimColor === true ? 'dim' : undefined), p?.marginTop, p?.paddingX, p?.width]
     }
-    expect(await looks('practice-rbac')).toEqual(['round', 'warning', 1, 1, 110])
+    const marks = await Promise.all(['practice-rbac', 'quiet', 'asks', 'answered', 'off', 'unpassed', 'scrolled', 'drift'].map(async id => [id, (await looks(id))[1]]))
+    expect(Object.fromEntries(marks)).toEqual({ 'practice-rbac': 'warning', quiet: 'dim', asks: 'warning', answered: 'dim', off: 'dim', unpassed: 'warning', scrolled: 'warning', drift: 'warning' })
     expect(await looks('quiet')).toEqual(['round', 'dim', 1, 1, 110])
-    expect(await looks('asks')).toEqual(['round', 'warning', 1, 1, 110])
-    expect(await looks('drift')).toEqual(['round', 'warning', 1, 1, 110])
-    // what is inside lays out within the border and its padding
-    expect(((await ui.find({ key: 'claude-101' }))?.props as { width?: number } | undefined)?.width).toBe(106)
+    // what is inside lays out within the border and its padding: the header, the folder, relay and check lines, its
+    // sessions (a long title cut to the row), each one's actions, its own actions
+    const width = async (key: string) => (await props(key))?.width
+    expect([await width('ws-head practice-rbac'), await width('ws-dir practice-rbac'), await width('ws-relay practice-rbac'), await width('ws-check practice-rbac'), await width('claude-101')])
+      .toEqual([106, 104, 104, 104, 106])
+    expect(((await props('open claude-101'))?.label as string).length).toBe(59)
+    await reveal(ui, 'item:claude-101')
+    expect(await width('bar item:claude-101')).toBe(100)
     await reveal(ui, 'ws:practice-rbac')
-    expect(((await ui.find({ key: 'bar ws:practice-rbac' }))?.props as { width?: number } | undefined)?.width).toBe(104)
+    expect(await width('bar ws:practice-rbac')).toBe(104)
     // a session row outside any workspace keeps the pane's width
-    expect(((await ui.find({ key: 'claude-104' }))?.props as { width?: number } | undefined)?.width).toBe(110)
+    expect(await width('claude-104')).toBe(110)
     await ui.unmount()
+    // too narrow for a row in a box: no box, a line apart all the same
+    const narrow = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(50) })
+    const flat = (await narrow.find({ key: 'ws-quiet' }))?.props as Record<string, unknown> | undefined
+    expect([flat?.borderStyle, flat?.marginTop, ((await narrow.find({ key: 'claude-101' }))?.props as { width?: number } | undefined)?.width]).toEqual([undefined, 1, 50])
+    await narrow.unmount()
+    // the desktop surface takes the same tree
+    const desk = await $.ui.mount({ plugin: 'live-sessions', surface: 'desktop', ...PANE, props: paneProps(110) })
+    expect(((await desk.find({ key: 'ws-quiet' }))?.props as Record<string, unknown> | undefined)?.borderStyle).toBe('round')
+    await desk.unmount()
   })
 
   test('each row has one [ more ]; it shows the row\'s actions, worded, each with its key; one row at a time', async ($, on) => {

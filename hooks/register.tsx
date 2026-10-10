@@ -1136,6 +1136,9 @@ async function cycleRelay($: EngineInterface, id: string) {
   await refresh($, 0)
 }
 
+/** From this many columns a workspace is drawn in a box (its border and padding take 4); narrower, a session row would not fit in one. */
+const BOXED_FROM = 60
+
 /** The context fills a workspace's Claude may compact itself at, pressed round; 0 is off. */
 const COMPACT_STEPS = [50, 60, 70, 80, 0]
 const nextCompactAt = (now: number) => COMPACT_STEPS[(COMPACT_STEPS.indexOf(now) + 1) % COMPACT_STEPS.length] ?? COMPACT_AT
@@ -1898,19 +1901,15 @@ export const register: Register = on => {
               {form.error !== '' && <Text color="error" wrap="wrap">{form.error}</Text>}
             </Box>
           )}
-          {view.workspaces.map(ws => (
-            // each workspace in a box of its own, a line apart; its border marked while it waits on the owner (a held
-            // hand-off, a cue for them, a check not on track)
-            <Box
-              key={`ws-${ws.key}`}
-              flexDirection="column"
-              width={width}
-              marginTop={1}
-              paddingX={1}
-              borderStyle="round"
-              {...(ws.relay.isWaiting || ws.relay.status.startsWith('needs you') || ws.check?.isOk === false ? { borderColor: 'warning' as const } : { borderDimColor: true })}
-            >
-              <Box flexDirection="row" width={width - 4}>
+          {view.workspaces.map(ws => {
+            // each workspace in a box of its own, a line apart, its border marked while it waits on the owner (the
+            // relay, or a check not on track); on a pane too narrow for a row and a box, no box
+            const isBoxed = width >= BOXED_FROM
+            const inner = isBoxed ? width - 4 : width
+            const look = !isBoxed ? {} : { paddingX: 1, borderStyle: 'round', ...(ws.relay.needsOwner || ws.check?.isOk === false ? { borderColor: 'warning' as const } : { borderDimColor: true }) }
+            return (
+            <Box key={`ws-${ws.key}`} flexDirection="column" width={width} marginTop={1} {...look}>
+              <Box key={`ws-head ${ws.key}`} flexDirection="row" width={inner}>
                 <Box flexGrow={1} flexShrink={1}>
                   <Text bold wrap="truncate-end">{ws.name}</Text>
                 </Box>
@@ -1931,7 +1930,7 @@ export const register: Register = on => {
                 )}
                 {more(`ws:${ws.key}`)}
               </Box>
-              <Box width={width - 6} marginLeft={2}>
+              <Box key={`ws-dir ${ws.key}`} width={inner - 2} marginLeft={2}>
                 <Text dimColor wrap="truncate-end">{`${ws.only === undefined ? '' : `${ws.only === 'claude' ? 'Claude' : 'Codex'} only · `}${ws.branch === undefined ? '' : `on ${ws.branch} · `}${ws.dir}`}</Text>
               </Box>
               {open === `ws:${ws.key}` &&
@@ -1955,21 +1954,22 @@ export const register: Register = on => {
                     {...(isPending(`rm:${ws.key}`) ? { variant: 'primary' as const } : {})}
                     onPress={() => void pressRemove(ws.key)()}
                   />,
-                ], width - 4)}
+                ], inner)}
               {(ws.relay.status !== '' || ws.relay.isWaiting) && (
-                <Box flexDirection="row" width={width - 6} columnGap={1} marginLeft={2}>
+                <Box key={`ws-relay ${ws.key}`} flexDirection="row" width={inner - 2} columnGap={1} marginLeft={2}>
                   <Text dimColor wrap="truncate-end">{`relay: ${ws.relay.isWaiting ? `waits for you after ${RELAY_CAP} hand-offs` : ws.relay.status}`}</Text>
                   {ws.relay.isWaiting && <Button key={`relay-go ${ws.key}`} label="continue" onPress={() => void continueRelay($, ws.key)} />}
                 </Box>
               )}
               {ws.check !== undefined && (
-                <Box flexDirection="row" width={width - 6} marginLeft={2}>
+                <Box key={`ws-check ${ws.key}`} flexDirection="row" width={inner - 2} marginLeft={2}>
                   <Text {...(ws.check.isOk ? { dimColor: true } : { color: 'warning' as const })} wrap="truncate-end">{`check: ${ws.check.text}`}</Text>
                 </Box>
               )}
-              {ws.items.map(i => sessionRow(i, ws.items.map(x => x.key), itemsScope(`ws:${ws.key}`), '', width - 4))}
+              {ws.items.map(i => sessionRow(i, ws.items.map(x => x.key), itemsScope(`ws:${ws.key}`), '', inner))}
             </Box>
-          ))}
+            )
+          })}
         </Box>
         {view.shown === 0 && (
           <Box marginTop={1}>

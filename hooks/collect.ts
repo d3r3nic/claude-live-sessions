@@ -1,5 +1,5 @@
 // Pure parsing and matching: no `$`, so the tests drive it directly.
-import type { ClaudeSession, CodexSession, Place, Snapshot } from '../types'
+import type { ClaudeSession, CodexSession, Place, Snapshot, Workspace } from '../types'
 import { COMPACT_AT, RELAY_CAP } from './relay'
 import { DRIFT_EVERY } from './drift'
 import { tmuxName } from './workspaces'
@@ -926,8 +926,12 @@ export type WorkspaceView = {
   isRunning: boolean
   isAttached: boolean
   items: Item[]
-  /** The relay: its mode, and what it last did, said for the owner ('' when nothing yet). */
-  relay: { mode: 'auto' | 'notify' | 'off'; status: string; isWaiting: boolean }
+  /**
+   * The relay: its mode, and what it last did, said for the owner ('' when nothing yet); whether it holds a
+   * hand-off at the cap; whether it waits on the owner now (that hold, a cue for them or a pass it could not make
+   * that they have not typed anything since, a pane left scrolled back), never with the relay off.
+   */
+  relay: { mode: 'auto' | 'notify' | 'off'; status: string; isWaiting: boolean; needsOwner: boolean }
   /** How full Claude's context may get, in percent, before it compacts itself at a hand-off; 0 is off. */
   compactAt: number
   /** Hand-offs between drift checks (0: off), and the last check said for the owner ('' when none yet). */
@@ -1071,6 +1075,7 @@ export function viewOf(
       status: ws.relay?.status === undefined ? '' : `${ws.relay.status}${ws.relay.at === undefined ? '' : ` ${ago(o.now - ws.relay.at)} ago`}`,
       // it waits once it holds a cue at the cap, not as soon as the count reaches it
       isWaiting: ws.relay !== undefined && ws.relay.mode === 'auto' && ws.relay.streak >= RELAY_CAP && ws.relay.status === 'waits for you',
+      needsOwner: needsOwner(ws.relay),
     },
     compactAt: ws.compactAt ?? COMPACT_AT,
     checkEvery: ws.checkEvery ?? DRIFT_EVERY,
@@ -1087,6 +1092,20 @@ export function viewOf(
     shown: shown.length,
     total: items.length,
   }
+}
+
+/**
+ * Whether a workspace's relay waits on the owner now: holding a hand-off at
+ * the cap; a cue for them, or a pass it could not make (theirs to paste),
+ * with nothing typed by them since; a pane left scrolled back. Never with
+ * the relay off.
+ */
+export function needsOwner(relay: Workspace['relay']): boolean {
+  if (relay === undefined || relay.mode === 'off') return false
+  const status = relay.status ?? ''
+  const isAnswered = relay.typedAt !== undefined && relay.at !== undefined && relay.typedAt > relay.at
+  if (status === 'waits for you' || status.startsWith('waits: ')) return true
+  return (status === 'needs you' || status.startsWith('could not pass')) && !isAnswered
 }
 
 /** `1m`, `3h`: how long ago, compactly. */
