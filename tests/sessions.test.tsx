@@ -84,6 +84,7 @@ import {
   agentsOf,
   branchFrom,
   BRANCH_SCRIPT,
+  headOf,
   parseWorktrees,
   WORKTREES_SCRIPT,
   envsFrom,
@@ -140,8 +141,13 @@ const local = (line: string) =>
 
 /** What a test changes about the machine; engine() resets it. */
 const world = {
-  /** The branch checked out in each folder, as BRANCH_SCRIPT prints it; none: a detached HEAD. */
-  branches: {} as Record<string, string>,
+  /** What BRANCH_SCRIPT prints for each folder: main or linked, then the branch checked out (none: a detached HEAD). */
+  heads: {} as Record<string, string>,
+  /** A folder whose worktree lookup takes 5 s. */
+  slowWorktrees: '',
+  /** More of web-app's worktrees, as git worktree list --porcelain -z prints them, and folders that are there. */
+  moreWorktrees: '',
+  dirs: new Set<string>(),
   /** The slash commands the plugin registered, with their hints. */
   commands: [] as { name: string; argumentHint?: string }[],
   /** A process's `ps` state or command, changed from the fixture. */
@@ -207,7 +213,10 @@ const world = {
   codexTaskAnswer: undefined as (() => string) | undefined,
 }
 const resetWorld = () => {
-  world.branches = { '/Users/u/dev/web-app': 'main', '/Users/u/dev/build': 'fix/build' }
+  world.heads = { '/Users/u/dev/web-app': 'main\nmain\n', '/Users/u/dev/build': 'linked\nfix/build\n' }
+  world.slowWorktrees = ''
+  world.moreWorktrees = ''
+  world.dirs.clear()
   world.commands = []
   world.stat.clear()
   world.args.clear()
@@ -301,15 +310,15 @@ function machine(argv: readonly string[], env: unknown): Run {
       if (argv[2] === WORKTREES_SCRIPT) {
         // web-app's main checkout, its worktree for fix/build, and one with no branch checked out
         return ['/Users/u/dev/web-app', '/Users/u/dev/build'].some(d => args[0] === d || args[0]?.startsWith(`${d}/`))
-          ? ok('worktree /Users/u/dev/web-app\nHEAD 1111\nbranch refs/heads/main\n\nworktree /Users/u/dev/build\nHEAD 2222\nbranch refs/heads/fix/build\n\nworktree /Users/u/dev/web-app-worktrees/probe\nHEAD 3333\ndetached\n\n')
+          ? ok(`worktree /Users/u/dev/web-app\0HEAD 1111\0branch refs/heads/main\0\0worktree /Users/u/dev/build\0HEAD 2222\0branch refs/heads/fix/build\0\0worktree /Users/u/dev/web-app-worktrees/probe\0HEAD 3333\0detached\0\0${world.moreWorktrees}`)
           : { exitCode: 128, stdout: '', stderr: 'fatal: not a git repository\n' }
       }
-      if (argv[2] === BRANCH_SCRIPT) return world.branches[args[0] ?? ''] === undefined ? { exitCode: 1, stdout: '', stderr: '' } : ok(`${world.branches[args[0]!]}\n`)
+      if (argv[2] === BRANCH_SCRIPT) return world.heads[args[0] ?? ''] === undefined ? { exitCode: 1, stdout: '', stderr: '' } : ok(world.heads[args[0]!]!)
       // build is a worktree of web-app's
       if (argv[2] === CHECKOUT_SCRIPT && args[0] === '/Users/u/dev/build') return ok('ok /Users/u/dev/web-app\n')
       if (argv[2] === CHECKOUT_SCRIPT) {
         // web-app and api are repositories; anything else is not
-        const main = ['/Users/u/dev/web-app', '/Users/u/dev/api'].find(m => args[0] === m || args[0]?.startsWith(`${m}/`))
+        const main = ['/Users/u/dev/web-app', '/Users/u/dev/api'].find(m => args[0] === m || args[0]?.startsWith(`${m}/`) || args[0]?.startsWith(`${m}-worktrees/`))
         return main === undefined ? { exitCode: 11, stdout: 'error: not-a-repo\n', stderr: '' } : ok(`ok ${main}\n`)
       }
       if (argv[2] === PROJECTS_SCRIPT) return ok('/Users/u/dev/web-app\n/Users/u/dev/api\n/Users/u/dev/build\n/Users/u/dev/résumé\n')
@@ -449,6 +458,7 @@ function engine(
     const isMove = e.argv[0] === '/bin/sh' && e.argv[2] === MOVE_SCRIPT
     if (isMove && moveTakesMs > 0) await clock.sleep(moveTakesMs)
     if (e.argv[2] === CHECKOUT_SCRIPT && checkoutTakesMs > 0) await clock.sleep(checkoutTakesMs)
+    if (e.argv[2] === WORKTREES_SCRIPT && e.argv[4] === world.slowWorktrees) await clock.sleep(5_000)
     if (isMove && world.move === 'reject') return { deny: 'timed out after 40000 ms' }
     return { value: { ...run(e.argv, e.init?.env), isStdoutTruncated: false, isStderrTruncated: false } }
   })
@@ -465,7 +475,7 @@ function engine(
     return { value: LISTINGS[e.path] !== undefined || isListed || files.has(e.path) }
   })
   on('fs.stat', async ($, e) => {
-    const isDir = LISTINGS[e.path] !== undefined || GIT[e.path] !== undefined
+    const isDir = LISTINGS[e.path] !== undefined || GIT[e.path] !== undefined || world.dirs.has(e.path)
     return isDir ? { value: { kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false } } : { deny: `ENOENT ${e.path}` }
   })
   on('fs.read', async ($, e) => {
@@ -3246,6 +3256,7 @@ describe('going on with a branch', () => {
     // after --for it is the purpose's
     expect(parseWorkspaceArgs('new /x work Name --for use --go-on', ['work'], HOME)).toEqual({ action: 'new', dir: '/x', env: 'work', name: 'Name', purpose: 'use --go-on' })
     // the linked worktrees with a branch checked out: not the main checkout, a detached one, a bare one or one about to be pruned
+    // NUL-separated (git worktree list --porcelain -z), so a folder named with a newline and a field is only a folder
     const listed = [
       'worktree /r', 'HEAD 1', 'branch refs/heads/main', '',
       'worktree /r-worktrees/feat-a', 'HEAD 2', 'branch refs/heads/feat/a', '',
@@ -3253,11 +3264,17 @@ describe('going on with a branch', () => {
       'worktree /r-worktrees/gone', 'HEAD 4', 'branch refs/heads/gone', 'prunable gitdir file points to non-existent location', '',
       'worktree /r-worktrees/locked', 'HEAD 5', 'branch refs/heads/fix/b', 'locked', '',
       'worktree relative', 'HEAD 6', 'branch refs/heads/c', '',
-    ].join('\n')
+      'worktree /r-worktrees/x\nbranch refs/heads/evil', 'HEAD 7', 'detached', '',
+    ].join('\0')
     expect(parseWorktrees(listed)).toEqual([{ path: '/r-worktrees/feat-a', branch: 'feat/a' }, { path: '/r-worktrees/locked', branch: 'fix/b' }])
     expect(parseWorktrees('')).toEqual([])
-    expect(['feat/a', 'fix/ü-1', 'release-2.0'].map(branchFrom)).toEqual(['feat/a', 'fix/ü-1', 'release-2.0'])
-    for (const bad of ['', 'a b', 'a\tb', 'x\u001b[31m', 'x\u009b', 'x‮y', 'x⁦', '-rf', 'a:b', 'a..b'.replace('..', '~'), 'x'.repeat(201), 7, undefined]) expect(branchFrom(bad)).toBeUndefined()
+    // names git allows and that show as they are
+    expect(['feat/a', 'fix/ü-1', 'release-2.0', 'a.b/c'].map(branchFrom)).toEqual(['feat/a', 'fix/ü-1', 'release-2.0', 'a.b/c'])
+    for (const bad of ['', 'a b', 'a\tb', 'x\u001b[31m', 'x\u009b', 'x\u202ey', 'x\u2066', 'x\u200by', 'x\u061cy', '-rf', 'a:b', 'a~b', 'a^b', 'a?b', 'a*b', 'a[b', 'a\\b',
+      'a..b', 'x.lock', 'a/x.lock/b', '@', 'a@{b', 'a//b', '.x', 'a/.x', 'x/', 'x.', 'x'.repeat(201), 7, undefined]) expect(branchFrom(bad)).toBeUndefined()
+    // where a folder is: the main checkout, or a linked worktree, and its branch
+    expect([headOf('main\nmain\n'), headOf('linked\nfix/build\n'), headOf('linked\n'), headOf('linked\n-x\n'), headOf('')])
+      .toEqual([{ isMain: true, branch: 'main' }, { isMain: false, branch: 'fix/build' }, { isMain: false }, { isMain: false }, undefined])
     expect(workspacesFrom({ workspaces: [{ ...practice, branch: 'feat/rbac' }, { ...practice, id: 'b', branch: 'a b' }] })).toEqual([{ ...practice, branch: 'feat/rbac' }, { ...practice, id: 'b' }])
   })
 
@@ -3290,15 +3307,21 @@ describe('going on with a branch', () => {
     // a detached HEAD, or a name git would not give: said, nothing made, nothing opened
     const opened = () => runs.filter(r => r[4] === OPEN_SCRIPT).length
     for (const head of [undefined, '-x']) {
-      if (head === undefined) delete world.branches['/Users/u/dev/build']
-      else world.branches['/Users/u/dev/build'] = head
+      world.heads['/Users/u/dev/build'] = head === undefined ? 'linked\n' : `linked\n${head}\n`
       expect((await $.command.run({ ...SESSIONS, command: 'workspace', args: 'new ~/dev/build work Again --go-on --for more' })).text).toBe('Not done: /Users/u/dev/build has no branch checked out to go on with.')
+    }
+    // the main checkout (or a folder in it): its branch is the repository's own line, never gone on with
+    world.heads['/Users/u/dev/api/src'] = 'main\nmain\n'
+    for (const [folder, checkout] of [['~/dev/web-app', '/Users/u/dev/web-app'], ['~/dev/api/src', '/Users/u/dev/api']]) {
+      expect((await $.command.run({ ...SESSIONS, command: 'workspace', args: `new ${folder} work Main --go-on --for more` })).text)
+        .toBe(`Not done: ${folder!.replace('~', HOME)} is the repository's main checkout: go on with a branch in its own worktree (in ${checkout}-worktrees/).`)
     }
     expect(JSON.parse(files.get(WORKSPACES)!).workspaces).toHaveLength(1)
     expect(opened()).toBe(1)
     // without --go-on no branch is read, and the agents start one
     await $.command.run({ ...SESSIONS, command: 'workspace', args: 'new ~/dev/web-app work Fresh --for something new' })
-    expect(runs.filter(r => r[2] === BRANCH_SCRIPT)).toHaveLength(3)
+    // (one read for each --go-on above: 1 made, 2 refused for their branch, 2 for the main checkout; none here)
+    expect(runs.filter(r => r[2] === BRANCH_SCRIPT)).toHaveLength(5)
     expect(JSON.parse(files.get(WORKSPACES)!).workspaces[1].branch).toBeUndefined()
   })
 
@@ -3333,6 +3356,10 @@ describe('going on with a branch', () => {
     expect([saved.dir, saved.checkout, saved.branch]).toEqual(['/Users/u/dev/build', '/Users/u/dev/web-app', 'fix/build'])
     expect(files.get(promptPath(HOME, 'build', 'claude'))).toBe(setupPrompt(saved))
     expect((await ui.findAll({ type: 'Text' })).map(t => t.text)).toContain('on fix/build · ~/dev/build')
+    // a new form shows no worktrees the last one found, until its own project is picked
+    await ui.press({ key: 'workspace:new' })
+    await ui.input({ key: 'form:project', text: '~/dev/web-app', kind: 'change' })
+    expect(await ui.find({ key: 'form:branch' })).toBeUndefined()
     await ui.unmount()
   })
 
@@ -3345,6 +3372,55 @@ describe('going on with a branch', () => {
     await ui.press({ key: 'new-from:/Users/u/dev/build' })
     expect(runs.filter(r => r[2] === WORKTREES_SCRIPT).map(r => r[4])).toEqual(['/Users/u/dev/build'])
     expect(((await ui.find({ key: 'form:branch' }))?.props.options as { label: string }[]).map(o => o.label)).toEqual(['start a new one for the purpose', 'go on with fix/build · ~/dev/build'])
+    await ui.unmount()
+  })
+
+  test('New workspace with it, going on with a worktree of the same repository: the session is brought in', async ($, on) => {
+    const { files } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    // a worktree of web-app's no session works in, so nothing the sessions show places it
+    world.moreWorktrees = 'worktree /Users/u/dev/web-app-worktrees/feat-rbac\0HEAD 4444\0branch refs/heads/feat/rbac\0\0'
+    world.dirs.add('/Users/u/dev/web-app-worktrees/feat-rbac')
+    world.heads['/Users/u/dev/web-app-worktrees/feat-rbac'] = 'linked\nfeat/rbac\n'
+    // WEB CONSOLE (ttys004, default environment) between turns, working in web-app's main checkout
+    files.set('/Users/u/.claude/sessions/101.json', JSON.stringify({ ...JSON.parse(files.get('/Users/u/.claude/sessions/101.json')!), status: 'idle', statusUpdatedAt: NOW - 60_000 }))
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    await reveal(ui, 'item:claude-101')
+    await ui.press({ key: 'bring claude-101' })
+    await ui.select({ key: 'form:branch', value: '/Users/u/dev/web-app-worktrees/feat-rbac' })
+    await ui.input({ key: 'form:name', text: 'RBAC', kind: 'change' })
+    await ui.input({ key: 'form:purpose', text: 'roles', kind: 'change' })
+    await ui.press({ key: 'form:create' })
+    expect((await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')).not.toContain('Not done')
+    expect(world.stopped).toEqual(['ttys004 claude 101'])
+    const [saved] = JSON.parse(files.get(WORKSPACES)!).workspaces
+    expect([saved.dir, saved.branch, saved.threads?.claude?.id]).toEqual(['/Users/u/dev/web-app-worktrees/feat-rbac', 'feat/rbac', 'session-101'])
+    expect(files.get(promptPath(HOME, 'rbac', 'claude'))).toBe(joinPrompt(saved, 'claude'))
+    await ui.unmount()
+  })
+
+  test('a lookup that ends after another project was picked shows nothing of its own; the branch chosen must still be there', async ($, on) => {
+    const { files, clock } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    world.slowWorktrees = '/Users/u/dev/web-app'
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    await ui.press({ key: 'workspace:new' })
+    // web-app picked (its lookup slow), then build picked and its worktree chosen
+    void ui.select({ key: 'form:pick', value: '/Users/u/dev/web-app' })
+    await ui.input({ key: 'form:project', text: 'build', kind: 'change' })
+    await ui.select({ key: 'form:pick', value: '/Users/u/dev/build' })
+    await ui.select({ key: 'form:branch', value: '/Users/u/dev/build' })
+    // web-app's lookup ends now: build's choice stands
+    await clock.advance(6_000)
+    expect((await ui.find({ key: 'form:branch' }))?.props.value).toBe('/Users/u/dev/build')
+    // the branch checked out there changed since: said, nothing made
+    world.heads['/Users/u/dev/build'] = 'linked\nfix/other\n'
+    await ui.input({ key: 'form:name', text: 'Build', kind: 'change' })
+    await ui.press({ key: 'form:create' })
+    expect((await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')).toContain('Not done: the branch checked out in /Users/u/dev/build is now fix/other, not fix/build; choose again.')
+    expect(files.has(WORKSPACES)).toBe(false)
     await ui.unmount()
   })
 })

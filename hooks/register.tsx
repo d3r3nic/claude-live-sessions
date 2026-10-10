@@ -35,8 +35,8 @@ import {
   setupPrompt,
   joinPrompt,
   soloPrompt,
-  branchFrom,
   BRANCH_SCRIPT,
+  headOf,
   parseWorktrees,
   WORKTREES_SCRIPT,
   defaultPlacement,
@@ -835,7 +835,7 @@ async function moveChecked($: EngineInterface, move: NonNullable<Item['move']>) 
  */
 async function createWorkspace(
   $: EngineInterface,
-  w: { dir: string; env: string; name: string; purpose: string; bring?: readonly string[]; only?: 'claude' | 'codex'; goOn?: boolean },
+  w: NewWorkspace,
 ): Promise<{ isCreated: boolean; text: string }> {
   // one at a time: a second press of create, or Enter then create, never makes a second workspace
   let isMine = false
@@ -851,10 +851,25 @@ async function createWorkspace(
   }
 }
 
-async function makeWorkspace(
-  $: EngineInterface,
-  w: { dir: string; env: string; name: string; purpose: string; bring?: readonly string[]; only?: 'claude' | 'codex'; goOn?: boolean },
-): Promise<{ isCreated: boolean; text: string }> {
+/**
+ * A workspace to make: `goOn` to go on with the branch checked out in `dir`
+ * (`goOnBranch`: the one the form showed for it); `bringFrom`, the folder the
+ * form offered the sessions to bring in for (the project, where `dir` is a
+ * worktree of it chosen to go on with).
+ */
+type NewWorkspace = {
+  dir: string
+  env: string
+  name: string
+  purpose: string
+  bring?: readonly string[]
+  only?: 'claude' | 'codex'
+  goOn?: boolean
+  goOnBranch?: string
+  bringFrom?: string
+}
+
+async function makeWorkspace($: EngineInterface, w: NewWorkspace): Promise<{ isCreated: boolean; text: string }> {
   const home = (await $.env.get('HOME')) ?? ''
   const fail = (why: string) => ({ isCreated: false, text: `Not done: ${why}.` })
   if (w.name.trim() === '') return fail('a workspace needs a name')
@@ -873,19 +888,22 @@ async function makeWorkspace(
   const purpose = w.purpose.trim()
   if (purpose !== '' && 'error' in place) return fail(place.error)
   const checkout = 'checkout' in place ? place.checkout : undefined
-  // going on with the branch checked out in the folder: read from git, never typed
+  // going on with the branch checked out in the folder: read from git, never typed; a branch's own worktree only, never
+  // the main checkout (its branch is the repository's own line), and the one the form showed
   let branch: string | undefined
   if (w.goOn === true) {
-    if (checkout === undefined) return fail('that folder is not in a git checkout, so it has no branch to go on with')
-    const head = await $.process.run(['/bin/sh', '-c', BRANCH_SCRIPT, 'sh', typed], { timeoutMs: 10_000 }).catch(() => ({ exitCode: -1, stdout: '', stderr: '' }))
-    branch = branchFrom(head.stdout.trim())
+    const head = headOf((await $.process.run(['/bin/sh', '-c', BRANCH_SCRIPT, 'sh', typed], { timeoutMs: 10_000 }).catch(() => ({ stdout: '' }))).stdout)
+    if (head?.isMain === true) return fail(`${typed} is the repository's main checkout: go on with a branch in its own worktree (in ${checkout ?? '<checkout>'}-worktrees/)`)
+    branch = head?.branch
     if (branch === undefined) return fail(`${typed} has no branch checked out to go on with`)
+    if (w.goOnBranch !== undefined && w.goOnBranch !== branch) return fail(`the branch checked out in ${typed} is now ${branch}, not ${w.goOnBranch}; choose again`)
   }
   await refresh($, VISIBLE_MAX_AGE_MS)
   const snap = await read($, snapshot)
   // the sessions brought in, each checked as it runs now; then closed where they run, so each conversation
   // goes on in the workspace alone
-  const checked = await checkBring($, home, snap, w.bring ?? [], w.env, dir)
+  // checked as the form offered them: for its project, which a worktree chosen to go on with is part of
+  const checked = await checkBring($, home, snap, w.bring ?? [], w.env, absoluteDir(w.bringFrom ?? '', home) ?? dir)
   if ('error' in checked) return fail(checked.error)
   // a workspace of one agent takes in a session of that agent only
   const stranger = checked.bring.find(b => !agentsOf(w).includes(b.tool))
@@ -1049,9 +1067,15 @@ async function submitDraft($: EngineInterface) {
   const d = await read($, draft)
   // (a form open since before the choice was offered has none: both)
   const only = d.only === 'claude' || d.only === 'codex' ? d.only : undefined
-  // a worktree chosen to go on with is the workspace's folder (likewise none in a form from before the choice)
-  const goOn = typeof d.goOn === 'string' && d.goOn.startsWith('/') ? d.goOn : undefined
-  const made = await createWorkspace($, { name: d.name, dir: goOn ?? (d.dir || d.query), env: d.env, purpose: d.purpose, bring: d.bring, ...(only === undefined ? {} : { only }), ...(goOn === undefined ? {} : { goOn: true }) })
+  // a worktree chosen to go on with (one the form shows: found for its folder, which a new form, a pick or typing
+  // starts over) is the workspace's folder; the sessions to bring in were offered for the project
+  const project = d.dir || d.query
+  const goOn = (await read($, worktrees)).list.find(w => w.path === d.goOn)
+  const made = await createWorkspace($, {
+    name: d.name, dir: goOn?.path ?? project, env: d.env, purpose: d.purpose, bring: d.bring, bringFrom: project,
+    ...(only === undefined ? {} : { only }),
+    ...(goOn === undefined ? {} : { goOn: true, goOnBranch: goOn.branch }),
+  })
   if (made.isCreated) {
     await update($, draft, () => NO_DRAFT)
     $.ui.toast(made.text, { timeoutMs: 15_000 })
@@ -1060,9 +1084,17 @@ async function submitDraft($: EngineInterface) {
   }
 }
 
-/** The worktrees of the repository holding `dir` that the form can offer to go on with; none for a folder in no repository. */
+/**
+ * The worktrees of the repository holding `dir` that the form can offer to
+ * go on with (none for a folder in no repository): kept only while the form
+ * still names that folder, so a lookup that ends late never shows another
+ * project's.
+ */
 async function lookWorktrees($: EngineInterface, dir: string) {
   const found = await $.process.run(['/bin/sh', '-c', WORKTREES_SCRIPT, 'sh', dir], { timeoutMs: 15_000 }).catch(() => ({ exitCode: -1, stdout: '', stderr: '' }))
+  const home = (await $.env.get('HOME')) ?? ''
+  const d = await read($, draft)
+  if (!d.isOpen || absoluteDir(d.dir || d.query, home) !== dir) return
   await update($, worktrees, () => ({ dir, list: found.exitCode === 0 ? parseWorktrees(found.stdout) : [] }))
 }
 
@@ -1076,6 +1108,8 @@ async function openDraft($: EngineInterface, dir: string, with_?: { member: stri
   const home = (await $.env.get('HOME')) ?? ''
   const shown = dir.startsWith(`${home}/`) ? `~${dir.slice(home.length)}` : dir
   await update($, draft, () => ({ ...NO_DRAFT, isOpen: true, dir, query: shown, ...(with_ === undefined ? {} : { bring: [with_.member], env: with_.env }) }))
+  // a form opened anew shows no worktrees another one found
+  await update($, worktrees, () => ({ dir: '', list: [] }))
   // while this pane has the keys (the form opened by its key), what is typed next goes into the name, not to the pane's keys
   await $.ui.focus({ requestId: PANE, key: 'form:name' }).catch(() => undefined)
   if (dir.startsWith('/')) await lookWorktrees($, dir)
@@ -1812,7 +1846,7 @@ export const register: Register = on => {
                     { value: 'new', label: 'start a new one for the purpose' },
                     ...branches.map(b => ({ value: b.path, label: `go on with ${b.branch} · ${b.path.startsWith(`${home}/`) ? `~${b.path.slice(home.length)}` : b.path}` })),
                   ]}
-                  value={branches.some(b => b.path === form.goOn) ? form.goOn : 'new'}
+                  value={form.goOn || 'new'}
                   onSelect={value => void update($, draft, d => ({ ...d, goOn: value === 'new' ? '' : value, error: '' }))}
                 />
               )}

@@ -29,7 +29,7 @@ A workspace is a project with your own name: a repository, an environment, and C
   - **what it is for** (optional): a sentence or two.
   - **bring in** (shown once a project is chosen): the Claude sessions and Codex terminals already running in that repository (any of its worktrees), at most one of each (of the chosen agent only, for a workspace of one; choosing one lets a session of the other go). Each one brought in closes where it runs and goes on in the workspace, in its own conversation (below).
   `New workspace here`, in a branch or folder row's actions, opens the form with that folder as the project. `New workspace with it`, in a running session's actions, opens it with that session's folder and environment, the session chosen to bring in.
-- `/workspace new <folder> <env> <name> [--only claude|codex] [--go-on] [--for <what it is for>]` does the same from the prompt; `--only` makes a workspace of that one agent, `--go-on` has the agents go on with the branch checked out in `<folder>` (read from git; a folder with none is refused), and every word after `--for` is the purpose.
+- `/workspace new <folder> <env> <name> [--only claude|codex] [--go-on] [--for <what it is for>]` does the same from the prompt; `--only` makes a workspace of that one agent, `--go-on` has the agents go on with the branch checked out in `<folder>`, a branch's own worktree (read from git; a folder with no branch checked out, or in the repository's main checkout, is refused), and every word after `--for` is the purpose.
 - Create opens a Terminal window on tmux session `ws-<id>` (the window runs `/bin/sh <file>`, the file in `~/Library/Application Support/live-sessions/open/` holding the command line, so any login shell works) (`<id>` is the name in lowercase with dashes), with one window: Claude on the left and Codex on the right (or the one agent chosen), in the project's folder. Each may also work in `<checkout>-worktrees/`, beside the repository's main checkout (made if it is not there), where branches' worktrees go. Create is taken once: a second press, or Enter, while one is being made, does not make another.
 - With a purpose (it needs a git repository), each agent starts with a first prompt, taken once (a restart never sends it again; `/workspace rm` deletes one never taken):
   - Claude gets peer coding ready under the peer-coding rules (the peer-coding skill): sets the repository up for it if it is not, starts a branch named for the purpose in its own worktree (or goes on with the branch you chose), makes its alignment move and ends its turn with the rules' cue line.
@@ -146,7 +146,7 @@ To change it, edit this folder, then run `/reload-plugins` in a session.
 
 ```sh
 claude plugin validate .
-claude plugin test .                                         # 134 tests
+claude plugin test .                                         # 136 tests
 npx -p typescript@5.6.3 tsc -p .                             # after one load, which lays down .claude-plugin/types
 node --experimental-strip-types tests/host-check.mjs [2d] [--slow]   # on this Mac: SQL, pipelines, a full collection, the move script on throwaway processes, workspaces and the relay on a private tmux server (reading no tmux.conf), the checkout script on throwaway repositories
 E2E_TRUSTED_DIR=<a trusted folder> node --experimental-strip-types tests/e2e-terminal.mjs    # a Terminal window: move a throwaway session to the background

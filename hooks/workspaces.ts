@@ -476,12 +476,16 @@ export function workspacesFrom(raw: unknown): Workspace[] {
 }
 
 /**
- * A branch's name, if it is one git could have given and that shows as it
- * is: no spaces, control or invisible direction characters, at most 200
- * characters, not starting with a dash.
+ * A branch's name, if git's rules for one allow it (git check-ref-format:
+ * no `..`, `@{`, `//`, part starting with `.`, ending `/`, `.` or `.lock`,
+ * nor `@` alone) and it shows as it is (no space, control, invisible or
+ * direction character); at most 200 characters, not starting with a dash.
  */
 export function branchFrom(raw: unknown): string | undefined {
-  return typeof raw === 'string' && /^[^\s\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff~^:?*[\\]{1,200}$/.test(raw) && !raw.startsWith('-') ? raw : undefined
+  if (typeof raw !== 'string' || !/^[^\s\x00-\x1f\x7f-\x9f\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff~^:?*[\\]{1,200}$/.test(raw)) return undefined
+  const isGits = !raw.startsWith('-') && raw !== '@' && !raw.includes('..') && !raw.includes('@{') && !raw.includes('//') &&
+    !raw.endsWith('/') && !raw.endsWith('.') && !raw.split('/').some(part => part.startsWith('.') || part.endsWith('.lock'))
+  return isGits ? raw : undefined
 }
 
 /** The list with `member` assigned to the workspace `id` only, or to none when `id` is ''. */
@@ -534,10 +538,11 @@ export function checkoutResult(stdout: string): { checkout: string } | { error: 
 
 /**
  * The worktrees of the repository holding the folder "$1", as `git worktree
- * list --porcelain` prints them (parseWorktrees reads them); with git's
- * settings as the other scripts here set them.
+ * list --porcelain -z` prints them (parseWorktrees reads them): each field
+ * ends with a NUL, each worktree with one more, so no folder's name can
+ * pass for a field. With git's settings as the other scripts here set them.
  */
-export const WORKTREES_SCRIPT = 'git -c core.hooksPath=/dev/null -c core.fsmonitor= -C "$1" worktree list --porcelain'
+export const WORKTREES_SCRIPT = 'git -c core.hooksPath=/dev/null -c core.fsmonitor= -C "$1" worktree list --porcelain -z'
 
 /**
  * The branches a workspace can go on with: each linked worktree (not the
@@ -545,7 +550,7 @@ export const WORKTREES_SCRIPT = 'git -c core.hooksPath=/dev/null -c core.fsmonit
  * not about to be pruned.
  */
 export function parseWorktrees(stdout: string): { path: string; branch: string }[] {
-  const blocks = stdout.split(/\n\s*\n/).map(b => b.split('\n').filter(Boolean)).filter(b => b.length > 0)
+  const blocks = stdout.split('\0\0').map(b => b.split('\0').filter(Boolean)).filter(b => b.length > 0)
   return blocks.slice(1).flatMap(lines => {
     const path = lines.find(l => l.startsWith('worktree '))?.slice(9)
     const branch = branchFrom(lines.find(l => l.startsWith('branch refs/heads/'))?.slice(18))
@@ -554,8 +559,27 @@ export function parseWorktrees(stdout: string): { path: string; branch: string }
   })
 }
 
-/** The branch checked out in the folder "$1", by its short name; nothing for a detached HEAD. */
-export const BRANCH_SCRIPT = 'git -c core.hooksPath=/dev/null -c core.fsmonitor= -C "$1" symbolic-ref --short -q HEAD'
+/**
+ * Where the folder "$1" is in its repository, `main` (the main checkout, or
+ * in it) or `linked` (a linked worktree), then the branch checked out there
+ * by its short name (none for a detached HEAD); nothing outside git.
+ */
+export const BRANCH_SCRIPT = [
+  'g() { git -c core.hooksPath=/dev/null -c core.fsmonitor= "$@"; }',
+  'own=$(g -C "$1" rev-parse --path-format=absolute --git-dir) || exit 1',
+  'common=$(g -C "$1" rev-parse --path-format=absolute --git-common-dir) || exit 1',
+  'if [ "$own" = "$common" ]; then echo main; else echo linked; fi',
+  'g -C "$1" symbolic-ref --short -q HEAD',
+  'exit 0',
+].join('\n')
+
+/** BRANCH_SCRIPT's answer: whether the folder is the main checkout, and its branch; undefined outside git. */
+export function headOf(stdout: string): { isMain: boolean; branch?: string } | undefined {
+  const [where, name = ''] = stdout.split('\n')
+  if (where !== 'main' && where !== 'linked') return undefined
+  const branch = branchFrom(name)
+  return { isMain: where === 'main', ...(branch === undefined ? {} : { branch }) }
+}
 
 /** Step 2 of a first prompt when the owner chose the branch: go on with it there, and start no other. */
 const goOnStep = (ws: Pick<Workspace, 'branch' | 'dir'>) =>

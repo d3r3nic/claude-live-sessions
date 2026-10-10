@@ -562,11 +562,14 @@ except ChildProcessError: pass
   const listed = w.parseWorktrees(spawnSync('/bin/sh', ['-c', w.WORKTREES_SCRIPT, 'sh', join(repo, 'sub')], { encoding: 'utf8', env }).stdout)
   check('go on: the worktrees offered are the linked ones with a branch, not the main checkout or a detached one',
     JSON.stringify(listed) === JSON.stringify([{ path: `${repo}-worktrees/feat-a`, branch: 'feat/a' }]), JSON.stringify(listed))
-  const head = dir => spawnSync('/bin/sh', ['-c', w.BRANCH_SCRIPT, 'sh', dir], { encoding: 'utf8', env })
-  const onFeat = head(`${repo}-worktrees/feat-a`)
-  const onProbe = head(`${repo}-worktrees/probe`)
-  check('go on: the branch checked out where the folder is; none for a detached HEAD',
-    onFeat.stdout === 'feat/a\n' && onProbe.stdout === '' && onProbe.status !== 0, `${JSON.stringify(onFeat.stdout)} ${JSON.stringify(onProbe.stdout)} ${onProbe.status}`)
+  const head = dir => w.headOf(spawnSync('/bin/sh', ['-c', w.BRANCH_SCRIPT, 'sh', dir], { encoding: 'utf8', env }).stdout)
+  const seen = [head(`${repo}-worktrees/feat-a`), head(`${repo}-worktrees/probe`), head(repo), head(join(repo, 'sub')), head(scratch)]
+  check('go on: the branch checked out where the folder is; none for a detached HEAD; the main checkout (or a folder in it) known as such; nothing outside git',
+    JSON.stringify(seen) === JSON.stringify([{ isMain: false, branch: 'feat/a' }, { isMain: false }, { isMain: true, branch: 'main' }, { isMain: true, branch: 'main' }, undefined]), JSON.stringify(seen))
+  // a folder named with a newline and a field: offered only as the folder it is (the list is read NUL-separated)
+  git('-C', repo, 'worktree', 'add', '-q', '--detach', `${repo}-worktrees/x\nbranch refs/heads/evil`)
+  const forged = w.parseWorktrees(spawnSync('/bin/sh', ['-c', w.WORKTREES_SCRIPT, 'sh', repo], { encoding: 'utf8', env }).stdout)
+  check('go on: a folder whose name forges a branch line is not offered', JSON.stringify(forged.map(x => x.branch)) === '["feat/a"]', JSON.stringify(forged))
   // the projects the form offers: main checkouts only; never what is inside a .git, a hidden folder or a worktrees folder
   const fakeHome = join(scratch, 'projects-home')
   for (const d of ['dev/a/.git/inner/.git', 'dev/b/.git', 'dev/b-worktrees/feat/.git', '.hidden/c/.git', 'Library/d/.git']) mkdirSync(join(fakeHome, d), { recursive: true })
