@@ -225,6 +225,12 @@ export type RelayEvent = { kind: string; text: string; workspace: string; agent?
  * could not be, what is the owner's, a hold, a compaction.
  */
 export function eventOf(ws: Pick<Workspace, 'id' | 'name'>, step: Step, outcome: string): RelayEvent | undefined {
+  const event = eventFor(ws, step, outcome)
+  // one line of a few hundred characters at most: an append that size is never split
+  return event === undefined ? undefined : { ...event, text: event.text.slice(0, 500) }
+}
+
+function eventFor(ws: Pick<Workspace, 'id' | 'name'>, step: Step, outcome: string): RelayEvent | undefined {
   if (outcome === 'taken' || outcome === 'in-mode') return undefined
   const at = { workspace: ws.id }
   if (step.kind === 'compact') return outcome === 'passed' ? { ...at, kind: 'compact', text: `${ws.name}: ${NAME[step.to]} compacting (its context ${step.filled}% full)`, agent: step.to } : undefined
@@ -234,21 +240,36 @@ export function eventOf(ws: Pick<Workspace, 'id' | 'name'>, step: Step, outcome:
       ? { ...at, kind: 'relay', text: `${ws.name}: ${step.from === undefined ? '' : `${NAME[step.from]} → `}${NAME[step.to]}: ${step.line}`, agent: step.to }
       : { ...at, kind: 'failed', text: `${ws.name}: not passed to ${NAME[step.to]}: ${why}`, agent: step.to }
   }
+  // a tell that did not happen (its ledger step could not be made) is no event
+  if (outcome !== 'told') return undefined
   const kind = step.key.startsWith('cap-') || step.key.startsWith('wait-') ? 'waits' : step.isForOwner ? 'needs' : 'notify'
   return { ...at, kind, text: step.text, ...(step.from === undefined ? {} : { agent: step.from }) }
 }
 
 /**
- * Adds the JSON event "$2" as a line of the event log "$1", made if need be;
- * past 2000 lines, the last 1000 are kept. One `>>` a line, so sessions
- * writing at once never mix their lines.
+ * Adds the JSON event "$2" (a few hundred characters at most, so one append
+ * that is never split or mixed with another session's) as a line of the
+ * event log "$1", made if need be. Past 1000 lines the log is renamed to
+ * "$1.1" (the one before it dropped) and a new one begun: a rename, so a
+ * session appending meanwhile adds to the old one and nothing is lost; one
+ * session at a time does it.
  */
 export const EVENT_SCRIPT = [
   'f=$1; line=$2',
   'mkdir -p "$(dirname "$f")" || exit 0',
   `printf '%s\n' "$line" >> "$f"`,
-  'n=$(/usr/bin/wc -l < "$f" | /usr/bin/tr -d " ")',
-  'if [ "$n" -gt 2000 ]; then /usr/bin/tail -n 1000 "$f" > "$f.$$" && /bin/mv "$f.$$" "$f"; fi',
+  'n=$(/usr/bin/wc -l < "$f" 2>/dev/null | /usr/bin/tr -d " ")',
+  '[ "${n:-0}" -gt 1000 ] || exit 0',
+  // one session moves it, under a lock (one left by a session that died goes after a minute), counting again first:
+  // two moving it at once would put the new, short log over the one just moved
+  'lock="$f.lock"',
+  'if /bin/mkdir "$lock" 2>/dev/null; then',
+  '  n=$(/usr/bin/wc -l < "$f" 2>/dev/null | /usr/bin/tr -d " ")',
+  '  if [ "${n:-0}" -gt 1000 ]; then /bin/mv -f "$f" "$f.1"; fi',
+  '  /bin/rmdir "$lock"',
+  'elif [ -n "$(/usr/bin/find "$lock" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then',
+  '  /bin/rmdir "$lock" 2>/dev/null',
+  'fi',
   'exit 0',
 ].join('\n')
 

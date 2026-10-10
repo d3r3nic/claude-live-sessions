@@ -859,101 +859,124 @@ except ChildProcessError: pass
   }
 }
 
-// the ops screen, drawn from this Mac's own snapshot (read only) and an event log of its own: every frame exactly the
-// window's size (no row wraps or scrolls), each row knowing what a click on it opens
+// the ops screen, from a snapshot and event log of its own: every frame exactly the window's size (widths measured
+// apart from the screen's own code), each row knowing what a click opens; real clicks in a pty on a private tmux
+// server; the terminal given back however it ends; a snapshot of another version waited on, never drawn; the
+// relay's event log taking lines from many sessions at once
 {
-  const snapshotFile = join(home, 'Library', 'Caches', 'live-sessions', 'snapshot.json')
-  if (existsSync(snapshotFile)) {
-    const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'live-sessions-ops-')))
-    try {
-      const snap = JSON.parse(readFileSync(snapshotFile, 'utf8')).snapshot
-      const ws = snap.workspaces[0]?.id ?? 'none'
-      const events = join(scratch, 'events.jsonl')
-      writeFileSync(events, [
-        JSON.stringify({ at: Date.now() - 60_000, kind: 'relay', text: 'passed to Codex', workspace: ws, agent: 'codex' }),
-        'not json',
-        JSON.stringify({ at: Date.now() - 30_000, kind: 'needs', text: '要確認 · the owner is needed 🚨', workspace: '../etc' }),
-        JSON.stringify({ at: 'later', kind: 'x', text: 'no time' }),
-      ].join('\n') + '\n')
-      const draw = (cols, rows, extra = []) => spawnSync(process.execPath, ['--no-warnings', join(import.meta.dirname, '..', 'ops', 'ops.mjs'), '--frame', ...extra], {
-        encoding: 'utf8', env: { ...process.env, COLS: String(cols), ROWS: String(rows), LIVE_SESSIONS_EVENTS: events },
-      })
-      const cellsOf = text => [...text.replace(/\x1b\[[0-9;]*m/g, '')].reduce((n, ch) => {
-        const cp = ch.codePointAt(0)
-        return n + ((cp >= 0x1100 && cp <= 0x115f) || (cp >= 0x2e80 && cp <= 0xa4cf) || (cp >= 0xac00 && cp <= 0xd7a3) || (cp >= 0xf900 && cp <= 0xfaff) || (cp >= 0xfe30 && cp <= 0xfe4f) || (cp >= 0xff00 && cp <= 0xff60) || (cp >= 0xffe0 && cp <= 0xffe6) || (cp >= 0x1f300 && cp <= 0x1faff) ? 2 : 1)
-      }, 0)
-      const sizes = [[80, 24], [120, 40], [200, 60], [60, 12]]
-      const exact = sizes.map(([cols, rows]) => {
-        const lines = draw(cols, rows).stdout.replace(/\n$/, '').split('\n')
-        return lines.length === rows && lines.every(l => cellsOf(l) === cols) ? 'ok' : `${cols}x${rows}: ${lines.length} rows, widths ${[...new Set(lines.map(cellsOf))].join(',')}`
-      })
-      check('ops: every frame is the window\'s size exactly, wide characters and all', exact.every(r => r === 'ok'), exact.filter(r => r !== 'ok').join(' | '))
-      const targets = JSON.parse(draw(120, 40, ['--targets']).stdout)
-      const plain = draw(120, 40, ['--plain']).stdout.split('\n')
-      const relayRow = plain.findIndex(l => l.includes('passed to Codex'))
-      const needsRow = plain.findIndex(l => l.includes('the owner is needed'))
-      // a real click, in a terminal: on Codex's side of a workspace's agent row, Codex's pane gets the keys (a private
-      // tmux server; the workspace never opened from /sessions here, so no window opens, and the screen says so)
-      const socket = `live-sessions-ops-${process.pid}`
-      const t = (...args) => spawnSync('tmux', ['-L', socket, '-f', '/dev/null', ...args], { encoding: 'utf8' })
-      try {
-        t('new-session', '-d', '-s', 'ws-opsx', '-n', 'peers', 'sleep 60')
-        t('split-window', '-h', '-t', '=ws-opsx:peers', 'sleep 60')
-        const [left, right] = t('list-panes', '-t', '=ws-opsx:peers', '-F', '#{pane_id}').stdout.trim().split('\n')
-        t('select-pane', '-t', left)
-        const fixture = join(scratch, 'snapshot.json')
-        writeFileSync(fixture, JSON.stringify({ snapshot: {
-          claude: [], codex: [], places: {}, envs: [''], problems: [], checkedAt: Date.now(),
-          workspaces: [{ id: 'opsx', name: 'Ops X', env: '', dir: scratch, createdAt: 1 }],
-          tmux: { panes: { ttys990: { session: 'ws-opsx', window: 'claude', pane: left }, ttys991: { session: 'ws-opsx', window: 'codex', pane: right } }, clients: {} },
-        } }))
-        const py = spawnSync('python3', ['-c', [
-          'import os, pty, sys, time, select, struct, fcntl, termios',
-          'pid, fd = pty.fork()',
-          'if pid == 0:',
-          '    os.execvpe(sys.argv[1], sys.argv[1:], os.environ)',
-          'fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 120, 0, 0))',
-          'out = b""',
-          'def drain(s):',
-          '    global out',
-          '    end = time.time() + s',
-          '    while time.time() < end:',
-          '        r, _, _ = select.select([fd], [], [], 0.1)',
-          '        if r:',
-          '            try: out += os.read(fd, 65536)',
-          '            except OSError: return',
-          'drain(1.5)',
-          'os.write(fd, b"\x1b[<0;100;5M\x1b[<0;100;5m")',
-          'drain(1.5)',
-          'os.write(fd, b"q")',
-          'drain(0.5)',
-          'sys.stdout.write("SAID:" + ("open Ops X once from /sessions first" in out.decode("utf8", "replace")).__str__())',
-        ].join('\n'), process.execPath, '--no-warnings', join(import.meta.dirname, '..', 'ops', 'ops.mjs')], {
-          encoding: 'utf8', timeout: 20_000,
-          env: { ...process.env, LIVE_SESSIONS_SNAPSHOT: fixture, LIVE_SESSIONS_EVENTS: join(scratch, 'none.jsonl'), LIVE_SESSIONS_TMUX_SOCKET: socket, HOME: scratch },
-        })
-        const active = t('display-message', '-p', '-t', '=ws-opsx:peers', '#{pane_id}').stdout.trim()
-        check('ops: a click on Codex\'s side of an agent row gives Codex\'s pane the keys, and the screen says what it did', active === right && py.stdout.includes('SAID:True'), `${active} vs ${right}; ${py.stdout.slice(-20)} ${py.stderr.slice(-200)}`)
-      } finally {
-        t('kill-server')
-        rmSync(join(process.env.TMUX_TMPDIR ?? '/tmp', `tmux-${process.getuid()}`, socket), { force: true })
-      }
-      // the relay's event log: a line each, made with its folder; past 2000 lines, the last 1000 kept
-      const log = join(scratch, 'log', 'events.jsonl')
-      for (let i = 0; i < 2001; i++) {
-        if (i < 3 || i > 1995) spawnSync('/bin/sh', ['-c', r.EVENT_SCRIPT, 'sh', log, JSON.stringify({ at: i, kind: 'relay', text: `it's "#${i}"` })])
-        else if (i === 3) writeFileSync(log, readFileSync(log, 'utf8') + Array.from({ length: 1993 }, (_, k) => JSON.stringify({ at: k + 3 })).join('\n') + '\n')
-      }
-      const logged = readFileSync(log, 'utf8').trim().split('\n')
-      check('ops: the event log takes each event as one line; past 2000 lines its last 1000 are kept', logged.length === 1000 && JSON.parse(logged.at(-1)).text === 'it\'s "#2000"', `${logged.length} lines`)
-      check('ops: an event opens its workspace at its agent; one naming no workspace this reads opens nothing; bad lines are left out',
-        targets.length === 40 && (ws === 'none' || JSON.stringify(targets[relayRow]) === JSON.stringify({ kind: 'workspace', id: ws, agent: 'codex' })) && needsRow > 0 && targets[needsRow] === null && !plain.some(l => l.includes('no time')),
-        `${relayRow} ${JSON.stringify(targets[relayRow])} ${needsRow}`)
-    } finally {
-      rmSync(scratch, { recursive: true, force: true })
-    }
-  } else {
-    console.log('skip ops screen: no snapshot on this Mac yet')
+  const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'live-sessions-ops-')))
+  const opsFile = join(import.meta.dirname, '..', 'ops', 'ops.mjs')
+  const socket = `live-sessions-ops-${process.pid}`
+  const t = (...args) => spawnSync('tmux', ['-L', socket, '-f', '/dev/null', ...args], { encoding: 'utf8' })
+  try {
+    t('new-session', '-d', '-s', 'ws-opsx', '-n', 'peers', 'sleep 60')
+    t('split-window', '-h', '-t', '=ws-opsx:peers', 'sleep 60')
+    t('set-option', '-t', 'ws-opsx', '@live-sessions-workspace', '1')
+    const [left, right] = t('list-panes', '-t', '=ws-opsx:peers', '-F', '#{pane_id}').stdout.trim().split('\n')
+    const now = Date.now()
+    const snapshot = (fields = {}) => JSON.stringify({ version: c.SHARED_VERSION, snapshot: {
+      claude: [], codex: [], places: {}, envs: [''], problems: [], checkedAt: now,
+      workspaces: [
+        { id: 'opsx', name: 'Ops X 要確認 ✅ é', env: '', dir: scratch, createdAt: 1 },
+        { id: 'stopped', name: 'Stopped one', env: '', dir: scratch, createdAt: 2 },
+        { id: '../..', name: 'Forged', env: '', dir: scratch, createdAt: 3 },
+      ],
+      tmux: { panes: { ttys990: { session: 'ws-opsx', window: 'claude', pane: left }, ttys991: { session: 'ws-opsx', window: 'codex', pane: right } }, clients: {} },
+      ...fields,
+    } })
+    const snapFile = join(scratch, 'snapshot.json')
+    writeFileSync(snapFile, snapshot())
+    const events = join(scratch, 'events.jsonl')
+    writeFileSync(events, [
+      JSON.stringify({ at: now - 60_000, kind: 'relay', text: 'Ops X: Codex → Claude: READY FOR CLAUDE · x · y@1', workspace: 'opsx', agent: 'claude' }),
+      'not json',
+      JSON.stringify({ at: now - 30_000, kind: 'needs', text: '要確認 ✅ é \u009b31m ‮evil', workspace: '../etc' }),
+      // a combining mark right after a colour code: a cluster of its own, no width
+      JSON.stringify({ at: now - 20_000, kind: 'relay', text: '\u0301\u0301 marks first', workspace: 'opsx' }),
+      JSON.stringify({ at: 'later', kind: 'x', text: 'no time' }),
+    ].join('\n') + '\n')
+    const env = { ...process.env, LIVE_SESSIONS_SNAPSHOT: snapFile, LIVE_SESSIONS_EVENTS: events, LIVE_SESSIONS_TMUX_SOCKET: socket, HOME: scratch }
+    const draw = (cols, rows, extra = []) => spawnSync(process.execPath, ['--no-warnings', opsFile, '--frame', ...extra], { encoding: 'utf8', env: { ...env, COLS: String(cols), ROWS: String(rows) } }).stdout
+    // widths as Python's own Unicode data gives them: wide (W, F) two, combining marks and format characters none
+    const widths = spawnSync('python3', ['-c', [
+      'import sys, unicodedata, re, json',
+      'def w(s):',
+      '    s = re.sub(r"\\x1b\\[[0-9;?]*[A-Za-z]", "", s)',
+      '    return sum(0 if unicodedata.category(c) in ("Mn", "Me", "Cf") else 2 if unicodedata.east_asian_width(c) in ("W", "F") else 1 for c in s)',
+      'print(json.dumps([w(l) for l in sys.stdin.read().rstrip("\\n").split("\\n")]))',
+    ].join('\n')], { input: draw(120, 30), encoding: 'utf8' }).stdout
+    const measured = JSON.parse(widths || '[]')
+    check('ops: a frame is the window\'s size exactly, wide and combining characters too, by Unicode\'s own widths', measured.length === 30 && measured.every(n => n === 120), JSON.stringify([...new Set(measured)]))
+    const plain = draw(120, 30, ['--plain'])
+    check('ops: control characters (C1, direction overrides) from what agents wrote never reach the terminal', !/[\u0080-\u009f‪-‮]/.test(plain))
+    const small = draw(30, 6).replace(/\n$/, '').split('\n').length
+    check('ops: a window too small still gets a frame its size', small === 6, String(small))
+    const targets = JSON.parse(draw(120, 30, ['--targets']))
+    const rows = plain.split('\n')
+    const at = text => rows.findIndex(l => l.includes(text))
+    check('ops: rows open what they are about; a forged workspace id and an event naming none open nothing; bad lines left out',
+      JSON.stringify(targets[at('READY FOR CLAUDE · x')]) === JSON.stringify({ kind: 'workspace', id: 'opsx', agent: 'claude' }) && targets[at('Forged')] === null && targets[at('evil')] === null && at('no time') < 0,
+      `${at('READY FOR CLAUDE · x')} ${at('Forged')}`)
+    // the screen, live in a terminal: clicks, keys, signals
+    const live = (script, extraEnv = {}) => spawnSync('python3', ['-c', [
+      'import os, pty, sys, time, select, struct, fcntl, termios, signal',
+      'pid, fd = pty.fork()',
+      'if pid == 0:',
+      '    os.execvpe(sys.argv[1], sys.argv[1:], os.environ)',
+      'fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 120, 0, 0))',
+      'out = b""',
+      'def drain(s):',
+      '    global out',
+      '    end = time.time() + s',
+      '    while time.time() < end:',
+      '        r, _, _ = select.select([fd], [], [], 0.1)',
+      '        if r:',
+      '            try: out += os.read(fd, 65536)',
+      '            except OSError: return',
+      'drain(1.5)',
+      script,
+      'drain(1.0)',
+      'try:',
+      '    _, status = os.waitpid(pid, os.WNOHANG)',
+      'except ChildProcessError:',
+      '    status = 0',
+      'sys.stdout.write(json.dumps({"out": out.decode("utf8", "replace"), "status": status}) if False else out.decode("utf8", "replace"))',
+    ].join('\n'), process.execPath, '--no-warnings', opsFile], { encoding: 'utf8', timeout: 30_000, env: { ...env, ...extraEnv } }).stdout
+    const rowOf = text => at(text) + 1
+    // Claude's side of the agent row, then Codex's: each pane gets the keys; a stopped workspace: said, nothing done
+    t('select-pane', '-t', right)
+    const agentRow = rowOf('[CLAUDE]')
+    const outA = live(`os.write(fd, b"\\x1b[<0;6;${agentRow}M\\x1b[<0;6;${agentRow}m")`)
+    const activeA = t('display-message', '-p', '-t', '=ws-opsx:peers', '#{pane_id}').stdout.trim()
+    const outB = live(`os.write(fd, b"\\x1b[<0;100;${agentRow}M\\x1b[<0;100;${agentRow}m")`)
+    const activeB = t('display-message', '-p', '-t', '=ws-opsx:peers', '#{pane_id}').stdout.trim()
+    const outC = live(`os.write(fd, b"\\x1b[<0;10;${rowOf('Stopped one')}M")`)
+    check('ops: a click on either side of an agent row gives that agent\'s pane the keys; a stopped workspace is left to /sessions',
+      activeA === left && activeB === right && outC.includes('Stopped one is not running: open it from /sessions'), `${activeA}/${left} ${activeB}/${right}`)
+    void outA; void outB
+    // however it ends, the terminal is given back: q (typed twice too), Ctrl-C, a signal
+    const restored = out => out.includes('\x1b[?1049l') && out.includes('\x1b[?1000l') && out.includes('\x1b[?25h') && out.includes('\x1b[?7h')
+    const byKeys = live('os.write(fd, b"qq")')
+    const bySignal = live('os.kill(pid, signal.SIGINT)')
+    check('ops: the terminal is given back as it was, by q, qq or a signal', restored(byKeys) && restored(bySignal))
+    // a snapshot another version wrote (an older plugin): waited on, said, never drawn
+    writeFileSync(snapFile, JSON.stringify({ version: 6, snapshot: { claude: [], codex: [] } }))
+    const old = live('os.write(fd, b"\\r")')
+    check('ops: a snapshot of another version is said and never drawn, nothing broken', old.includes('No snapshot of this version') && !old.includes('\x1b[?1049h'))
+    writeFileSync(snapFile, snapshot())
+    // the relay's event log: 40 sessions writing at once, past the point where it moves to .1: every line whole, none lost
+    const log = join(scratch, 'log', 'events.jsonl')
+    mkdirSync(dirname(log), { recursive: true })
+    writeFileSync(log, Array.from({ length: 990 }, (_, k) => JSON.stringify({ at: k })).join('\n') + '\n')
+    const writers = Array.from({ length: 40 }, (_, k) => spawn('/bin/sh', ['-c', r.EVENT_SCRIPT, 'sh', log, JSON.stringify({ at: 1000 + k, kind: 'relay', text: `it's "#${k}" ${'x'.repeat(450)}` })]))
+    await Promise.all(writers.map(p => new Promise(res => p.on('close', res))))
+    const lines = [log + '.1', log].flatMap(f => (existsSync(f) ? readFileSync(f, 'utf8').trim().split('\n') : []))
+    const parsed = lines.flatMap(l => { try { return [JSON.parse(l)] } catch { return [] } })
+    check('ops: the event log takes lines from 40 sessions at once whole, none lost as it moves to .1', parsed.length === lines.length && parsed.filter(e => e.at >= 1000).length === 40 && existsSync(log + '.1'), `${parsed.length}/${lines.length}, ${parsed.filter(e => e.at >= 1000).length} new`)
+  } finally {
+    t('kill-server')
+    rmSync(join(process.env.TMUX_TMPDIR ?? '/tmp', `tmux-${process.getuid()}`, socket), { force: true })
+    rmSync(scratch, { recursive: true, force: true })
   }
 }
 

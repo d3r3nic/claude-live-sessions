@@ -2535,10 +2535,11 @@ describe('the context guard', () => {
     let percent = 61
     on('session.usage', async () => ({ value: { startedAt: NOW, context: { tokens: percent * 10_000, window: 1_000_000, percent }, rateLimits: [] } }))
     const compacted: (string | undefined)[] = []
-    // the engine's compaction, recorded (a test's veto answers it)
+    // the engine's compaction, recorded: done (a summary left), or vetoed
+    let isVetoed = false
     on('session.compact', async ($, e) => {
       compacted.push(e.instructions)
-      return { skip: 'recorded by the test' }
+      return isVetoed ? { skip: 'vetoed by the test' } : { messages: [{ role: 'user' as const, text: 'summary', toolUses: [] }] }
     })
     // the engine's own end of a turn
     on('turn.complete', async ($, e) => ({ text: e.answer }))
@@ -2562,6 +2563,16 @@ describe('the context guard', () => {
     files.set(`${ledger}/pass-turn-c1`, '')
     await wait(4_000)
     expect(compacted).toEqual([claudeKeep('Practice RBAC')])
+    // done: logged for the ops screen
+    expect(world.events.at(-1)).toMatchObject({ kind: 'compact', workspace: 'practice-rbac', agent: 'claude', text: 'Practice RBAC: Claude compacted (its context was 61% full)' })
+    // vetoed (a hook, a turn begun): asked, not logged
+    isVetoed = true
+    await end(`Done.\n${READY_CODEX}`, 'turn-v1')
+    files.set(`${ledger}/pass-turn-v1`, '')
+    await wait(4_000)
+    expect(world.events.filter(e => e.kind === 'compact')).toHaveLength(1)
+    expect(compacted).toHaveLength(2)
+    isVetoed = false
     // its final reply written a moment after the turn's end: read again until it is
     world.turns = { 'session-104': `busy\tturn-r0\t${new Date(NOW).toISOString()}\t` }
     await $.turn.complete({ answer: `Done.\n${READY_CODEX}`, durationMs: 1_000, isAborted: false, turnId: 'turn-r1', reason: 'answer' })
@@ -2569,7 +2580,7 @@ describe('the context guard', () => {
     world.turns = { 'session-104': `done\tturn-r1\t${new Date(NOW).toISOString()}\t${READY_CODEX}` }
     files.set(`${ledger}/pass-turn-r1`, '')
     await wait(4_000)
-    expect(compacted).toHaveLength(2)
+    expect(compacted).toHaveLength(3)
     // cleared into another conversation while it waited: no
     await end(`Done.\n${READY_CODEX}`, 'turn-s1')
     await wait(2_000)
@@ -2577,7 +2588,7 @@ describe('the context guard', () => {
     files.set(`${ledger}/pass-turn-s1`, '')
     await wait(4_000)
     world.sessionId = undefined
-    expect(compacted).toHaveLength(2)
+    expect(compacted).toHaveLength(3)
     // a cue for the owner: no
     await end('Asking.\nNEEDS USER · peer-coding/feat-rbac · feat/rbac@abc1234', 'turn-c2')
     files.set(`${ledger}/pass-turn-c2`, '')
@@ -2596,7 +2607,7 @@ describe('the context guard', () => {
     await end(`Done.\n${READY_CODEX}`, 'turn-c6')
     files.set(`${ledger}/pass-turn-c6`, '')
     await wait(4_000)
-    expect(compacted).toHaveLength(2)
+    expect(compacted).toHaveLength(3)
     // the relay in notify mode, or the guard off: no
     percent = 90
     for (const relay of [relayOn({ mode: 'notify' }), relayOn()]) {
@@ -2607,7 +2618,7 @@ describe('the context guard', () => {
       files.set(`${ledger}/pass-turn-n-${relay.mode}`, '')
       await wait(4_000)
     }
-    expect(compacted).toHaveLength(2)
+    expect(compacted).toHaveLength(3)
   })
 
   test('Compact at, in a workspace\'s actions: 50, 60, 70, 80 percent, off', async ($, on) => {
@@ -2640,6 +2651,9 @@ describe('the ops screen', () => {
     expect(eventOf(ws, { kind: 'tell', key: 'cap-c4', text: 'held', isForOwner: true }, 'told')).toEqual({ kind: 'waits', text: 'held', workspace: 'rbac' })
     expect(eventOf(ws, { kind: 'compact', key: 'compact-x1', to: 'codex', pane: '%2', line: '/compact', filled: 62 }, 'passed')).toEqual({ kind: 'compact', text: 'RBAC: Codex compacting (its context 62% full)', workspace: 'rbac', agent: 'codex' })
     expect(eventOf(ws, { kind: 'compact', key: 'compact-x1', to: 'codex', pane: '%2', line: '/compact', filled: 62 }, 'unsent')).toBeUndefined()
+    // a tell that did not happen is no event; an event's text is cut to 500 characters
+    expect(eventOf(ws, { kind: 'tell', key: 'tell-c2', from: 'claude', text: 'x', isForOwner: true }, 'failed')).toBeUndefined()
+    expect(eventOf(ws, { ...pass, line: `READY FOR CLAUDE · ${'x'.repeat(2000)}` }, 'passed')?.text).toHaveLength(500)
   })
 
   test('the collecting session writes what the relay did to the event log', async ($, on) => {

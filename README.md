@@ -86,18 +86,18 @@ The peer-coding rules end every turn with one cue line for the owner to pass on:
 
 ## Ops screen
 
-`Ops screen`, beside `+ New workspace` in the pane (in Terminal.app), opens a full-screen console in a Terminal window of its own (`node ops/ops.mjs`, from this plugin's folder; Node 22.6 or later):
+`Ops screen`, beside `+ New workspace` in the pane (in Terminal.app), opens a full-screen console in a Terminal window of its own (`node ops/ops.mjs`, from this plugin's folder; Node 22.18 or later, which runs TypeScript as it is: an older one says so in that window):
 
 - **Nodes:** each workspace, its Claude and Codex (working or idle), a packet crossing the link after each hand-off, the relay's mode, its count of hand-offs in a row, and what it last did; `OPERATOR INPUT REQUIRED` when it waits for you.
 - **Grid:** the repositories, an agent a cell.
 - **Event log:** what the relay did (hand-offs, what is yours, compactions, holds) and sessions starting, working, going idle and ending.
 - **Clicks open what a row is about:** a workspace's window (brought up where a terminal is attached to it, else opened where it was last), at Claude's or Codex's pane by the side of the agent row you click, or a session's own Terminal tab. The bottom line says what it did.
 - `t` changes the theme (MATRIX, AMBER, CYBER, ICE, PAPER; each paints its own background, kept in `~/Library/Application Support/live-sessions/ops.json`); `q` quits. The screen never scrolls: rows are cut to the window, the mouse is taken.
-- It reads only: the shared snapshot and the relay's event log (`~/Library/Caches/live-sessions/events.jsonl`: the collecting session adds a line for each hand-off passed or not, each cue for you, each hold and each compaction; its last 1000 lines are kept).
+- It reads only: the shared snapshot (of this plugin's version) and the relay's event log (`~/Library/Caches/live-sessions/events.jsonl`: the collecting session adds a line for each hand-off passed or not, each cue for you, each hold and each compaction; past 1000 lines it moves to `events.jsonl.1`). A click acts only on a workspace whose tmux session is running and marked as its own; one not running is opened from /sessions, which checks it first. However it ends (a key, a signal, an error), the terminal is given back as it was.
 
 ## Where it reads from
 
-Nothing in Claude's or Codex's own files is ever written. Collecting reads, and writes only the mod's own shared snapshot, with one exception: for a workspace whose relay you turned on, it also types each hand-off into the other agent's pane and records that in the workspaces file and the relay's own folder (The relay, above). Otherwise the only actions on a session are the ones you press: bringing a tab to the front, attaching, `To background` (which ends and relaunches the session you chose), and opening a workspace.
+Nothing in Claude's or Codex's own files is ever written. Collecting reads, and writes only the mod's own shared snapshot and the relay's event log, with one exception: for a workspace whose relay you turned on, it also types each hand-off into the other agent's pane and records that in the workspaces file and the relay's own folder (The relay, above). Otherwise the only actions on a session are the ones you press: bringing a tab to the front, attaching, `To background` (which ends and relaunches the session you chose), and opening a workspace.
 
 | What | From |
 | --- | --- |

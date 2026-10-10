@@ -95,6 +95,8 @@ import {
   workDir,
   WORKING_MS,
   isFromTerminal,
+  isSnapshot,
+  SHARED_VERSION,
 } from './collect'
 import type { CodexProc, Item, Proc, ThreadRow } from './collect'
 
@@ -125,7 +127,6 @@ const PS_ENV = { LC_ALL: 'C', TZ: 'UTC' }
  * One snapshot shared by every session on the machine, so the processes run
  * once per interval however many sessions show it.
  */
-const SHARED_VERSION = 7
 const sharedPath = (home: string) => `${home}/Library/Caches/live-sessions/snapshot.json`
 
 const EMPTY: Snapshot = {
@@ -401,14 +402,6 @@ async function collect($: EngineInterface, home: string, now: number): Promise<S
   return { claude, codex, places, workspaces, envs, tmux, checkedAt: now, problems }
 }
 
-const isSnapshot = (v: unknown): v is Snapshot => {
-  const o = v as Partial<Snapshot> | null
-  return (
-    typeof o === 'object' && o !== null && Array.isArray(o.claude) && Array.isArray(o.codex) &&
-    typeof o.places === 'object' && o.places !== null && Array.isArray(o.problems) && typeof o.checkedAt === 'number' &&
-    Array.isArray(o.workspaces) && Array.isArray(o.envs) && typeof o.tmux === 'object' && o.tmux !== null
-  )
-}
 
 /** The workspaces; `isReadable` false when the file is there but is not one, which nothing then overwrites. */
 async function readWorkspaces($: EngineInterface, home: string): Promise<{ list: Workspace[]; isReadable: boolean }> {
@@ -1226,8 +1219,9 @@ async function compactAtHandOff($: EngineInterface, answer: string) {
   }
   // still the same conversation (not cleared or resumed into another while it waited)
   if ((await $.session.id()) !== id) return
-  await logEvent($, home, { kind: 'compact', text: `${ws.name}: Claude compacting (its context ${Math.round(context.percent)}% full)`, workspace: ws.id, agent: 'claude' })
-  await $.session.compact({ instructions: claudeKeep(ws.name) }).catch(() => undefined)
+  // logged once it has been done (not refused, not vetoed)
+  const done = await $.session.compact({ instructions: claudeKeep(ws.name) }).then(r => !('skip' in r && r.skip !== undefined)).catch(() => false)
+  if (done) await logEvent($, home, { kind: 'compact', text: `${ws.name}: Claude compacted (its context was ${Math.round(context.percent)}% full)`, workspace: ws.id, agent: 'claude' })
 }
 
 /** Forgets a workspace (the command's `rm` and the pane's Remove): its tmux session keeps running. */

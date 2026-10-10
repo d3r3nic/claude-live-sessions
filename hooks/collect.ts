@@ -875,6 +875,20 @@ export function orderFrom(value: unknown): Record<string, string[]> | undefined 
   return Object.fromEntries(entries)
 }
 
+/** The shared snapshot's format: one written by another version is not read. */
+export const SHARED_VERSION = 7
+
+/** A snapshot, if the value is one (as read back from the shared file). */
+export const isSnapshot = (v: unknown): v is Snapshot => {
+  const o = v as Partial<Snapshot> | null
+  return (
+    typeof o === 'object' && o !== null && Array.isArray(o.claude) && Array.isArray(o.codex) &&
+    typeof o.places === 'object' && o.places !== null && Array.isArray(o.problems) && typeof o.checkedAt === 'number' &&
+    Array.isArray(o.workspaces) && Array.isArray(o.envs) && typeof o.tmux === 'object' && o.tmux !== null &&
+    typeof (o.tmux as { panes?: unknown }).panes === 'object' && (o.tmux as { panes?: unknown }).panes !== null
+  )
+}
+
 /** One session as the pane lists it, Claude's or Codex's alike. */
 export type Item = {
   key: string

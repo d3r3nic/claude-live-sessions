@@ -5,9 +5,18 @@
 //   node ops/ops.mjs --frame [--plain]     one frame, printed (COLS, ROWS, TICK); --targets prints what each row opens
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
-import { registerHooks } from 'node:module'
+import * as nodeModule from 'node:module'
+
+/** Said, and left on screen until a key (the window it runs in closes with it). */
+async function fail(text) {
+  process.stdout.write(`${text}\nPress return to close.\n`)
+  await new Promise(res => process.stdin.once('data', res))
+  process.exit(1)
+}
+// it runs the plugin's own TypeScript as it is: Node 22.18 or later (type stripping on, module hooks there)
+if (typeof nodeModule.registerHooks !== 'function') await fail(`The ops screen needs Node 22.18 or later; this is Node ${process.versions.node}.`)
 // the plugin imports its own files without an extension, as its engine resolves them; Node needs `.ts`
-registerHooks({
+nodeModule.registerHooks({
   resolve(specifier, context, nextResolve) {
     try {
       return nextResolve(specifier, context)
@@ -17,8 +26,13 @@ registerHooks({
     }
   },
 })
-const c = await import(new URL('../hooks/collect.ts', import.meta.url).href)
-const w = await import(new URL('../hooks/workspaces.ts', import.meta.url).href)
+let c, w
+try {
+  c = await import(new URL('../hooks/collect.ts', import.meta.url).href)
+  w = await import(new URL('../hooks/workspaces.ts', import.meta.url).href)
+} catch (error) {
+  await fail(`The ops screen needs Node 22.18 or later, which runs TypeScript as it is; this is Node ${process.versions.node} (${String(error).split('\n')[0]}).`)
+}
 
 const HOME = process.env.HOME
 const SNAPSHOT = process.env.LIVE_SESSIONS_SNAPSHOT ?? `${HOME}/Library/Caches/live-sessions/snapshot.json`
@@ -54,41 +68,45 @@ function nextTheme() {
     writeFileSync(PREFS, JSON.stringify({ theme: themeName }))
   } catch {}
 }
-const strip = s => s.replace(/\x1b\[[0-9;]*m/g, '')
-// cells a character takes: two for wide ones (CJK, full-width forms, most emoji), one otherwise
-const cells = ch => {
-  const n = ch.codePointAt(0)
-  return (n >= 0x1100 && n <= 0x115f) || (n >= 0x2e80 && n <= 0xa4cf) || (n >= 0xac00 && n <= 0xd7a3) || (n >= 0xf900 && n <= 0xfaff) ||
-    (n >= 0xfe30 && n <= 0xfe4f) || (n >= 0xff00 && n <= 0xff60) || (n >= 0xffe0 && n <= 0xffe6) || (n >= 0x1f300 && n <= 0x1faff) ? 2 : 1
+const strip = s => s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')
+const graphemes = new Intl.Segmenter('en', { granularity: 'grapheme' })
+const isWideCode = n => (n >= 0x1100 && n <= 0x115f) || (n >= 0x2e80 && n <= 0xa4cf) || (n >= 0xac00 && n <= 0xd7a3) || (n >= 0xf900 && n <= 0xfaff) ||
+  (n >= 0xfe30 && n <= 0xfe4f) || (n >= 0xff00 && n <= 0xff60) || (n >= 0xffe0 && n <= 0xffe6) || (n >= 0x20000 && n <= 0x3fffd)
+/** Cells a grapheme takes: two for a wide one (CJK, full-width forms, an emoji shown as one, a joined one too), none for marks alone, else one. */
+const cells = g => {
+  if (/^[\p{M}\u200b-\u200d\u2060\ufe00-\ufe0f]+$/u.test(g)) return 0
+  if (/\p{Emoji_Presentation}|\ufe0f/u.test(g) || isWideCode(g.codePointAt(0))) return 2
+  return 1
 }
-const width = s => [...strip(s)].reduce((n, ch) => n + cells(ch), 0)
+const width = s => [...graphemes.segment(strip(s))].reduce((n, { segment }) => n + cells(segment), 0)
 /** A drawn line cut to `n` cells, its colour codes kept, so nothing ever wraps onto the next row. */
 function clip(line, n) {
   let used = 0
   let out = ''
-  for (const part of line.split(/(\x1b\[[0-9;]*m)/)) {
+  for (const part of line.split(/(\x1b\[[0-9;?]*[A-Za-z])/)) {
     if (part.startsWith('\x1b[')) {
       out += part
       continue
     }
-    for (const ch of part) {
-      if (used + cells(ch) > n) return out
-      used += cells(ch)
-      out += ch
+    for (const { segment } of graphemes.segment(part)) {
+      if (used + cells(segment) > n) return out
+      used += cells(segment)
+      out += segment
     }
   }
   return out
 }
 const pad = (s, n) => s + ' '.repeat(Math.max(0, n - width(s)))
-const cut = (s, n) => ([...s].length > n ? [...s].slice(0, Math.max(0, n - 1)).join('') + '…' : s)
-// text from the records, one line, no control characters
-const clean = s => String(s ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ')
+const cut = (s, n) => (width(s) > n ? clip(s, Math.max(0, n - 1)) + '…' : s)
+// text from the records, one line: no control characters (C0, C1), no invisible direction or joining controls
+const clean = s => String(s ?? '').replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g, ' ')
 const RAIN = 'ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄ01234567890ABCDEF<>/\\|=+*'
 
+/** The shared snapshot, when it is one of this version (an older plugin writes another shape): else undefined. */
 function load() {
   try {
     const raw = JSON.parse(readFileSync(SNAPSHOT, 'utf8'))
-    return { snap: raw.snapshot ?? raw, mtime: statSync(SNAPSHOT).mtimeMs }
+    return raw.version === c.SHARED_VERSION && c.isSnapshot(raw.snapshot) ? { snap: raw.snapshot, mtime: statSync(SNAPSHOT).mtimeMs } : undefined
   } catch {
     return undefined
   }
@@ -97,11 +115,12 @@ function load() {
 /** The relay's event log: one JSON event a line (`{ at, kind, text, workspace?, agent? }`), the newest last; the last 200 read. */
 function relayEvents() {
   try {
-    return readFileSync(EVENTS, 'utf8').trim().split('\n').slice(-200).flatMap(line => {
+    const read = file => (existsSync(file) ? readFileSync(file, 'utf8') : '')
+    return `${read(`${EVENTS}.1`)}\n${read(EVENTS)}`.trim().split('\n').slice(-200).flatMap(line => {
       try {
         const e = JSON.parse(line)
         if (typeof e.at !== 'number' || typeof e.kind !== 'string' || typeof e.text !== 'string') return []
-        const target = typeof e.workspace === 'string' && /^[a-z0-9-]{1,40}$/.test(e.workspace)
+        const target = typeof e.workspace === 'string' && WORKSPACE_ID.test(e.workspace)
           ? { kind: 'workspace', id: e.workspace, ...(e.agent === 'claude' || e.agent === 'codex' ? { agent: e.agent } : {}) }
           : undefined
         return [{ at: e.at, kind: clean(e.kind).slice(0, 7).toUpperCase(), text: clean(e.text), target }]
@@ -114,12 +133,18 @@ function relayEvents() {
   }
 }
 
+/** A workspace id as the plugin makes them: anything else names no workspace. */
+const WORKSPACE_ID = /^[a-z0-9-]{1,40}$/
+
 /** What a session's row opens: its own tab, or the workspace window it runs in, at its pane. */
 const targetOf = item => {
   const t = item.target
   if (t === undefined) return undefined
   if ('tty' in t) return { kind: 'tty', tty: t.tty }
-  if ('workspace' in t) return { kind: 'workspace', id: t.workspace.replace(/^ws-/, ''), agent: t.window === 'codex' ? 'codex' : 'claude' }
+  if ('workspace' in t) {
+    const id = t.workspace.replace(/^ws-/, '')
+    return WORKSPACE_ID.test(id) ? { kind: 'workspace', id, agent: t.window === 'codex' ? 'codex' : 'claude' } : undefined
+  }
   return undefined
 }
 
@@ -175,8 +200,8 @@ function frame(snap, now, cols, rows, tick, note = '') {
     const claude = ws.items.find(i => i.tool === 'claude')
     const codex = ws.items.find(i => i.tool === 'codex')
     const needs = relay?.status === 'needs you' || relay?.status === 'waits for you'
-    const node = { kind: 'workspace', id: ws.key }
-    line(` ${rgb(needs && tick % 6 < 3 ? G.red : G.hi, bold(`▓▒░ ${clean(ws.name)} ░▒▓`))}  ${rgb(G.lo, `env ${ws.env || 'default'} · ${ws.isAttached ? '● window open' : ws.isRunning ? '◐ hidden, running' : '○ stopped'}`)}`, node)
+    const node = WORKSPACE_ID.test(ws.key) ? { kind: 'workspace', id: ws.key } : undefined
+    line(` ${rgb(needs && tick % 6 < 3 ? G.red : G.hi, bold(`▓▒░ ${clean(ws.name)} ░▒▓`))}  ${rgb(G.lo, `env ${clean(ws.env) || 'default'} · ${ws.isAttached ? '● window open' : ws.isRunning ? '◐ hidden, running' : '○ stopped'}`)}`, node)
     const agent = (label, item) => {
       if (item === undefined) return rgb(G.dim, `[${label}] offline`)
       const bar = item.state === 'working' ? rgb(G.amber, '▁▂▃▅▇▅▃▂'.slice(tick % 8, (tick % 8) + 5).padEnd(5, '▁')) : rgb(G.dim, '·····')
@@ -193,9 +218,9 @@ function frame(snap, now, cols, rows, tick, note = '') {
     }
     // a click left of Codex's part opens Claude's pane; on it, Codex's
     const left = `   ${agent('CLAUDE', claude)}  ${link}  `
-    line(`${left}${agent('CODEX', codex)}`, { ...node, agent: 'claude', codexFrom: 1 + width(left) })
-    const mode = relay?.mode ?? 'off'
-    const combo = relay?.streak ?? 0
+    line(`${left}${agent('CODEX', codex)}`, node === undefined ? undefined : { ...node, agent: 'claude', codexFrom: 1 + width(left) })
+    const mode = clean(relay?.mode ?? 'off')
+    const combo = Number.isFinite(relay?.streak) ? relay.streak : 0
     line(`   ${rgb(G.lo, 'relay')} ${rgb(mode === 'auto' ? G.hi : G.lo, mode.toUpperCase())}  ${rgb(G.lo, 'combo')} ${rgb(combo > 0 ? G.amber : G.lo, `x${combo}`)}  ${rgb(G.lo, 'last')} ${rgb(needs ? G.red : G.mid, clean(relay?.status) || '—')}${relay?.at !== undefined ? rgb(G.lo, ` ${c.ago(now - relay.at)} ago`) : ''}`, node)
     if (needs) line(`   ${rgb(tick % 6 < 3 ? G.red : G.amber, bold('⚠ OPERATOR INPUT REQUIRED ⚠'))}  ${rgb(G.mid, 'click to open')}`, node)
     line()
@@ -233,41 +258,49 @@ function frame(snap, now, cols, rows, tick, note = '') {
   out.push(rgb(G.lo, '╚' + '═'.repeat(Math.max(0, inner - width(keys) - 2))) + rgb(note === '' ? G.mid : G.amber, keys) + rgb(G.lo, '══╝'))
   targets.push(undefined)
   // the theme's background under every cell, to the line's end
-  return { lines: out.map(l => bgOn() + clip(l, cols) + ' '.repeat(Math.max(0, cols - width(l))) + `${ESC}49m`), targets }
+  // and erased to the line's end, so nothing of an earlier frame stays where a row came out short
+  return { lines: out.map(l => bgOn() + clip(l, cols) + ' '.repeat(Math.max(0, cols - width(l))) + `${ESC}K${ESC}49m`), targets }
 }
 
-const run = (argv) => spawnSync(argv[0], argv.slice(1), { encoding: 'utf8', timeout: 10_000 })
+const run = (argv) => {
+  const r = spawnSync(argv[0], argv.slice(1), { encoding: 'utf8', timeout: 10_000 })
+  return { status: r.status, stdout: r.stdout ?? '' }
+}
 // tests: a private tmux server that reads no tmux.conf, never the person's own
 const SOCKET = process.env.LIVE_SESSIONS_TMUX_SOCKET
 const tmux = (...args) => run(['tmux', ...(SOCKET === undefined ? [] : ['-L', SOCKET, '-f', '/dev/null']), ...args])
 /**
- * Opens what a row is about: a session's own Terminal tab; or a workspace's window, at its agent's pane when the
- * row is one agent's: the terminal attached to it brought up, else a new window from the file the plugin last
- * opened it with, where its window last was. Says what it did.
+ * Opens what a row is about: a session's own Terminal tab; or a running workspace's window (its tmux session, marked
+ * as this workspace's), at its agent's pane when the row is one agent's: the terminal attached to it brought up, else
+ * a new window attached to it, where its window last was. A workspace not running is opened from /sessions, which
+ * checks it first. Says what it did.
  */
 function open(target, snap) {
   if (target.kind === 'tty') {
+    if (!/^ttys\d+$/.test(target.tty)) return 'not a terminal tab'
     return run(['/usr/bin/osascript', '-l', 'JavaScript', '-e', c.FOCUS_SCRIPT, target.tty]).stdout.trim() === 'shown' ? `brought up ${target.tty}` : `${target.tty} is not a Terminal tab`
   }
-  const name = `ws-${target.id}`
+  if (!WORKSPACE_ID.test(target.id)) return 'not a workspace'
   const ws = snap.workspaces.find(x => x.id === target.id)
   if (ws === undefined) return 'that workspace is gone'
+  const name = `ws-${target.id}`
+  if (tmux('has-session', '-t', `=${name}`).status !== 0) return `${clean(ws.name)} is not running: open it from /sessions`
+  if (tmux('show-options', '-t', name, '-qv', w.OWNER_OPTION).stdout.trim() !== String(ws.createdAt)) return `tmux session ${name} was not started for ${clean(ws.name)}: see /sessions`
   const pane = Object.values(snap.tmux.panes).find(p => p.session === name && p.window === target.agent)?.pane
   if (pane !== undefined && /^%\d+$/.test(pane)) {
     tmux('select-window', '-t', pane)
     tmux('select-pane', '-t', pane)
   }
-  const attached = tmux('list-clients', '-t', `=${name}`, '-F', '#{client_tty}').stdout.split('\n').filter(t => t.startsWith('/dev/'))
+  const attached = tmux('list-clients', '-t', `=${name}`, '-F', '#{client_tty}').stdout.split('\n').filter(t => /^\/dev\/ttys\d+$/.test(t))
   for (const tty of attached) {
     if (run(['/usr/bin/osascript', '-l', 'JavaScript', '-e', c.FOCUS_SCRIPT, tty.slice(5)]).stdout.trim() === 'shown') return `brought up ${clean(ws.name)}`
   }
-  const file = w.openScriptPath(HOME, target.id)
-  if (!existsSync(file)) return `open ${clean(ws.name)} once from /sessions first`
   let place
   try {
     place = w.placementFrom(JSON.parse(readFileSync(w.placementPath(HOME, name), 'utf8')))
   } catch {}
-  const opened = run(['/usr/bin/osascript', '-l', 'JavaScript', '-e', c.OPEN_SCRIPT, `/bin/sh ${w.shellQuote(file)}`, ...(place === undefined ? [] : [JSON.stringify(place)])])
+  const attach = `tmux ${SOCKET === undefined ? '' : `-L ${w.shellQuote(SOCKET)} -f /dev/null `}attach -t ${w.shellQuote(`=${name}`)}`
+  const opened = run(['/usr/bin/osascript', '-l', 'JavaScript', '-e', c.OPEN_SCRIPT, attach, ...(place === undefined ? [] : [JSON.stringify(place)])])
   return opened.stdout.trim() === 'opened' ? `opened ${clean(ws.name)}` : `${clean(ws.name)} did not open`
 }
 
@@ -280,10 +313,7 @@ if (process.argv.includes('--frame')) {
   else process.stdout.write((process.argv.includes('--plain') ? lines.map(strip) : lines).join('\n') + '\n')
 } else {
   let loaded = load()
-  if (loaded === undefined) {
-    process.stdout.write(`No snapshot at ${SNAPSHOT} yet: open /sessions in Claude Code once.\n`)
-    process.exit(1)
-  }
+  if (loaded === undefined) await fail(`No snapshot of this version at ${SNAPSHOT} yet: open /sessions in Claude Code once (with this plugin's version).`)
   let tick = 0
   let note = ''
   let noteUntil = 0
@@ -292,12 +322,26 @@ if (process.argv.includes('--frame')) {
   // so the wheel never scrolls the terminal's history and a click comes here
   process.stdout.write('\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[?1000h\x1b[?1006h' + bgOn() + '\x1b[2J')
   process.stdout.on('resize', () => process.stdout.write(bgOn() + '\x1b[2J'))
-  const quit = () => {
+  // the terminal given back as it was, however this ends: a key, a signal, an error
+  let isRestored = false
+  const restore = () => {
+    if (isRestored) return
+    isRestored = true
     process.stdout.write('\x1b[0m\x1b[?1000l\x1b[?1006l\x1b[?7h\x1b[?25h\x1b[?1049l')
+  }
+  process.on('exit', restore)
+  const quit = () => {
+    restore()
     process.exit(0)
   }
-  process.on('SIGHUP', quit)
-  process.on('SIGTERM', quit)
+  for (const signal of ['SIGHUP', 'SIGTERM', 'SIGINT']) process.on(signal, quit)
+  for (const event of ['uncaughtException', 'unhandledRejection']) {
+    process.on(event, error => {
+      restore()
+      process.stderr.write(`The ops screen stopped: ${String(error?.stack ?? error)}\n`)
+      process.exit(1)
+    })
+  }
   process.stdin.setRawMode?.(true)
   process.stdin.on('data', d => {
     const text = d.toString()
@@ -307,13 +351,17 @@ if (process.argv.includes('--frame')) {
       const row = shown.targets[Number(m[3]) - 1]
       const target = row?.codexFrom !== undefined && Number(m[2]) > row.codexFrom ? { ...row, agent: 'codex' } : row
       if (target !== undefined) {
-        note = open(target, loaded.snap)
+        try {
+          note = open(target, loaded.snap)
+        } catch (error) {
+          note = `could not open it (${String(error).split('\n')[0]})`
+        }
         noteUntil = Date.now() + 4_000
       }
     }
     const keys = text.replace(/\x1b\[<[0-9;]*[Mm]/g, '')
-    if (keys === 'q' || d[0] === 3) quit()
-    if (keys === 't') {
+    if (keys.includes('q') || d.includes(3)) quit()
+    if (keys.includes('t')) {
       nextTheme()
       process.stdout.write(bgOn() + '\x1b[2J')
     }
@@ -327,7 +375,16 @@ if (process.argv.includes('--frame')) {
     }
     tick++
     if (Date.now() > noteUntil) note = ''
-    shown = frame(loaded.snap, Date.now(), process.stdout.columns, process.stdout.rows, tick, note)
+    const cols = process.stdout.columns ?? 80
+    const rows = process.stdout.rows ?? 24
+    try {
+      // too small a window: said, nothing else drawn
+      shown = cols < 40 || rows < 8
+        ? { lines: [...Array(rows)].map((_, r) => bgOn() + clip(r === 0 ? rgb(G.mid, ' window too small for ops') : '', cols) + `${ESC}K${ESC}49m`), targets: [] }
+        : frame(loaded.snap, Date.now(), cols, rows, tick, note)
+    } catch (error) {
+      shown = { lines: [bgOn() + clip(rgb(G.red, ` cannot draw: ${clean(String(error).split('\n')[0])}`), cols) + `${ESC}K${ESC}49m`], targets: [] }
+    }
     // each row at its place: no newline, so the screen never scrolls
     process.stdout.write(shown.lines.map((l, r) => `\x1b[${r + 1};1H${l}`).join(''))
   }, 150)
