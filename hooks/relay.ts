@@ -198,27 +198,40 @@ export const COMPACT_AT = 50
 export const COMPACT_NOW_AT = 80
 
 /**
- * How long Claude's prompt cache lives, from its transcript "$1": the
- * lifetime of the last cache write its replies record, `1h` or `5m`
- * (nothing if none says). The last 400 lines; a line cut by `tail` skipped.
+ * Claude's prompt cache, from its transcript "$1", two lines: how long it
+ * lives, the lifetime of the last cache write its replies record (`1h` or
+ * `5m`; empty if none says); and when its last reply's request was sent,
+ * the time of the record just before that reply began (a prompt, a tool's
+ * result, a reply before it), from which the cache's life counts. The last 400 lines; a line
+ * cut by `tail` and a subagent's records skipped.
  */
 export const CACHE_SCRIPT = [
-  "tail -n 400 \"$1\" 2>/dev/null | /usr/bin/jq -R -r '",
-  '  fromjson? | select(type == "object" and .type == "assistant" and .isSidechain != true) | .message.usage.cache_creation // empty',
-  '  | if (.ephemeral_1h_input_tokens // 0) > 0 then "1h" elif (.ephemeral_5m_input_tokens // 0) > 0 then "5m" else empty end',
-  "' 2>/dev/null | tail -n 1",
+  "tail -n 400 \"$1\" 2>/dev/null | /usr/bin/jq -R -n -r '",
+  '  reduce (inputs | fromjson? | select(type == "object" and .isSidechain != true)) as $o ({life: null, last: null, sent: null, mid: null};',
+  // a reply's first record: its request went out after the record before it, whatever that was
+  '    (if $o.type == "assistant" and ($o.message.id // "") != (.mid // "") then .sent = .last | .mid = ($o.message.id // "") else . end)',
+  '    | (if $o.type == "assistant" then ($o.message.usage.cache_creation // {}) as $c',
+  '        | (if ($c.ephemeral_1h_input_tokens // 0) > 0 then .life = "1h" elif ($c.ephemeral_5m_input_tokens // 0) > 0 then .life = "5m" else . end)',
+  '      else . end)',
+  '    | (if ($o.timestamp | type) == "string" then .last = $o.timestamp else . end))',
+  '  | "\\(.life // "")\\n\\(.sent // "")"',
+  "' 2>/dev/null",
 ].join('\n')
 
-/** CACHE_SCRIPT's answer: the cache's lifetime in ms, if its records say. */
-export const cacheLifeOf = (stdout: string): number | undefined =>
-  stdout.trim() === '1h' ? 3_600_000 : stdout.trim() === '5m' ? 300_000 : undefined
+/** CACHE_SCRIPT's answer: the cache's life in ms, and when the last reply's request was sent, each if its records say. */
+export function cacheOf(stdout: string): { lifeMs?: number; sentAt?: number } {
+  const [life = '', sent = ''] = stdout.split('\n').map(l => l.trim())
+  const lifeMs = life === '1h' ? 3_600_000 : life === '5m' ? 300_000 : undefined
+  const sentAt = /^\d{4}-\d\d-\d\dT/.test(sent) ? Date.parse(sent) : Number.NaN
+  return { ...(lifeMs === undefined ? {} : { lifeMs }), ...(Number.isNaN(sentAt) ? {} : { sentAt }) }
+}
 
 /**
  * When a workspace's Claude, whose hand-off was just passed, compacts: at
  * once when its context is near the window (COMPACT_NOW_AT, or the
  * workspace's line if higher); else, from the workspace's line up, just
- * before its prompt cache expires (`cacheMs` after its reply; 5 minutes if
- * its records do not say), if it is still idle then: a hand-back within
+ * before its prompt cache expires (`cacheMs` after its last request was
+ * sent; 5 minutes if its records do not say), if it is still idle then: a hand-back within
  * the cache's life keeps its whole context, read cheaply from the cache,
  * and a compaction made while the cache is still warm reads it cheaply
  * too. It starts 5 minutes before an hour's cache ends, 90 seconds before

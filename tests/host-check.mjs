@@ -911,30 +911,40 @@ except ChildProcessError: pass
   }
 }
 
-// how long Claude's prompt cache lives, read with the real jq from transcripts of each kind: the last reply that wrote
-// to the cache says; one that only read from it says nothing; a line cut by tail and a subagent's reply are skipped
+// Claude's prompt cache, read with the real jq from transcripts of each kind: its life from the last reply that wrote
+// to the cache (one that only read says nothing); when the last reply's request was sent, from the record just before
+// that reply began (a reply written over several records counts from its first); a line cut by tail and a subagent's
+// records skipped
 {
   const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'live-sessions-cache-')))
   try {
-    const reply = (creation, extra = {}) => JSON.stringify({ type: 'assistant', ...extra, message: { usage: { input_tokens: 2, cache_read_input_tokens: 9000, ...(creation === undefined ? {} : { cache_creation: creation }) } } })
-    const write = (name, lines) => {
+    const t = s => `2026-10-10T20:${s}.000Z`
+    const reply = (id, at, creation, extra = {}) => JSON.stringify({ type: 'assistant', timestamp: t(at), ...extra, message: { id, usage: { input_tokens: 2, cache_read_input_tokens: 9000, ...(creation === undefined ? {} : { cache_creation: creation }) } } })
+    const said = (at, extra = {}) => JSON.stringify({ type: 'user', timestamp: t(at), ...extra, message: { content: 'x' } })
+    const read = (name, lines) => {
       const file = join(scratch, name)
       writeFileSync(file, `${lines.join('\n')}\n`)
       return spawnSync('/bin/sh', ['-c', r.CACHE_SCRIPT, 'sh', file], { encoding: 'utf8' }).stdout
     }
-    const hour = write('hour.jsonl', [
+    const hour = r.cacheOf(read('hour.jsonl', [
       '{"type":"assistant","message":{"usage":{"cache_creation":{"ephemeral_5m_input_t',
-      reply({ ephemeral_5m_input_tokens: 10, ephemeral_1h_input_tokens: 0 }),
-      reply({ ephemeral_1h_input_tokens: 1582, ephemeral_5m_input_tokens: 0 }),
-      reply({ ephemeral_1h_input_tokens: 0, ephemeral_5m_input_tokens: 0 }),
-      reply({ ephemeral_5m_input_tokens: 99 }, { isSidechain: true }),
-      JSON.stringify({ type: 'user', message: { content: 'next' } }),
-    ])
-    const five = write('five.jsonl', [reply({ ephemeral_1h_input_tokens: 7 }), reply({ ephemeral_5m_input_tokens: 4 })])
-    const none = write('none.jsonl', [reply(undefined), JSON.stringify({ type: 'user', message: { content: 'x' } })])
-    const missing = spawnSync('/bin/sh', ['-c', r.CACHE_SCRIPT, 'sh', join(scratch, 'gone.jsonl')], { encoding: 'utf8' }).stdout
-    check('compaction: a prompt cache\'s life from the last reply that wrote to it; nothing when none says or there is no transcript',
-      r.cacheLifeOf(hour) === 3_600_000 && r.cacheLifeOf(five) === 300_000 && r.cacheLifeOf(none) === undefined && r.cacheLifeOf(missing) === undefined,
+      said('00:00'),
+      reply('m1', '00:30', { ephemeral_5m_input_tokens: 10, ephemeral_1h_input_tokens: 0 }),
+      said('01:00'),
+      reply('m2', '01:40', { ephemeral_1h_input_tokens: 1582, ephemeral_5m_input_tokens: 0 }),
+      said('02:00', { isSidechain: true }),
+      reply('s1', '02:10', { ephemeral_5m_input_tokens: 99 }, { isSidechain: true }),
+      // the final reply, written over two records; nothing written to the cache by it
+      reply('m3', '03:30', { ephemeral_1h_input_tokens: 0, ephemeral_5m_input_tokens: 0 }),
+      reply('m3', '03:50', undefined),
+      JSON.stringify({ type: 'system', timestamp: t('03:51'), subtype: 'turn_duration' }),
+    ]))
+    const five = r.cacheOf(read('five.jsonl', [said('00:00'), reply('a', '00:10', { ephemeral_1h_input_tokens: 7 }), said('05:00'), reply('b', '05:20', { ephemeral_5m_input_tokens: 4 })]))
+    const none = r.cacheOf(read('none.jsonl', [reply('a', '00:10', undefined)]))
+    const missing = r.cacheOf(spawnSync('/bin/sh', ['-c', r.CACHE_SCRIPT, 'sh', join(scratch, 'gone.jsonl')], { encoding: 'utf8' }).stdout)
+    // the final reply m3 began after the last record before it: m2 (01:40), the sidechain's skipped
+    check('compaction: a prompt cache\'s life from the last reply that wrote to it, timed from the request of the last reply; nothing when none says or there is no transcript',
+      JSON.stringify([hour, five, none, missing]) === JSON.stringify([{ lifeMs: 3_600_000, sentAt: Date.parse(t('01:40')) }, { lifeMs: 300_000, sentAt: Date.parse(t('05:00')) }, {}, {}]),
       JSON.stringify([hour, five, none, missing]))
   } finally {
     rmSync(scratch, { recursive: true, force: true })

@@ -3,7 +3,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { ClaudeSession, CodexSession, Place, Relay, Snapshot, Thread, Workspace } from '../types'
 import type { Screen } from './workspaces'
-import { AGENT_COMMANDS, afterOwner, afterStep, cacheLifeOf, CACHE_SCRIPT, claudeKeep, COMPACT_AT, compactPlan, cueOf, cutBytes, eventOf, EVENT_SCRIPT, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_SCRIPT } from './relay'
+import { AGENT_COMMANDS, afterOwner, afterStep, cacheOf, CACHE_SCRIPT, claudeKeep, COMPACT_AT, compactPlan, cueOf, cutBytes, eventOf, EVENT_SCRIPT, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_SCRIPT } from './relay'
 import type { RelayEvent, Side, Step } from './relay'
 import { branchOf, checkDue, DRIFT_EVERY, driftRequest, parseVerdict, recordFolderOf, RECORDS_SCRIPT } from './drift'
 import { bringable, codexDir, envOfProfile, codexFlags, CODEX_MODE_SCRIPT, CODEX_TASK_SCRIPT, codexTaskState, JOB_COMMANDS, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, toggled, withThreads } from './bring'
@@ -1391,8 +1391,8 @@ async function compactAtHandOff($: EngineInterface, answer: string) {
   const { context } = await $.session.usage()
   if (context.percent === undefined) return
   const file = transcriptPath(`${home}/.${self.profile}`, self.startCwd, id)
-  const cacheMs = cacheLifeOf((await $.process.run(['/bin/sh', '-c', CACHE_SCRIPT, 'sh', file], { timeoutMs: 20_000 }).catch(() => ({ stdout: '' }))).stdout)
-  const plan = compactPlan(at, context.percent, cacheMs)
+  const cache = cacheOf((await $.process.run(['/bin/sh', '-c', CACHE_SCRIPT, 'sh', file], { timeoutMs: 20_000 }).catch(() => ({ stdout: '' }))).stdout)
+  const plan = compactPlan(at, context.percent, cache.lifeMs)
   if (plan === undefined) return
   // its last turn, as the relay reads its records: that turn (once its reply is written), still its last, until the
   // relay has taken up its hand-off (its ledger step); not in two minutes (Codex at work, the relay waiting for you):
@@ -1412,20 +1412,29 @@ async function compactAtHandOff($: EngineInterface, answer: string) {
   }
   let said = `its context was ${Math.round(context.percent)}% full`
   if (plan.when === 'before-expiry') {
-    // idle until just before its cache expires: a hand-back, a prompt or another conversation since, and it is left
-    const wait = endedAt + plan.afterMs - (await $.clock.now())
+    // the cache's life counts from when its last request was sent (its reply took a while to come): from then,
+    // idle until just before it expires; a hand-back, a prompt, a command typed to it or another conversation
+    // since, and it is left
+    const sentAt = Math.min(cache.sentAt ?? endedAt, endedAt)
+    const wait = sentAt + plan.afterMs - (await $.clock.now())
     if (wait > 0) await $.clock.sleep(wait)
     const turn = await lastTurn()
-    if (turn?.state !== 'done' || turn.id !== turnId) return
+    if (turn?.state !== 'done' || turn.id !== turnId || (turn.typedAt !== undefined && turn.typedAt > turn.at)) return
     const now = await $.session.usage()
     if (now.context.percent === undefined || now.context.percent < at) return
-    said = `before its prompt cache expired, idle ${Math.round(((await $.clock.now()) - endedAt) / 60_000)}m; its context was ${Math.round(now.context.percent)}% full`
+    // woken late (the Mac asleep, the process held up): still made, as the next turn would pay more, and said so
+    const idle = (await $.clock.now()) - sentAt
+    const when = idle < (cache.lifeMs ?? 300_000) ? 'before its prompt cache expired' : 'after its prompt cache expired'
+    said = `${when}, idle ${Math.round(((await $.clock.now()) - endedAt) / 60_000)}m; its context was ${Math.round(now.context.percent)}% full`
   }
   // still the same conversation (not cleared or resumed into another while it waited)
   if ((await $.session.id()) !== id) return
-  // logged once it has been done (not refused, not vetoed)
-  const done = await $.session.compact({ instructions: claudeKeep(ws.name) }).then(r => !('skip' in r && r.skip !== undefined)).catch(() => false)
-  if (done) await logEvent($, home, { kind: 'compact', text: `${ws.name}: Claude compacted (${said})`, workspace: ws.id, agent: 'claude' })
+  // logged once it has been done (not refused, not vetoed), with what its summary read from the cache and afresh
+  const result = await $.session.compact({ instructions: claudeKeep(ws.name) }).catch(() => undefined)
+  if (result === undefined || result.skip !== undefined) return
+  const k = (n: number) => `${Math.round(n / 1000)}k`
+  const spent = result.usage === undefined ? '' : `; it read ${k(result.usage.cache_read_input_tokens)} tokens from the cache, ${k(result.usage.input_tokens + result.usage.cache_creation_input_tokens)} afresh`
+  await logEvent($, home, { kind: 'compact', text: `${ws.name}: Claude compacted (${said}${spent})`, workspace: ws.id, agent: 'claude' })
 }
 
 /** Forgets a workspace (the command's `rm` and the pane's Remove): its tmux session keeps running. */
