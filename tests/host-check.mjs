@@ -244,85 +244,102 @@ if (process.argv.includes('--slow')) {
   const record = (tool, tag = '') => `sh -c 'env > "${scratch}/${tag}${tool}.env"; pwd > "${scratch}/${tag}${tool}.pwd"; printf "%s\\n" "$@" > "${scratch}/${tag}${tool}.args"; sleep 30' rec`
   const ws = { id: 'check', env: 'checkenv', dir: scratch, createdAt: 1234, checkout: '/x/app' }
   const prompt = `It's "quoted" $(touch ${scratch}/RAN) \`touch ${scratch}/RAN\` ; touch ${scratch}/RAN`
-  mkdirSync(dirname(w.promptPath(fakeHome, 'check', 'claude')), { recursive: true })
-  writeFileSync(w.promptPath(fakeHome, 'check', 'claude'), prompt)
-  writeFileSync(w.promptPath(fakeHome, 'check', 'codex'), 'Say you are ready.')
-  const line = w.openCommand(ws, fakeHome, { socket, attach: false, bins: { claude: record('claude'), codex: record('codex') } })
-  // run as a terminal would: by the person's shell, here carrying this session's own markers and
-  // another account's config directories on purpose, which the tmux server then holds for every pane
-  spawnSync(process.env.SHELL ?? '/bin/zsh', ['-c', line], {
-    encoding: 'utf8',
-    env: { ...process.env, CLAUDECODE: '1', CLAUDE_CODE_CHILD_SESSION: '1', CLAUDE_CONFIG_DIR: '/wrong/claude', CODEX_HOME: '/wrong/codex' },
-  })
-  for (let i = 0; i < 30 && !(existsSync(`${scratch}/claude.args`) && existsSync(`${scratch}/codex.args`)); i++) await new Promise(r => setTimeout(r, 200))
-  const panes = w.parsePanes(spawnSync('tmux', ['-L', socket, '-f', '/dev/null', 'list-panes', '-a', '-F', w.PANES_FORMAT], { encoding: 'utf8' }).stdout)
-  const agents = Object.values(panes).filter(p => p.session === 'ws-check').map(p => p.window).sort()
-  const windows = spawnSync('tmux', ['-L', socket, '-f', '/dev/null', 'list-panes', '-t', '=ws-check', '-s', '-F', '#{window_name}'], { encoding: 'utf8' }).stdout.trim().split('\n')
-  check('workspace: Claude and Codex side by side, each pane marked', JSON.stringify(agents) === '["claude","codex"]' && JSON.stringify(windows) === '["peers","peers"]', `${agents} in ${windows}`)
-  const file = name => (existsSync(`${scratch}/${name}`) ? readFileSync(`${scratch}/${name}`, 'utf8') : '')
-  check('workspace: both start in its folder', file('claude.pwd').trim() === scratch && file('codex.pwd').trim() === scratch)
-  check('workspace: Claude under its environment\'s config directory', file('claude.env').includes(`CLAUDE_CONFIG_DIR=${fakeHome}/.claude-checkenv`))
-  check('workspace: Codex under its environment\'s home', file('codex.env').includes(`CODEX_HOME=${fakeHome}/.codex-checkenv`))
-  check('workspace: no Claude Code session markers reach the agents', !/^(CLAUDECODE|CLAUDE_CODE_CHILD_SESSION)=/m.test(file('claude.env') + file('codex.env')))
-  check('workspace: both may work in the worktrees folder; Codex without its update offer, in workspace-write', file('codex.args') === '-c\ncheck_for_update_on_startup=false\n--sandbox\nworkspace-write\n--add-dir\n/x/app-worktrees\n--\nSay you are ready.\n', JSON.stringify(file('codex.args')))
-  check('workspace: Claude takes the first prompt as it is, as one argument after --, running nothing in it', file('claude.args') === `--add-dir\n/x/app-worktrees\n--\n${prompt}\n` && !existsSync(`${scratch}/RAN`), JSON.stringify(file('claude.args').slice(0, 60)))
-  check('workspace: each first prompt is taken once', !existsSync(w.promptPath(fakeHome, 'check', 'claude')) && !existsSync(w.promptPath(fakeHome, 'check', 'codex')))
-  check('workspace: marked as started for this workspace', spawnSync('tmux', ['-L', socket, '-f', '/dev/null', 'show-options', '-t', 'ws-check', '-qv', w.OWNER_OPTION], { encoding: 'utf8' }).stdout.trim() === '1234')
-  // used by hand: the mouse on in this session, and each side's border naming its agent
-  const t6 = (...args) => spawnSync('tmux', ['-L', socket, '-f', '/dev/null', ...args], { encoding: 'utf8' }).stdout.trim()
-  check('workspace: the mouse on in its session; borders shown', t6('show-options', '-t', 'ws-check', '-v', 'mouse') === 'on' && t6('show-window-options', '-t', 'ws-check:', '-v', 'pane-border-status') === 'top')
-  const sides = Object.fromEntries(Object.values(w.parsePanes(t6('list-panes', '-a', '-F', w.PANES_FORMAT))).filter(p => p.session === 'ws-check').map(p => [p.window, p.pane]))
-  const border = pane => t6('display-message', '-p', '-t', pane, '#{E:pane-border-format}')
-  check('workspace: each side\'s border names its agent; the side with the keys says so', border(sides.claude).startsWith('Claude') && border(sides.codex).startsWith('Codex') &&
-    [border(sides.claude), border(sides.codex)].filter(b => b.includes('your keys go here')).length === 1, `${border(sides.claude)}|${border(sides.codex)}`)
-  // real mouse events, from a terminal attached to it: a click on the left side gives Claude the keys; the
-  // wheel over the right side scrolls Codex's side alone
-  const mouse = spawnSync('python3', ['-c', `
-import os, pty, select, subprocess, time, struct, fcntl, termios, sys
-S = sys.argv[1]
-t = lambda *a: subprocess.run(['tmux', '-L', S, '-f', '/dev/null', *a], capture_output=True, text=True).stdout.strip()
-pid, fd = pty.fork()
-if pid == 0:
-    os.environ['TERM'] = 'xterm-256color'
-    os.execvp('tmux', ['tmux', '-L', S, '-f', '/dev/null', 'attach', '-t', '=ws-check'])
-fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack('HHHH', 30, 100, 0, 0))
-def pump(s):
-    end = time.time() + s
-    while time.time() < end:
-        r, _, _ = select.select([fd], [], [], 0.1)
-        if r:
-            try: os.read(fd, 65536)
-            except OSError: return
-pump(1.5)
-before = t('display-message', '-p', '-t', 'ws-check:peers', '#{pane_id}')
-os.write(fd, b'\\x1b[<0;10;12M\\x1b[<0;10;12m'); pump(0.8)
-after = t('display-message', '-p', '-t', 'ws-check:peers', '#{pane_id}')
-os.write(fd, b'\\x1b[<64;85;12M'); pump(0.8)
-modes = t('list-panes', '-t', 'ws-check:peers', '-F', '#{pane_id}=#{pane_in_mode}')
-print(before, after, modes.replace(chr(10), ' '))
-t('send-keys', '-t', 'ws-check:peers.1', '-X', 'cancel')
-os.write(fd, b'\\x02d'); pump(0.5)
-os.close(fd)
-os.waitpid(pid, 0)
-`, socket], { encoding: 'utf8' }).stdout.trim().split(' ')
-  check('workspace: a click picks the side that takes the keys', mouse[0] === sides.codex && mouse[1] === sides.claude, mouse.slice(0, 2).join(' → '))
-  check('workspace: the wheel scrolls the side under it alone', mouse.includes(`${sides.codex}=1`) && mouse.includes(`${sides.claude}=0`), mouse.slice(2).join(' '))
-  // a default workspace on the same server, whose global environment holds another account, in a folder with # in its name
-  const hashed = join(scratch, 'C#{session_name}')
-  mkdirSync(hashed)
-  spawnSync(process.env.SHELL ?? '/bin/zsh', ['-c', w.openCommand({ id: 'check2', env: '', dir: hashed, createdAt: 5 }, fakeHome, { socket, attach: false, bins: { claude: record('claude', 'd-'), codex: record('codex', 'd-') } })], { encoding: 'utf8' })
-  for (let i = 0; i < 30 && !(existsSync(`${scratch}/d-claude.args`) && existsSync(`${scratch}/d-codex.args`)); i++) await new Promise(r => setTimeout(r, 200))
-  check('workspace: a default one runs under no other account, whatever the tmux server holds', !/^(CLAUDE_CONFIG_DIR|CODEX_HOME)=/m.test(file('d-claude.env') + file('d-codex.env')) && file('d-claude.env') !== '')
-  check('workspace: a folder with # in its name is the folder it starts in', file('d-claude.pwd').trim().endsWith('C#{session_name}'), file('d-claude.pwd').trim().split('/').pop())
-  check('workspace: no checkout, no first prompt: nothing more on the command line', file('d-claude.args').trim() === '' && file('d-codex.args') === '-c\ncheck_for_update_on_startup=false\n--sandbox\nworkspace-write\n')
-  // opened again while it runs: nothing new is created
-  spawnSync(process.env.SHELL ?? '/bin/zsh', ['-c', line], { encoding: 'utf8' })
-  const again = Object.values(w.parsePanes(spawnSync('tmux', ['-L', socket, '-f', '/dev/null', 'list-panes', '-a', '-F', w.PANES_FORMAT], { encoding: 'utf8' }).stdout)).length
-  check('workspace: opening it again creates nothing more', again === 4, `${again} panes in two workspaces`)
-  spawnSync('tmux', ['-L', socket, '-f', '/dev/null', 'kill-server'])
-  // kill-server leaves its socket file behind
-  rmSync(join(process.env.TMUX_TMPDIR ?? '/tmp', `tmux-${process.getuid()}`, socket), { force: true })
-  rmSync(scratch, { recursive: true, force: true })
+  try {
+    mkdirSync(dirname(w.promptPath(fakeHome, 'check', 'claude')), { recursive: true })
+    writeFileSync(w.promptPath(fakeHome, 'check', 'claude'), prompt)
+    writeFileSync(w.promptPath(fakeHome, 'check', 'codex'), 'Say you are ready.')
+    const line = w.openCommand(ws, fakeHome, { socket, attach: false, bins: { claude: record('claude'), codex: record('codex') } })
+    // run as a terminal would: by the person's shell, here carrying this session's own markers and
+    // another account's config directories on purpose, which the tmux server then holds for every pane
+    spawnSync(process.env.SHELL ?? '/bin/zsh', ['-c', line], {
+      encoding: 'utf8',
+      env: { ...process.env, CLAUDECODE: '1', CLAUDE_CODE_CHILD_SESSION: '1', CLAUDE_CONFIG_DIR: '/wrong/claude', CODEX_HOME: '/wrong/codex' },
+    })
+    for (let i = 0; i < 30 && !(existsSync(`${scratch}/claude.args`) && existsSync(`${scratch}/codex.args`)); i++) await new Promise(r => setTimeout(r, 200))
+    const panes = w.parsePanes(spawnSync('tmux', ['-L', socket, '-f', '/dev/null', 'list-panes', '-a', '-F', w.PANES_FORMAT], { encoding: 'utf8' }).stdout)
+    const agents = Object.values(panes).filter(p => p.session === 'ws-check').map(p => p.window).sort()
+    const windows = spawnSync('tmux', ['-L', socket, '-f', '/dev/null', 'list-panes', '-t', '=ws-check', '-s', '-F', '#{window_name}'], { encoding: 'utf8' }).stdout.trim().split('\n')
+    check('workspace: Claude and Codex side by side, each pane marked', JSON.stringify(agents) === '["claude","codex"]' && JSON.stringify(windows) === '["peers","peers"]', `${agents} in ${windows}`)
+    const file = name => (existsSync(`${scratch}/${name}`) ? readFileSync(`${scratch}/${name}`, 'utf8') : '')
+    check('workspace: both start in its folder', file('claude.pwd').trim() === scratch && file('codex.pwd').trim() === scratch)
+    check('workspace: Claude under its environment\'s config directory', file('claude.env').includes(`CLAUDE_CONFIG_DIR=${fakeHome}/.claude-checkenv`))
+    check('workspace: Codex under its environment\'s home', file('codex.env').includes(`CODEX_HOME=${fakeHome}/.codex-checkenv`))
+    check('workspace: no Claude Code session markers reach the agents', !/^(CLAUDECODE|CLAUDE_CODE_CHILD_SESSION)=/m.test(file('claude.env') + file('codex.env')))
+    check('workspace: both may work in the worktrees folder; Codex without its update offer, in workspace-write', file('codex.args') === '-c\ncheck_for_update_on_startup=false\n--sandbox\nworkspace-write\n--add-dir\n/x/app-worktrees\n--\nSay you are ready.\n', JSON.stringify(file('codex.args')))
+    check('workspace: Claude takes the first prompt as it is, as one argument after --, running nothing in it', file('claude.args') === `--add-dir\n/x/app-worktrees\n--\n${prompt}\n` && !existsSync(`${scratch}/RAN`), JSON.stringify(file('claude.args').slice(0, 60)))
+    check('workspace: each first prompt is taken once', !existsSync(w.promptPath(fakeHome, 'check', 'claude')) && !existsSync(w.promptPath(fakeHome, 'check', 'codex')))
+    check('workspace: marked as started for this workspace', spawnSync('tmux', ['-L', socket, '-f', '/dev/null', 'show-options', '-t', 'ws-check', '-qv', w.OWNER_OPTION], { encoding: 'utf8' }).stdout.trim() === '1234')
+    // used by hand: the mouse on in this session, and each side's border naming its agent
+    const t6 = (...args) => spawnSync('tmux', ['-L', socket, '-f', '/dev/null', ...args], { encoding: 'utf8' }).stdout.trim()
+    check('workspace: the mouse on in its session; borders shown', t6('show-options', '-t', 'ws-check', '-v', 'mouse') === 'on' && t6('show-window-options', '-t', 'ws-check:', '-v', 'pane-border-status') === 'top')
+    const sides = Object.fromEntries(Object.values(w.parsePanes(t6('list-panes', '-a', '-F', w.PANES_FORMAT))).filter(p => p.session === 'ws-check').map(p => [p.window, p.pane]))
+    const border = pane => t6('display-message', '-p', '-t', pane, '#{E:pane-border-format}')
+    check('workspace: each side\'s border names its agent; the side with the keys says so', border(sides.claude).startsWith('Claude') && border(sides.codex).startsWith('Codex') &&
+      [border(sides.claude), border(sides.codex)].filter(b => b.includes('your keys go here')).length === 1, `${border(sides.claude)}|${border(sides.codex)}`)
+    // real mouse events, from a terminal attached to it: a click on the left side gives Claude the keys; the
+    // wheel over the right side scrolls Codex's side alone
+    const mouse = spawnSync('python3', ['-c', `
+  import os, pty, select, subprocess, time, struct, fcntl, termios, sys
+  S = sys.argv[1]
+  t = lambda *a: subprocess.run(['tmux', '-L', S, '-f', '/dev/null', *a], capture_output=True, text=True).stdout.strip()
+  pid, fd = pty.fork()
+  if pid == 0:
+      os.environ['TERM'] = 'xterm-256color'
+      os.execvp('tmux', ['tmux', '-L', S, '-f', '/dev/null', 'attach', '-t', '=ws-check'])
+  fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack('HHHH', 30, 100, 0, 0))
+  def pump(s):
+      end = time.time() + s
+      while time.time() < end:
+          r, _, _ = select.select([fd], [], [], 0.1)
+          if r:
+              try: os.read(fd, 65536)
+              except OSError: return
+  pump(1.5)
+  before = t('display-message', '-p', '-t', 'ws-check:peers', '#{pane_id}')
+  os.write(fd, b'\\x1b[<0;10;12M\\x1b[<0;10;12m'); pump(0.8)
+  after = t('display-message', '-p', '-t', 'ws-check:peers', '#{pane_id}')
+  os.write(fd, b'\\x1b[<64;85;12M'); pump(0.8)
+  modes = t('list-panes', '-t', 'ws-check:peers', '-F', '#{pane_id}=#{pane_in_mode}')
+  print(before, after, modes.replace(chr(10), ' '))
+  t('send-keys', '-t', 'ws-check:peers.1', '-X', 'cancel')
+  os.write(fd, b'\\x02d'); pump(0.5)
+  os.close(fd)
+  os.waitpid(pid, 0)
+  `, socket], { encoding: 'utf8' }).stdout.trim().split(' ')
+    check('workspace: a click picks the side that takes the keys', mouse[0] === sides.codex && mouse[1] === sides.claude, mouse.slice(0, 2).join(' → '))
+    check('workspace: the wheel scrolls the side under it alone', mouse.includes(`${sides.codex}=1`) && mouse.includes(`${sides.claude}=0`), mouse.slice(2).join(' '))
+    // a workspace made before the marks (a window per agent), with a window of the owner's own now current:
+    // set up at Open, each window gets the borders, the agents' named by their windows
+    t6('new-session', '-d', '-s', 'ws-old', '-n', 'claude', 'sleep 30')
+    t6('new-window', '-t', '=ws-old:', '-n', 'codex', 'sleep 30')
+    t6('new-window', '-t', '=ws-old:', '-n', 'notes', 'sleep 30')
+    const oldWindows = t6('list-windows', '-t', '=ws-old', '-F', '#{window_id}').split('\n')
+    for (const args of w.sessionSetup('ws-old', oldWindows)) t6(...args)
+    const oldBorders = Object.fromEntries(t6('list-panes', '-s', '-t', '=ws-old', '-F', '#{window_name}=#{pane_id}').split('\n').map(l => l.split('=')))
+    check('workspace: an older one, set up at Open, has borders in each window, the agents named by their windows',
+      oldWindows.every(id => t6('show-window-options', '-t', id, '-v', 'pane-border-status') === 'top') &&
+      border(oldBorders.claude).startsWith('Claude') && border(oldBorders.codex).startsWith('Codex') && border(oldBorders.notes).startsWith('sleep'),
+      `${border(oldBorders.claude)}|${border(oldBorders.codex)}|${border(oldBorders.notes)}`)
+    t6('kill-session', '-t', '=ws-old')
+    // a default workspace on the same server, whose global environment holds another account, in a folder with # in its name
+    const hashed = join(scratch, 'C#{session_name}')
+    mkdirSync(hashed)
+    spawnSync(process.env.SHELL ?? '/bin/zsh', ['-c', w.openCommand({ id: 'check2', env: '', dir: hashed, createdAt: 5 }, fakeHome, { socket, attach: false, bins: { claude: record('claude', 'd-'), codex: record('codex', 'd-') } })], { encoding: 'utf8' })
+    for (let i = 0; i < 30 && !(existsSync(`${scratch}/d-claude.args`) && existsSync(`${scratch}/d-codex.args`)); i++) await new Promise(r => setTimeout(r, 200))
+    check('workspace: a default one runs under no other account, whatever the tmux server holds', !/^(CLAUDE_CONFIG_DIR|CODEX_HOME)=/m.test(file('d-claude.env') + file('d-codex.env')) && file('d-claude.env') !== '')
+    check('workspace: a folder with # in its name is the folder it starts in', file('d-claude.pwd').trim().endsWith('C#{session_name}'), file('d-claude.pwd').trim().split('/').pop())
+    check('workspace: no checkout, no first prompt: nothing more on the command line', file('d-claude.args').trim() === '' && file('d-codex.args') === '-c\ncheck_for_update_on_startup=false\n--sandbox\nworkspace-write\n')
+    // opened again while it runs: nothing new is created
+    spawnSync(process.env.SHELL ?? '/bin/zsh', ['-c', line], { encoding: 'utf8' })
+    const again = Object.values(w.parsePanes(spawnSync('tmux', ['-L', socket, '-f', '/dev/null', 'list-panes', '-a', '-F', w.PANES_FORMAT], { encoding: 'utf8' }).stdout)).length
+    check('workspace: opening it again creates nothing more', again === 4, `${again} panes in two workspaces`)
+  } finally {
+    // a check that throws still ends the private server
+    spawnSync('tmux', ['-L', socket, '-f', '/dev/null', 'kill-server'])
+    // kill-server leaves its socket file behind
+    rmSync(join(process.env.TMUX_TMPDIR ?? '/tmp', `tmux-${process.getuid()}`, socket), { force: true })
+    rmSync(scratch, { recursive: true, force: true })
+  }
 }
 
 // 7. The main checkout a workspace's agents put worktrees beside: CHECKOUT_SCRIPT on throwaway repositories
@@ -465,56 +482,63 @@ os.waitpid(pid, 0)
   const tmux = (...args) => spawnSync('tmux', ['-L', socket, '-f', '/dev/null', ...args], { encoding: 'utf8' })
   // as a workspace's pane: a shell that starts the agent (`cat` here) and is the group's leader, which tmux
   // names as the pane's command; and a pane where the agent has exited, back at the shell
-  tmux('new-session', '-d', '-s', 'ws-relay', '-n', 'peers', "/bin/sh -c 'cat; exec /bin/sh'")
-  tmux('split-window', '-h', '-t', '=ws-relay:peers', '/bin/sh')
-  const [agentPane, shellPane] = tmux('list-panes', '-t', '=ws-relay:peers', '-F', '#{pane_id}').stdout.trim().split('\n')
-  await new Promise(res => setTimeout(res, 500))
-  const ledger = join(scratch, 'ledger')
-  const line = `READY FOR CODEX · it's "x" $(touch ${scratch}/RAN) ; touch ${scratch}/RAN`
-  const relay = (key, pane, allow) => spawnSync('/bin/sh', ['-c', r.RELAY_SCRIPT, 'sh', 'pass', ledger, key, pane, allow, line, socket, 'check'], { encoding: 'utf8' }).stdout.trim()
-  const first = relay('pass-t1', agentPane, 'cat')
-  await new Promise(res => setTimeout(res, 300))
-  // -J: the narrow pane wraps the line; joined, it is the line as typed
-  const typed = tmux('capture-pane', '-p', '-J', '-t', agentPane).stdout
-  check('relay: the cue typed into the agent\'s pane and entered', first === 'passed' && typed.split('\n').filter(l => l === line).length === 2, first)
-  check('relay: taken once, whichever session tries again', relay('pass-t1', agentPane, 'cat') === 'taken' && tmux('capture-pane', '-p', '-J', '-t', agentPane).stdout.split('\n').filter(l => l === line).length === 2)
-  const refused = relay('pass-t2', shellPane, 'claude')
-  await new Promise(res => setTimeout(res, 300))
-  check('relay: never into a pane that runs a shell', /^not-agent (sh|bash)$/.test(refused) && !tmux('capture-pane', '-p', '-J', '-t', shellPane).stdout.includes('READY FOR') && !existsSync(`${scratch}/RAN`), refused)
-  check('relay: a pane that is gone, said', relay('pass-t3', '%999', 'cat') === 'gone')
-  // scrolled back: the keys would go to tmux, so nothing is typed, and the step stays for later
-  tmux('copy-mode', '-t', agentPane)
-  const scrolled = relay('pass-t4', agentPane, 'cat')
-  check('relay: a pane in copy mode is left alone; the step stays untaken', scrolled === 'in-mode' && !existsSync(join(ledger, 'pass-t4')) && tmux('display-message', '-p', '-t', agentPane, '#{pane_in_mode}').stdout.trim() === '1', scrolled)
-  tmux('send-keys', '-t', agentPane, '-X', 'cancel')
-  check('relay: passed once the pane leaves copy mode', relay('pass-t4', agentPane, 'cat') === 'passed')
-  // copy mode entered while the line is typed: the Enter would go to tmux, so it is not sent, and said so
-  const racing = spawn('/bin/sh', ['-c', r.RELAY_SCRIPT, 'sh', 'pass', ledger, 'pass-t7', agentPane, 'cat', 'READY FOR CODEX · raced', socket, 'check'])
-  let raced = ''
-  racing.stdout.on('data', d => { raced += d })
-  await new Promise(res => setTimeout(res, 250))
-  tmux('copy-mode', '-t', agentPane)
-  await new Promise(res => racing.on('close', res))
-  tmux('send-keys', '-t', agentPane, '-X', 'cancel')
-  check('relay: copy mode entered as the line is typed: not sent, said so', raced.trim() === 'unsent', raced.trim())
-  // the unsent line waits in the stand-in's input: cleared, as the owner would before going on
-  tmux('send-keys', '-t', agentPane, 'C-u')
-  // a line that ends in ; (tmux reads a trailing ; as the end of a command)
-  const semis = `READY FOR CODEX · ends in semicolons;;`
-  spawnSync('/bin/sh', ['-c', r.RELAY_SCRIPT, 'sh', 'pass', ledger, 'pass-t5', agentPane, 'cat', semis, socket, 'check'], { encoding: 'utf8' })
-  await new Promise(res => setTimeout(res, 300))
-  check('relay: a trailing ; typed as it is', tmux('capture-pane', '-p', '-J', '-t', agentPane).stdout.split('\n').filter(l => l === semis).length === 2)
-  // the agent in the pane but not in its foreground (a stopped background job of an interactive shell)
-  tmux('new-window', '-t', '=ws-relay:', '-n', 'bg', '/bin/sh -i')
-  const bgPane = tmux('list-panes', '-t', '=ws-relay:bg', '-F', '#{pane_id}').stdout.trim()
-  await new Promise(res => setTimeout(res, 300))
-  tmux('send-keys', '-t', bgPane, 'cat &', 'Enter')
-  await new Promise(res => setTimeout(res, 500))
-  const background = relay('pass-t6', bgPane, 'cat')
-  check('relay: an agent in the pane but not in its foreground is not typed into', /^not-agent /.test(background) && !background.includes('cat'), background)
-  tmux('kill-server')
-  rmSync(join(process.env.TMUX_TMPDIR ?? '/tmp', `tmux-${process.getuid()}`, socket), { force: true })
-  rmSync(scratch, { recursive: true, force: true })
+  try {
+    tmux('new-session', '-d', '-s', 'ws-relay', '-n', 'peers', "/bin/sh -c 'cat; exec /bin/sh'")
+    tmux('split-window', '-h', '-t', '=ws-relay:peers', '/bin/sh')
+    const [agentPane, shellPane] = tmux('list-panes', '-t', '=ws-relay:peers', '-F', '#{pane_id}').stdout.trim().split('\n')
+    await new Promise(res => setTimeout(res, 500))
+    const ledger = join(scratch, 'ledger')
+    const line = `READY FOR CODEX · it's "x" $(touch ${scratch}/RAN) ; touch ${scratch}/RAN`
+    const relay = (key, pane, allow) => spawnSync('/bin/sh', ['-c', r.RELAY_SCRIPT, 'sh', 'pass', ledger, key, pane, allow, line, socket, 'check'], { encoding: 'utf8' }).stdout.trim()
+    const first = relay('pass-t1', agentPane, 'cat')
+    await new Promise(res => setTimeout(res, 300))
+    // -J: the narrow pane wraps the line; joined, it is the line as typed
+    const typed = tmux('capture-pane', '-p', '-J', '-t', agentPane).stdout
+    check('relay: the cue typed into the agent\'s pane and entered', first === 'passed' && typed.split('\n').filter(l => l === line).length === 2, first)
+    check('relay: taken once, whichever session tries again', relay('pass-t1', agentPane, 'cat') === 'taken' && tmux('capture-pane', '-p', '-J', '-t', agentPane).stdout.split('\n').filter(l => l === line).length === 2)
+    const refused = relay('pass-t2', shellPane, 'claude')
+    await new Promise(res => setTimeout(res, 300))
+    check('relay: never into a pane that runs a shell', /^not-agent (sh|bash)$/.test(refused) && !tmux('capture-pane', '-p', '-J', '-t', shellPane).stdout.includes('READY FOR') && !existsSync(`${scratch}/RAN`), refused)
+    check('relay: a pane that is gone, said', relay('pass-t3', '%999', 'cat') === 'gone')
+    // scrolled back: the keys would go to tmux, so nothing is typed, and the step stays for later
+    tmux('copy-mode', '-t', agentPane)
+    const scrolled = relay('pass-t4', agentPane, 'cat')
+    check('relay: a pane in copy mode is left alone; the step stays untaken', scrolled === 'in-mode' && !existsSync(join(ledger, 'pass-t4')) && tmux('display-message', '-p', '-t', agentPane, '#{pane_in_mode}').stdout.trim() === '1', scrolled)
+    tmux('send-keys', '-t', agentPane, '-X', 'cancel')
+    check('relay: passed once the pane leaves copy mode', relay('pass-t4', agentPane, 'cat') === 'passed')
+    // copy mode entered while the line is typed: the Enter would go to tmux, so it is not sent, and said so
+    const racing = spawn('/bin/sh', ['-c', r.RELAY_SCRIPT, 'sh', 'pass', ledger, 'pass-t7', agentPane, 'cat', 'READY FOR CODEX · raced', socket, 'check'])
+    let raced = ''
+    racing.stdout.on('data', d => { raced += d })
+    // listened for at once: a relay that ends early must not leave this waiting (node would exit without cleaning up)
+    const racingEnded = new Promise(res => racing.on('close', res))
+    await new Promise(res => setTimeout(res, 250))
+    tmux('copy-mode', '-t', agentPane)
+    await racingEnded
+    tmux('send-keys', '-t', agentPane, '-X', 'cancel')
+    check('relay: copy mode entered as the line is typed: not sent, said so', raced.trim() === 'unsent', raced.trim())
+    // the unsent line waits in the stand-in's input: cleared, as the owner would before going on
+    tmux('send-keys', '-t', agentPane, 'C-u')
+    // a line that ends in ; (tmux reads a trailing ; as the end of a command)
+    const semis = `READY FOR CODEX · ends in semicolons;;`
+    spawnSync('/bin/sh', ['-c', r.RELAY_SCRIPT, 'sh', 'pass', ledger, 'pass-t5', agentPane, 'cat', semis, socket, 'check'], { encoding: 'utf8' })
+    await new Promise(res => setTimeout(res, 300))
+    check('relay: a trailing ; typed as it is', tmux('capture-pane', '-p', '-J', '-t', agentPane).stdout.split('\n').filter(l => l === semis).length === 2)
+    // the agent in the pane but not in its foreground (a stopped background job of an interactive shell)
+    tmux('new-window', '-t', '=ws-relay:', '-n', 'bg', '/bin/sh -i')
+    const bgPane = tmux('list-panes', '-t', '=ws-relay:bg', '-F', '#{pane_id}').stdout.trim()
+    await new Promise(res => setTimeout(res, 300))
+    tmux('send-keys', '-t', bgPane, 'cat &', 'Enter')
+    await new Promise(res => setTimeout(res, 500))
+    const background = relay('pass-t6', bgPane, 'cat')
+    check('relay: an agent in the pane but not in its foreground is not typed into', /^not-agent /.test(background) && !background.includes('cat'), background)
+
+  } finally {
+    // a check that throws still ends the private server
+    tmux('kill-server')
+    rmSync(join(process.env.TMUX_TMPDIR ?? '/tmp', `tmux-${process.getuid()}`, socket), { force: true })
+    rmSync(scratch, { recursive: true, force: true })
+  }
 }
 
 process.exitCode = failures > 0 ? 1 : 0

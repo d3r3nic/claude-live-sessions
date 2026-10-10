@@ -243,6 +243,7 @@ function machine(argv: readonly string[], env: unknown): Run {
     case 'tmux':
       if (argv[1] === 'list-panes') return world.tmuxPanes === '' ? { exitCode: 1, stdout: '', stderr: 'no server running\n' } : ok(world.tmuxPanes)
       if (argv[1] === 'list-clients') return ok(world.tmuxClients)
+      if (argv[1] === 'list-windows') return ok('@1\n@2\n')
       if (argv[1] === 'select-window' || argv[1] === 'switch-client') return ok('')
       if (argv[1] === 'has-session') return world.tmuxPanes.includes(`${(argv[3] ?? '').slice(1)}\t`) ? ok('') : { exitCode: 1, stdout: '', stderr: '' }
       if (argv[1] === 'show-options') return ok(`${world.tmuxOwner}\n`)
@@ -1233,7 +1234,7 @@ describe('workspaces', () => {
     expect(cmd.endsWith("; tmux attach -t '=ws-practice-rbac'")).toBe(true)
     // made with the mouse on in its session alone, and each side's border naming its agent
     expect(cmd).toContain("\\; set-option '-t' 'ws-practice-rbac' 'mouse' 'on'")
-    expect(cmd).toContain("\\; set-window-option '-t' 'ws-practice-rbac:' 'pane-border-status' 'top'")
+    expect(cmd).toContain("\\; set-window-option '-t' 'ws-practice-rbac:peers' 'pane-border-status' 'top'")
     expect(cmd).not.toContain('-g')
     // its agents may work in the worktrees folder beside the checkout; Claude takes the first prompt once
     const withCheckout = openCommand({ ...practice, checkout: '/Users/u/dev/web-app' }, HOME)
@@ -1336,8 +1337,13 @@ describe('workspaces', () => {
     await ui.press({ key: 'open codex-' + RESUMED_A })
     // a workspace running from before is set up for use by hand when opened: the mouse on in its session, borders named
     const setUp = runs.filter(r => r[0] === 'tmux' && (r[1] === 'set-option' || r[1] === 'set-window-option'))
-    expect(setUp.slice(0, 3)).toEqual(sessionSetup('ws-practice-rbac').map(a => ['tmux', ...a]))
-    expect(sessionSetup('ws-practice-rbac')[0]).toEqual(['set-option', '-t', 'ws-practice-rbac', 'mouse', 'on'])
+    // each of its windows, by id: the agents' windows whatever window is current
+    expect(runs.find(r => r[0] === 'tmux' && r[1] === 'list-windows')).toEqual(['tmux', 'list-windows', '-t', '=ws-practice-rbac', '-F', '#{window_id}'])
+    expect(setUp.slice(0, 5)).toEqual(sessionSetup('ws-practice-rbac', ['@1', '@2']).map(a => ['tmux', ...a]))
+    expect(sessionSetup('ws-practice-rbac', ['@1', '@2']).map(a => `${a[0]} ${a[2]} ${a[3]}`)).toEqual([
+      'set-option ws-practice-rbac mouse', 'set-window-option @1 pane-border-status', 'set-window-option @1 pane-border-format',
+      'set-window-option @2 pane-border-status', 'set-window-option @2 pane-border-format',
+    ])
     // its pane: its window, then the pane itself
     expect(runs.filter(r => r[0] === 'tmux' && (r[1] === 'select-window' || r[1] === 'select-pane'))).toEqual([['tmux', 'select-window', '-t', '%2'], ['tmux', 'select-pane', '-t', '%2']])
     await ui.unmount()
@@ -1383,6 +1389,8 @@ describe('workspaces', () => {
     await $.session.start(START)
     const run = async (args: string) => (await $.command.run({ ...SESSIONS, command: 'workspace', args })).text
     expect(await run('open practice-rbac')).toMatch(/^Not opened: tmux session ws-practice-rbac was not started for this workspace/)
+    // a session not started for it is left as it is: no mouse, no borders
+    expect(runs.filter(r => r[0] === 'tmux' && (r[1] === 'set-option' || r[1] === 'set-window-option' || r[1] === 'list-windows'))).toEqual([])
     expect(await run('open gone')).toBe('Not opened: its folder /Users/u/dev/gone is not there any more.')
     world.tmuxPanes = ''
     world.openFails = true

@@ -159,9 +159,11 @@ export const AGENT_COMMANDS: Record<Tool, string> = { claude: 'claude', codex: '
  * not scrolled back (copy mode, where keys would go to tmux, not the agent),
  * and answers `passed`, `taken`, `gone`, `not-agent <the foreground
  * commands>`, `failed`, `in-mode` (the step is left untaken, to pass
- * later), or `unsent` (the pane went into copy mode while the line was
- * typed: it waits in the agent's input, for Enter). A `;` that ends the line goes as its key code: tmux takes an
- * argument ending in `;` as the end of a command and drops it.
+ * later), or `unsent` (the pane went into copy mode after the line was
+ * typed: it waits in the agent's input, for Enter). The check for copy
+ * mode and the typing are one step of the tmux server, so a scroll between
+ * them cannot turn the line into copy-mode keys; the line goes through a
+ * tmux buffer, so tmux parses none of it.
  */
 export const RELAY_SCRIPT = [
   'kind=$1; ledger=$2; key=$3; pane=$4; allow=$5; text=$6; sock=$7; title=$8',
@@ -177,14 +179,21 @@ export const RELAY_SCRIPT = [
   `cmds=$(ps -t "\${tty#/dev/}" -o stat=,comm= 2>/dev/null | awk '$1 ~ /[+]/ { n = $2; sub(".*/", "", n); print n }' | sort -u)`,
   'ok=; for c in $cmds; do case "|$allow|" in *"|$c|"*) ok=1;; esac; done',
   '[ -n "$ok" ] || { printf \'not-agent %s\\n\' "$(echo $cmds)"; exit 0; }',
-  `[ "$(t display-message -p -t "$pane" '#{pane_in_mode}' 2>/dev/null)" = 0 ] || { rmdir "$ledger/$key"; echo in-mode; exit 0; }`,
-  'body=$text; semis=',
-  'while [ "${body%;}" != "$body" ]; do body=${body%;}; semis="$semis;"; done',
-  't send-keys -t "$pane" -l -- "$body" || { echo failed; exit 0; }',
-  'while [ -n "$semis" ]; do t send-keys -t "$pane" -H 3b || { echo failed; exit 0; }; semis=${semis%;}; done',
+  // typed only while the pane is not scrolled back, checked and done in one step of the tmux server; the
+  // line goes through a buffer, so tmux reads none of it (a `;` that ends it stays)
+  'case $key in *[!A-Za-z0-9-]*) echo failed; exit 0;; esac',
+  'case $pane in %*[!0-9]*|%) echo gone; exit 0;; %*) ;; *) echo gone; exit 0;; esac',
+  'buf="relay-$key"',
+  `printf '%s' "$text" | t load-buffer -b "$buf" - || { echo failed; exit 0; }`,
+  `r=$(t if-shell -F -t "$pane" '#{pane_in_mode}' 'display-message -p in-mode' "paste-buffer -p -d -b $buf -t $pane ; display-message -p typed" 2>/dev/null)`,
+  'case $r in',
+  '  typed) ;;',
+  '  in-mode) t delete-buffer -b "$buf" 2>/dev/null; rmdir "$ledger/$key"; echo in-mode; exit 0;;',
+  '  *) t delete-buffer -b "$buf" 2>/dev/null; echo failed; exit 0;;',
+  'esac',
   'sleep 0.5',
-  `[ "$(t display-message -p -t "$pane" '#{pane_in_mode}' 2>/dev/null)" = 0 ] || { echo unsent; exit 0; }`,
-  't send-keys -t "$pane" Enter && echo passed || echo failed',
+  `r=$(t if-shell -F -t "$pane" '#{pane_in_mode}' 'display-message -p in-mode' "send-keys -t $pane Enter ; display-message -p sent" 2>/dev/null)`,
+  'case $r in sent) echo passed;; in-mode) echo unsent;; *) echo failed;; esac',
 ].join('\n')
 
 /**
