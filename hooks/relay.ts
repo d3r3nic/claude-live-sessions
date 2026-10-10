@@ -60,7 +60,7 @@ export const TURN_SCRIPT = [
   '    def cue: split("\\n") | map(select(test("^\\\\s*(?:[0-9]+\\\\.|[-*>])?\\\\s*[`*_]*(READY FOR (CLAUDE|CODEX)|NEEDS USER|SCOPE CLOSED) · "))) | (last // "") | gsub("[\\t\\r]"; " ");',
   '    def compacting: test("^\\\\s*/compact(\\\\s|$)|^\\\\s*(<command-message>compact</command-message>\\\\s*)?<command-name>/compact</command-name>");',
   // a compaction (`/compact`, which Claude Code also records as a prompt of that line) is never a turn, and never
-  // the owner's presence: the relay sends it too
+  // the owner's presence: Claude's own at a hand-off records one too
   '    def said: if (.message.content | type) == "string" then .message.content else ([.message.content[]? | select(.type == "text") | .text] | join("\\n")) end;',
   '    def step($o):',
   '      if $o.type == "assistant" and (($o.message.stop_reason // "") as $r | $r == "tool_use" or $r == "pause_turn" or $r == "") then',
@@ -190,9 +190,46 @@ export function relaySteps(ws: Pick<Workspace, 'name' | 'relay'> & Partial<Pick<
 
 /**
  * How full Claude's context may get, in percent, before it compacts itself once its hand-off is passed
- * (compactAtHandOff). Codex compacts itself, by its own measure: the relay never types /compact into it.
+ * (compactAtHandOff, by compactPlan). Codex compacts itself, by its own measure: the relay never types /compact
+ * into it.
  */
 export const COMPACT_AT = 50
+/** From this full (or the workspace's own line, if higher), Claude compacts as soon as its hand-off is passed. */
+export const COMPACT_NOW_AT = 80
+
+/**
+ * How long Claude's prompt cache lives, from its transcript "$1": the
+ * lifetime of the last cache write its replies record, `1h` or `5m`
+ * (nothing if none says). The last 400 lines; a line cut by `tail` skipped.
+ */
+export const CACHE_SCRIPT = [
+  "tail -n 400 \"$1\" 2>/dev/null | /usr/bin/jq -R -r '",
+  '  fromjson? | select(type == "object" and .type == "assistant" and .isSidechain != true) | .message.usage.cache_creation // empty',
+  '  | if (.ephemeral_1h_input_tokens // 0) > 0 then "1h" elif (.ephemeral_5m_input_tokens // 0) > 0 then "5m" else empty end',
+  "' 2>/dev/null | tail -n 1",
+].join('\n')
+
+/** CACHE_SCRIPT's answer: the cache's lifetime in ms, if its records say. */
+export const cacheLifeOf = (stdout: string): number | undefined =>
+  stdout.trim() === '1h' ? 3_600_000 : stdout.trim() === '5m' ? 300_000 : undefined
+
+/**
+ * When a workspace's Claude, whose hand-off was just passed, compacts: at
+ * once when its context is near the window (COMPACT_NOW_AT, or the
+ * workspace's line if higher); else, from the workspace's line up, just
+ * before its prompt cache expires (`cacheMs` after its reply; 5 minutes if
+ * its records do not say), if it is still idle then: a hand-back within
+ * the cache's life keeps its whole context, read cheaply from the cache,
+ * and a compaction made while the cache is still warm reads it cheaply
+ * too. It starts 5 minutes before an hour's cache ends, 90 seconds before
+ * a shorter one's. Below the line, or with the line off (0): never.
+ */
+export function compactPlan(at: number, percent: number, cacheMs: number | undefined): { when: 'now' } | { when: 'before-expiry'; afterMs: number } | undefined {
+  if (at <= 0 || percent < at) return undefined
+  if (percent >= Math.max(at, COMPACT_NOW_AT)) return { when: 'now' }
+  const life = cacheMs ?? 300_000
+  return { when: 'before-expiry', afterMs: Math.max(0, life - (life >= 3_600_000 ? 300_000 : 90_000)) }
+}
 
 /** What Claude is told to keep when it compacts in a workspace: the rest is in the peer-coding records. */
 export function claudeKeep(name: string): string {

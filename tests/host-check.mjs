@@ -911,6 +911,36 @@ except ChildProcessError: pass
   }
 }
 
+// how long Claude's prompt cache lives, read with the real jq from transcripts of each kind: the last reply that wrote
+// to the cache says; one that only read from it says nothing; a line cut by tail and a subagent's reply are skipped
+{
+  const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'live-sessions-cache-')))
+  try {
+    const reply = (creation, extra = {}) => JSON.stringify({ type: 'assistant', ...extra, message: { usage: { input_tokens: 2, cache_read_input_tokens: 9000, ...(creation === undefined ? {} : { cache_creation: creation }) } } })
+    const write = (name, lines) => {
+      const file = join(scratch, name)
+      writeFileSync(file, `${lines.join('\n')}\n`)
+      return spawnSync('/bin/sh', ['-c', r.CACHE_SCRIPT, 'sh', file], { encoding: 'utf8' }).stdout
+    }
+    const hour = write('hour.jsonl', [
+      '{"type":"assistant","message":{"usage":{"cache_creation":{"ephemeral_5m_input_t',
+      reply({ ephemeral_5m_input_tokens: 10, ephemeral_1h_input_tokens: 0 }),
+      reply({ ephemeral_1h_input_tokens: 1582, ephemeral_5m_input_tokens: 0 }),
+      reply({ ephemeral_1h_input_tokens: 0, ephemeral_5m_input_tokens: 0 }),
+      reply({ ephemeral_5m_input_tokens: 99 }, { isSidechain: true }),
+      JSON.stringify({ type: 'user', message: { content: 'next' } }),
+    ])
+    const five = write('five.jsonl', [reply({ ephemeral_1h_input_tokens: 7 }), reply({ ephemeral_5m_input_tokens: 4 })])
+    const none = write('none.jsonl', [reply(undefined), JSON.stringify({ type: 'user', message: { content: 'x' } })])
+    const missing = spawnSync('/bin/sh', ['-c', r.CACHE_SCRIPT, 'sh', join(scratch, 'gone.jsonl')], { encoding: 'utf8' }).stdout
+    check('compaction: a prompt cache\'s life from the last reply that wrote to it; nothing when none says or there is no transcript',
+      r.cacheLifeOf(hour) === 3_600_000 && r.cacheLifeOf(five) === 300_000 && r.cacheLifeOf(none) === undefined && r.cacheLifeOf(missing) === undefined,
+      JSON.stringify([hour, five, none, missing]))
+  } finally {
+    rmSync(scratch, { recursive: true, force: true })
+  }
+}
+
 // the ops screen, from a snapshot and event log of its own: every frame exactly the window's size (widths measured
 // apart from the screen's own code), each row knowing what a click opens; real clicks in a pty on a private tmux
 // server; the terminal given back however it ends; a snapshot of another version waited on, never drawn; the

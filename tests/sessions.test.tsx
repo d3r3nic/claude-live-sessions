@@ -51,7 +51,7 @@ import {
 } from '../hooks/collect'
 import type { CodexProc, ThreadRow } from '../hooks/collect'
 import type { ClaudeSession, CodexSession, Snapshot, Workspace } from '../types'
-import { afterOwner, afterStep, claudeKeep, COMPACT_AT, cueOf, cutBytes, eventOf, EVENT_SCRIPT, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_MAX_AGE_MS, TURN_SCRIPT } from '../hooks/relay'
+import { afterOwner, afterStep, cacheLifeOf, CACHE_SCRIPT, claudeKeep, COMPACT_AT, COMPACT_NOW_AT, compactPlan, cueOf, cutBytes, eventOf, EVENT_SCRIPT, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_MAX_AGE_MS, TURN_SCRIPT } from '../hooks/relay'
 import type { Side } from '../hooks/relay'
 import { branchOf, checkDue, checkFrom, driftRequest, parseVerdict, recordFolderOf, RECORDS_SCRIPT } from '../hooks/drift'
 import { bringable, codexDir, codexFlags, CODEX_MODE_SCRIPT, CODEX_TASK_SCRIPT, codexTaskState, envOfProfile, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, threadFrom, toggled, withThreads } from '../hooks/bring'
@@ -141,6 +141,8 @@ const local = (line: string) =>
 
 /** What a test changes about the machine; engine() resets it. */
 const world = {
+  /** What CACHE_SCRIPT prints: the lifetime of Claude's prompt cache (`1h`, `5m`), or nothing. */
+  cacheLife: '',
   /** What BRANCH_SCRIPT prints for each folder: main or linked, then the branch checked out (none: a detached HEAD). */
   heads: {} as Record<string, string>,
   /** A folder whose worktree lookup takes 5 s. */
@@ -213,6 +215,7 @@ const world = {
   codexTaskAnswer: undefined as (() => string) | undefined,
 }
 const resetWorld = () => {
+  world.cacheLife = ''
   world.heads = { '/Users/u/dev/web-app': 'main\nmain\n', '/Users/u/dev/build': 'linked\nfix/build\n' }
   world.slowWorktrees = ''
   world.moreWorktrees = ''
@@ -313,6 +316,7 @@ function machine(argv: readonly string[], env: unknown): Run {
           ? ok(`worktree /Users/u/dev/web-app\0HEAD 1111\0branch refs/heads/main\0\0worktree /Users/u/dev/build\0HEAD 2222\0branch refs/heads/fix/build\0\0worktree /Users/u/dev/web-app-worktrees/probe\0HEAD 3333\0detached\0\0${world.moreWorktrees}`)
           : { exitCode: 128, stdout: '', stderr: 'fatal: not a git repository\n' }
       }
+      if (argv[2] === CACHE_SCRIPT) return ok(world.cacheLife)
       if (argv[2] === BRANCH_SCRIPT) return world.heads[args[0] ?? ''] === undefined ? { exitCode: 1, stdout: '', stderr: '' } : ok(world.heads[args[0]!]!)
       // build is a worktree of web-app's
       if (argv[2] === CHECKOUT_SCRIPT && args[0] === '/Users/u/dev/build') return ok('ok /Users/u/dev/web-app\n')
@@ -2539,9 +2543,9 @@ describe('the context guard', () => {
     expect(world.events.filter(e => e.kind === 'compact')).toEqual([])
   })
 
-  test('a workspace\'s Claude compacts itself after its hand-off to Codex is passed, when its context is full enough', async ($, on) => {
+  test('a workspace\'s Claude near the window compacts itself as soon as its hand-off to Codex is passed', async ($, on) => {
     const { files, clock } = engine(on, machine, { termProgram: 'Apple_Terminal', selfId: 'session-104' })
-    let percent = 61
+    let percent = 85
     on('session.usage', async () => ({ value: { startedAt: NOW, context: { tokens: percent * 10_000, window: 1_000_000, percent }, rateLimits: [] } }))
     const compacted: (string | undefined)[] = []
     // the engine's compaction, recorded: done (a summary left), or vetoed
@@ -2573,7 +2577,7 @@ describe('the context guard', () => {
     await wait(4_000)
     expect(compacted).toEqual([claudeKeep('Practice RBAC')])
     // done: logged for the ops screen
-    expect(world.events.at(-1)).toMatchObject({ kind: 'compact', workspace: 'practice-rbac', agent: 'claude', text: 'Practice RBAC: Claude compacted (its context was 61% full)' })
+    expect(world.events.at(-1)).toMatchObject({ kind: 'compact', workspace: 'practice-rbac', agent: 'claude', text: 'Practice RBAC: Claude compacted (its context was 85% full)' })
     // vetoed (a hook, a turn begun): asked, not logged
     isVetoed = true
     await end(`Done.\n${READY_CODEX}`, 'turn-v1')
@@ -2628,6 +2632,88 @@ describe('the context guard', () => {
       await wait(4_000)
     }
     expect(compacted).toHaveLength(3)
+  })
+
+  test('when Claude compacts: at once near the window; else just before its prompt cache expires; never below the line', async () => {
+    expect([COMPACT_AT, COMPACT_NOW_AT]).toEqual([50, 80])
+    // near the window (80%, or the workspace's line if higher): at once
+    expect(compactPlan(50, 85, 3_600_000)).toEqual({ when: 'now' })
+    expect(compactPlan(90, 85, 3_600_000)).toBeUndefined()
+    expect(compactPlan(90, 92, 3_600_000)).toEqual({ when: 'now' })
+    // from the line up: 5 minutes before an hour's cache ends, 90 seconds before a 5-minute one's (also when unknown)
+    expect(compactPlan(50, 61, 3_600_000)).toEqual({ when: 'before-expiry', afterMs: 3_300_000 })
+    expect(compactPlan(50, 61, 300_000)).toEqual({ when: 'before-expiry', afterMs: 210_000 })
+    expect(compactPlan(50, 61, undefined)).toEqual({ when: 'before-expiry', afterMs: 210_000 })
+    // below the line, or the line off: never
+    expect(compactPlan(50, 49, 3_600_000)).toBeUndefined()
+    expect(compactPlan(0, 99, 3_600_000)).toBeUndefined()
+    // the cache's life, from what Claude's records say
+    expect([cacheLifeOf('1h\n'), cacheLifeOf('5m'), cacheLifeOf(''), cacheLifeOf('2h')]).toEqual([3_600_000, 300_000, undefined, undefined])
+  })
+
+  test('below the window, a workspace\'s Claude compacts just before its cache expires, if still idle; a hand-back or a prompt first keeps it whole', { timeoutMs: 60_000 }, async ($, on) => {
+    const { files, clock } = engine(on, machine, { termProgram: 'Apple_Terminal', selfId: 'session-104' })
+    let percent = 61
+    on('session.usage', async () => ({ value: { startedAt: NOW, context: { tokens: percent * 10_000, window: 1_000_000, percent }, rateLimits: [] } }))
+    const compacted: (string | undefined)[] = []
+    on('session.compact', async ($, e) => {
+      compacted.push(e.instructions)
+      return { messages: [{ role: 'user' as const, text: 'summary', toolUses: [] }] }
+    })
+    on('turn.complete', async ($, e) => ({ text: e.answer }))
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, checkout: '/Users/u/dev/web-app', relay: relayOn() }] }))
+    world.tmuxPanes = 'ws-practice-rbac\tpeers\t/dev/ttys022\t%1\tclaude\nws-practice-rbac\tpeers\t/dev/ttys045\t%2\tcodex\n'
+    world.tmuxOwner = String(NOW)
+    world.cacheLife = '1h\n'
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    // the pane closed again, so the hours waited are collected at the status line's pace, not the pane's
+    await $.command.run(SESSIONS)
+    const ledger = '/Users/u/Library/Application Support/live-sessions/relayed'
+    const handOff = async (id: string) => {
+      world.turns = { 'session-104': `done\t${id}\t${new Date(NOW).toISOString()}\t${READY_CODEX}` }
+      files.set(`${ledger}/pass-${id}`, '')
+      await $.turn.complete({ answer: `Done.\n${READY_CODEX}`, durationMs: 1_000, isAborted: false, turnId: id, reason: 'answer' })
+    }
+    const minutes = async (n: number) => {
+      for (let m = 0; m < n; m++) await clock.advance(60_000)
+    }
+    // its hand-off passed at 61%, an hour's cache: nothing at once, nothing at 54 minutes, compacted at 55
+    await handOff('turn-e1')
+    await minutes(54)
+    expect(compacted).toEqual([])
+    await minutes(2)
+    expect(compacted).toEqual([claudeKeep('Practice RBAC')])
+    expect(world.events.at(-1)).toMatchObject({ kind: 'compact', agent: 'claude', text: 'Practice RBAC: Claude compacted (before its prompt cache expired, idle 55m; its context was 61% full)' })
+    // Codex hands back within the hour (a new turn of Claude's): its context stays whole
+    await handOff('turn-e2')
+    await minutes(20)
+    world.turns = { 'session-104': `done\tturn-e3\t${new Date(NOW).toISOString()}\tWorking on it.` }
+    await minutes(40)
+    expect(compacted).toHaveLength(1)
+    // cleared into another conversation while it waited: no
+    await handOff('turn-e4')
+    await minutes(10)
+    world.sessionId = 'session-new'
+    await minutes(50)
+    world.sessionId = undefined
+    expect(compacted).toHaveLength(1)
+    // compacted meanwhile by other means (the owner's /compact): below the line at the time, so no
+    await handOff('turn-e5')
+    await minutes(10)
+    percent = 12
+    await minutes(50)
+    percent = 61
+    expect(compacted).toHaveLength(1)
+    // a 5-minute cache, or none its records name: compacted three and a half minutes after its reply
+    for (const life of ['5m\n', '']) {
+      world.cacheLife = life
+      await handOff(`turn-f-${life.trim() || 'unknown'}`)
+      await clock.advance(200_000)
+      const before = compacted.length
+      await clock.advance(20_000)
+      expect(compacted.length).toBe(before + 1)
+    }
   })
 
   test('Claude compacts at, in a workspace\'s actions: 50, 60, 70, 80 percent, off', async ($, on) => {

@@ -3,7 +3,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { ClaudeSession, CodexSession, Place, Relay, Snapshot, Thread, Workspace } from '../types'
 import type { Screen } from './workspaces'
-import { AGENT_COMMANDS, afterOwner, afterStep, claudeKeep, COMPACT_AT, cueOf, cutBytes, eventOf, EVENT_SCRIPT, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_SCRIPT } from './relay'
+import { AGENT_COMMANDS, afterOwner, afterStep, cacheLifeOf, CACHE_SCRIPT, claudeKeep, COMPACT_AT, compactPlan, cueOf, cutBytes, eventOf, EVENT_SCRIPT, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_SCRIPT } from './relay'
 import type { RelayEvent, Side, Step } from './relay'
 import { branchOf, checkDue, DRIFT_EVERY, driftRequest, parseVerdict, recordFolderOf, RECORDS_SCRIPT } from './drift'
 import { bringable, codexDir, envOfProfile, codexFlags, CODEX_MODE_SCRIPT, CODEX_TASK_SCRIPT, codexTaskState, JOB_COMMANDS, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, toggled, withThreads } from './bring'
@@ -1365,16 +1365,20 @@ async function logEvent($: EngineInterface, home: string, event: RelayEvent) {
 
 /**
  * In a Claude session that is a workspace's agent: once a turn of its ends
- * with a hand-off to Codex (READY FOR CODEX) and the relay is on (auto), and
- * its context is at least the workspace's `compactAt` percent full, it
- * compacts itself, told what to keep, between turns (refused while one runs):
- * after the relay has passed that hand-off (its ledger step), so Codex starts
- * at once, and only while that turn is still its last. Never after a cue for
- * the owner (NEEDS USER, SCOPE CLOSED): it waits for the owner's answer.
+ * with a hand-off to Codex (READY FOR CODEX) and the relay is on (auto), it
+ * compacts itself, told what to keep, between turns (refused while one
+ * runs), as compactPlan says: at once, after the relay has passed that
+ * hand-off (its ledger step), when its context is near the window; else,
+ * from the workspace's `compactAt` line up, just before its prompt cache
+ * expires, if that turn is still its last then (no hand-back, nothing typed
+ * to it) and it is still that conversation. Never after a cue for the owner
+ * (NEEDS USER, SCOPE CLOSED): it waits for the owner's answer. A wait cut
+ * by a reload of this plugin or the session's end leaves it as it is.
  */
 async function compactAtHandOff($: EngineInterface, answer: string) {
   const cue = answer.split('\n').map(cueOf).filter(c => c !== undefined).at(-1)
   if (cue?.kind !== 'ready' || cue.to !== 'codex') return
+  const endedAt = await $.clock.now()
   const home = (await $.env.get('HOME')) ?? ''
   const id = await $.session.id()
   const snap = await read($, snapshot)
@@ -1384,13 +1388,15 @@ async function compactAtHandOff($: EngineInterface, answer: string) {
   // a workspace of one agent has no hand-off to wait for, even with a relay turned on there by hand
   if (self === undefined || ws === undefined || pane?.window !== 'claude' || ws.only !== undefined || ws.relay?.mode !== 'auto') return
   const at = ws.compactAt ?? COMPACT_AT
-  if (at <= 0) return
   const { context } = await $.session.usage()
-  if (context.percent === undefined || context.percent < at) return
+  if (context.percent === undefined) return
+  const file = transcriptPath(`${home}/.${self.profile}`, self.startCwd, id)
+  const cacheMs = cacheLifeOf((await $.process.run(['/bin/sh', '-c', CACHE_SCRIPT, 'sh', file], { timeoutMs: 20_000 }).catch(() => ({ stdout: '' }))).stdout)
+  const plan = compactPlan(at, context.percent, cacheMs)
+  if (plan === undefined) return
   // its last turn, as the relay reads its records: that turn (once its reply is written), still its last, until the
   // relay has taken up its hand-off (its ledger step); not in two minutes (Codex at work, the relay waiting for you):
   // left for a later hand-off
-  const file = transcriptPath(`${home}/.${self.profile}`, self.startCwd, id)
   const lastTurn = async () => parseTurns((await $.process.run(['/bin/sh', '-c', TURN_SCRIPT, 'sh', file], { timeoutMs: 20_000 }).catch(() => ({ stdout: '' }))).stdout).get(file)
   let turnId: string | undefined
   for (let waited = 0; ; waited += 2_000) {
@@ -1404,11 +1410,22 @@ async function compactAtHandOff($: EngineInterface, answer: string) {
     if (waited >= 120_000) return
     await $.clock.sleep(2_000)
   }
+  let said = `its context was ${Math.round(context.percent)}% full`
+  if (plan.when === 'before-expiry') {
+    // idle until just before its cache expires: a hand-back, a prompt or another conversation since, and it is left
+    const wait = endedAt + plan.afterMs - (await $.clock.now())
+    if (wait > 0) await $.clock.sleep(wait)
+    const turn = await lastTurn()
+    if (turn?.state !== 'done' || turn.id !== turnId) return
+    const now = await $.session.usage()
+    if (now.context.percent === undefined || now.context.percent < at) return
+    said = `before its prompt cache expired, idle ${Math.round(((await $.clock.now()) - endedAt) / 60_000)}m; its context was ${Math.round(now.context.percent)}% full`
+  }
   // still the same conversation (not cleared or resumed into another while it waited)
   if ((await $.session.id()) !== id) return
   // logged once it has been done (not refused, not vetoed)
   const done = await $.session.compact({ instructions: claudeKeep(ws.name) }).then(r => !('skip' in r && r.skip !== undefined)).catch(() => false)
-  if (done) await logEvent($, home, { kind: 'compact', text: `${ws.name}: Claude compacted (its context was ${Math.round(context.percent)}% full)`, workspace: ws.id, agent: 'claude' })
+  if (done) await logEvent($, home, { kind: 'compact', text: `${ws.name}: Claude compacted (${said})`, workspace: ws.id, agent: 'claude' })
 }
 
 /** Forgets a workspace (the command's `rm` and the pane's Remove): its tmux session keeps running. */
