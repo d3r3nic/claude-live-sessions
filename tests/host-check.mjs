@@ -391,7 +391,7 @@ except ChildProcessError: pass
   // tab once the tab is back at its shell; never one with other tabs, never one still at work, never starts Terminal
   const closeWith = (running, windows) => {
     const closed = []
-    const app = () => ({ running: () => running, windows: () => windows.map(w => ({ tabs: () => w.tabs.map(t => ({ tty: () => t.tty, busy: () => t.busy() })), close: () => closed.push(w.name) })) })
+    const app = () => ({ running: () => running, windows: () => windows.map(w => ({ bounds: () => ({ x: 1, y: 2, width: 1300, height: 900 }), tabs: () => w.tabs.map(t => ({ tty: () => t.tty, busy: () => t.busy(), fontSize: () => 13 })), close: () => closed.push(w.name) })) })
     const result = new Function('Application', 'delay', `${w.CLOSE_SCRIPT}\nreturn run(['ttys050'])`)(app, () => undefined)
     return [result, closed.join(',')]
   }
@@ -403,7 +403,7 @@ except ChildProcessError: pass
     closeWith(true, [{ name: 'w', tabs: [{ tty: '/dev/ttys050', busy: () => true }] }]),
     closeWith(true, [{ name: 'w', tabs: [{ tty: '/dev/ttys050', busy: () => ++polls < 3 }] }]),
   ]
-  check('hide: the window-closing script closes only a lone tab back at its shell', JSON.stringify(cases) === JSON.stringify([['none', ''], ['none', ''], ['shared', ''], ['busy', ''], ['closed', 'w']]), JSON.stringify(cases))
+  check('hide: the window-closing script closes only a lone tab back at its shell, saying where it was', JSON.stringify(cases) === JSON.stringify([['none', ''], ['none', ''], ['shared', ''], ['busy', ''], ['closed {"x":1,"y":2,"width":1300,"height":900,"fontSize":13}', 'w']]), JSON.stringify(cases))
     // a workspace made before the marks (a window per agent), with a window of the owner's own now current:
     // set up at Open, each window gets the borders, the agents' named by their windows
     t6('new-session', '-d', '-s', 'ws-old', '-n', 'claude', 'sleep 30')

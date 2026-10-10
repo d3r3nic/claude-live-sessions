@@ -103,7 +103,15 @@ export const FOCUS_SCRIPT = [
 export const OPEN_SCRIPT = [
   'function run(argv) {',
   "  const terminal = Application('Terminal')",
-  '  terminal.doScript(argv[0])',
+  '  const tab = terminal.doScript(argv[0])',
+  // a placement, when given: its font size first (which can resize the window), then where and how large
+  '  if (argv[1] !== undefined) {',
+  '    const place = JSON.parse(argv[1])',
+  '    const tty = tab.tty()',
+  '    const win = terminal.windows().find(w => w.tabs().some(t => t.tty() === tty))',
+  '    if (place.fontSize > 0) tab.fontSize = place.fontSize',
+  '    if (win !== undefined && place.width > 0) win.bounds = { x: place.x, y: place.y, width: place.width, height: place.height }',
+  '  }',
   '  terminal.activate()',
   "  return 'opened'",
   '}',

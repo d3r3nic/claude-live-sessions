@@ -177,8 +177,11 @@ export const CLOSE_SCRIPT = `function run(argv) {
     const tabs = w.tabs()
     if (tabs.length !== 1) return 'shared'
     if (!tabs[0].busy()) {
+      // where it was and its font, so the workspace opens there again
+      const b = w.bounds()
+      const place = { x: b.x, y: b.y, width: b.width, height: b.height, fontSize: tabs[0].fontSize() }
       w.close()
-      return 'closed'
+      return 'closed ' + JSON.stringify(place)
     }
     delay(0.1)
   }
@@ -201,12 +204,72 @@ export const HIDE_SCRIPT = [
   'case $tty in /dev/ttys[0-9]*) ;; *) exit 0;; esac',
   `last=$(tmux display-message -p -c "$tty" '#{client_last_session}' 2>/dev/null)`,
   'if [ -n "$last" ] && tmux has-session -t "=$last" 2>/dev/null; then tmux switch-client -c "$tty" -t "=$last"; exit 0; fi',
+  // which workspace session it shows, asked before it is detached: its window's place is kept under that name
+  `session=$(tmux display-message -p -c "$tty" '#{client_session}' 2>/dev/null)`,
   'tmux detach-client -t "$tty" 2>/dev/null || exit 0',
-  `exec /usr/bin/osascript -l JavaScript - "\${tty#/dev/}" <<'JXA'`,
+  `out=$(/usr/bin/osascript -l JavaScript - "\${tty#/dev/}" <<'JXA'`,
   CLOSE_SCRIPT,
   'JXA',
+  ')',
+  'case $session in ws-*[!a-z0-9-]*) session=;; ws-?*) ;; *) session=;; esac',
+  'case $out in "closed {"*) [ -n "$session" ] && mkdir -p "$(dirname "$0")/windows" && printf \'%s\\n\' "\${out#closed }" > "$(dirname "$0")/windows/$session.json";; esac',
+  'echo "\${out%% *}"',
   '',
 ].join('\n')
+
+/** Where a workspace window was, as hide.sh keeps it: its position and size (points, from the top left) and font size. */
+export type Placement = { x: number; y: number; width: number; height: number; fontSize: number }
+
+/** The file hide.sh keeps a workspace session's window place in. */
+export const placementPath = (home: string, session: string) => `${home}/Library/Application Support/live-sessions/windows/${session}.json`
+
+/** A kept placement, if it is one: whole numbers, a window at least 300×200, a font from 6 to 72 (0: as the profile has it). */
+export function placementFrom(raw: unknown): Placement | undefined {
+  const o = raw as Partial<Record<keyof Placement, unknown>> | null
+  if (typeof o !== 'object' || o === null) return undefined
+  const n = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? Math.round(v) : undefined)
+  const [x, y, width, height, fontSize] = [n(o.x), n(o.y), n(o.width), n(o.height), n(o.fontSize) ?? 0]
+  if (x === undefined || y === undefined || width === undefined || height === undefined || width < 300 || height < 200) return undefined
+  return { x, y, width, height, fontSize: fontSize >= 6 && fontSize <= 72 ? fontSize : 0 }
+}
+
+/**
+ * A workspace window's first place: most of the screen (85% of the part
+ * the menu bar and Dock leave, centred), in the font size of the window it
+ * is opened from, so it never opens small in a profile's larger font.
+ */
+export function defaultPlacement(screen: { x: number; y: number; width: number; height: number }, fontSize: number): Placement {
+  const width = Math.round(screen.width * 0.85)
+  const height = Math.round(screen.height * 0.85)
+  return {
+    x: Math.round(screen.x + (screen.width - width) / 2),
+    y: Math.round(screen.y + (screen.height - height) / 2),
+    width,
+    height,
+    fontSize: fontSize >= 6 && fontSize <= 72 ? Math.round(fontSize) : 0,
+  }
+}
+
+/**
+ * The main screen's part the menu bar and Dock leave (from its top left, as
+ * Terminal places windows), and the font size of terminal "$1"'s tab
+ * (`ttys012`; 0 when no Terminal tab is that terminal): JSON. Never starts
+ * Terminal.
+ */
+export const SCREEN_SCRIPT = `function run(argv) {
+  ObjC.import('AppKit')
+  const main = $.NSScreen.mainScreen
+  const full = main.frame
+  const free = main.visibleFrame
+  const screen = { x: free.origin.x, y: full.size.height - free.origin.y - free.size.height, width: free.size.width, height: free.size.height }
+  let fontSize = 0
+  const terminal = Application('Terminal')
+  if (terminal.running()) {
+    const tty = '/dev/' + argv[0]
+    for (const w of terminal.windows()) for (const t of w.tabs()) if (t.tty() === tty) fontSize = t.fontSize()
+  }
+  return JSON.stringify({ screen, fontSize })
+}`
 
 /**
  * The click on the status bar's Hide (for every tmux session: bindings are

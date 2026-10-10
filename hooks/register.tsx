@@ -29,8 +29,12 @@ import {
   shellQuote,
   sessionSetup,
   setupPrompt,
+  defaultPlacement,
   hideBinding,
   hidePath,
+  placementFrom,
+  placementPath,
+  SCREEN_SCRIPT,
   HIDE_SCRIPT,
   mayBindHide,
 } from './workspaces'
@@ -625,22 +629,39 @@ async function openWorkspace($: EngineInterface, ws: Workspace, at?: { window: s
       : { isOpen: false, text: `Not opened (${firstLine(switched.stderr) || `exit ${switched.exitCode}`}). Run: ${command}` }
   }
   if (term !== 'Apple_Terminal') return { isOpen: false, text: `Open it in a terminal: ${command}` }
-  const osascript = (script: string, arg: string) =>
+  const osascript = (script: string, ...args: string[]) =>
     $.process
-      .run(['/usr/bin/osascript', '-l', 'JavaScript', '-e', script, arg], { timeoutMs: 10_000 })
+      .run(['/usr/bin/osascript', '-l', 'JavaScript', '-e', script, ...args], { timeoutMs: 10_000 })
       .catch((error: unknown) => ({ exitCode: -1, stdout: '', stderr: message(error) }))
   // the terminals attached now (the snapshot may be seconds old)
   const attached = parseClients((await tmux(['list-clients', '-F', CLIENTS_FORMAT])).stdout)[name] ?? []
   for (const tty of attached) {
     if ((await osascript(FOCUS_SCRIPT, tty)).stdout.trim() === 'shown') return { isOpen: true, text: `Brought ${name} to the front.` }
   }
-  const opened = await osascript(OPEN_SCRIPT, command)
+  // where it was when last hidden; else most of the screen, in the font of the window it is opened from
+  const kept = await $.fs.read(placementPath(home, name)).then(text => placementFrom(JSON.parse(text))).catch(() => undefined)
+  const place = kept ?? (await firstPlacement($, osascript))
+  const opened = await osascript(OPEN_SCRIPT, command, ...(place === undefined ? [] : [JSON.stringify(place)]))
   const isOpened = opened.exitCode === 0 && opened.stdout.trim() === 'opened'
   // the window makes the session (made new, or again after it ended): once it is there, its bar gets Hide
   if (isOpened && !wasRunning) await prepareWhenMade($, home, ws)
   return isOpened
     ? { isOpen: true, text: `Opened ${name} in a new Terminal window.` }
     : { isOpen: false, text: `Not opened (${firstLine(opened.stderr) || `exit ${opened.exitCode}`}). Run: ${command}` }
+}
+
+/** A workspace window's first placement: from the screen, and the font size of this session's own tab. */
+async function firstPlacement($: EngineInterface, osascript: (script: string, ...args: string[]) => Promise<{ stdout: string }>) {
+  const selfId = await $.session.id()
+  const tty = (await read($, snapshot)).claude.find(s => s.sessionId === selfId)?.tty ?? ''
+  try {
+    const seen = JSON.parse((await osascript(SCREEN_SCRIPT, /^ttys\d+$/.test(tty) ? tty : 'none')).stdout) as { screen?: { x: number; y: number; width: number; height: number }; fontSize?: number }
+    const screen = seen.screen
+    if (screen === undefined || !(screen.width > 0 && screen.height > 0)) return undefined
+    return defaultPlacement(screen, seen.fontSize ?? 0)
+  } catch {
+    return undefined
+  }
 }
 
 async function openSession($: EngineInterface, target: NonNullable<Item['target']>) {

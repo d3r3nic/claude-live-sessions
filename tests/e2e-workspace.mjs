@@ -5,7 +5,7 @@
 // folder Claude already trusts:
 //   E2E_TRUSTED_DIR=~/some/trusted/dir node --experimental-strip-types tests/e2e-workspace.mjs
 import { execFileSync, spawnSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { registerHooks } from 'node:module'
 import { join } from 'node:path'
 // the plugin imports its own files without an extension, as its engine resolves them; Node needs `.ts`
@@ -42,7 +42,9 @@ try {
   // shell starts would be cut at 1024 bytes); the file holds the command line
   const openFile = join(WORK, 'open.sh')
   writeFileSync(openFile, `${w.openCommand(ws, HOME, { socket })}\n`)
-  execFileSync('/usr/bin/osascript', ['-l', 'JavaScript', '-e', c.OPEN_SCRIPT, `/bin/sh '${openFile}'`])
+  // placed as the mod places it
+  const place = { x: 60, y: 80, width: 1100, height: 700, fontSize: 11 }
+  execFileSync('/usr/bin/osascript', ['-l', 'JavaScript', '-e', c.OPEN_SCRIPT, `/bin/sh '${openFile}'`, JSON.stringify(place)])
   let running = {}
   for (let i = 0; i < 40; i++) {
     await sleep(500)
@@ -53,6 +55,8 @@ try {
   const clients = w.parseClients(tmux('list-clients', '-F', w.CLIENTS_FORMAT).stdout)[session] ?? []
   check('a Terminal window is attached to it', clients.length === 1, clients.join(','))
   check('its tmux session is marked as this workspace\'s', tmux('show-options', '-t', session, '-qv', w.OWNER_OPTION).stdout.trim() === String(ws.createdAt))
+  const seen = spawnSync('/usr/bin/osascript', ['-l', 'JavaScript', '-e', `function run(a) { const t = Application('Terminal'); for (const x of t.windows()) for (const y of x.tabs()) if (y.tty() === '/dev/' + a[0]) { const b = x.bounds(); return JSON.stringify({ x: b.x, y: b.y, width: b.width, height: b.height, fontSize: y.fontSize() }) } return '' }`, clients[0] ?? 'none'], { encoding: 'utf8' }).stdout.trim()
+  check('placed: where it was asked, in the font it was asked', seen === JSON.stringify(place), seen)
   // Hide: the mod's own hide.sh, as a click on the bar runs it inside this tmux server (TMUX names the server)
   const hideFile = join(WORK, 'hide.sh')
   writeFileSync(hideFile, w.HIDE_SCRIPT)
@@ -63,6 +67,9 @@ try {
   const stillAttached = w.parseClients(tmux('list-clients', '-F', w.CLIENTS_FORMAT).stdout)[session] ?? []
   const tabLeft = spawnSync('/usr/bin/osascript', ['-l', 'JavaScript', '-e', c.HAS_TAB_SCRIPT, clients[0] ?? 'none'], { encoding: 'utf8' }).stdout.trim()
   check('hidden: its window closed, the terminal detached', hidden === 'closed' && stillAttached.length === 0 && tabLeft === '', `${hidden}, tab left: ${tabLeft || 'none'}`)
+  const keptFile = join(WORK, 'windows', `${session}.json`)
+  const keptPlace = existsSync(keptFile) ? readFileSync(keptFile, 'utf8').trim() : ''
+  check('hidden: where its window was is kept for its next opening', keptPlace === JSON.stringify(place), keptPlace)
   check('hidden: both agents keep running', /\bclaude\b/.test(after.claude ?? '') && /\bcodex\b/.test(after.codex ?? ''))
   // a window that did not close is closed here, after its client is detached
   if (tabLeft !== '') execFileSync('/usr/bin/osascript', ['-l', 'JavaScript', '-e', `function run(a) { const t = Application('Terminal'); for (const x of t.windows()) if (x.tabs().some(y => y.tty() === '/dev/' + a[0])) x.close() }`, clients[0]])

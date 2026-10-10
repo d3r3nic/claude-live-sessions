@@ -65,8 +65,12 @@ import {
   peerPrompt,
   rankProjects,
   sessionSetup,
+  defaultPlacement,
   hideBinding,
   hidePath,
+  placementFrom,
+  placementPath,
+  SCREEN_SCRIPT,
   HIDE_LABEL,
   HIDE_SCRIPT,
   KEEPS_LABEL,
@@ -285,6 +289,7 @@ function machine(argv: readonly string[], env: unknown): Run {
         if (id !== undefined && made !== null) world.started.set(made[1]!, made[2]!)
         return ok('opened\n')
       }
+      if (argv[4] === SCREEN_SCRIPT) return ok(JSON.stringify({ screen: { x: 0, y: 30, width: 2560, height: 1410 }, fontSize: argv[5] === 'ttys022' ? 12 : 0 }))
       if (argv[4] === HAS_TAB_SCRIPT) return ok(TABS.has(argv[5] ?? '') && !world.noTab.has(argv[5] ?? '') ? 'yes\n' : '\n')
       if (argv[4] !== BACKGROUND_SCRIPT) return { exitCode: 1, stdout: '', stderr: 'unexpected script' }
       // Terminal.app's tab on ttys022 has the Novel profile's background; the others another
@@ -2079,5 +2084,37 @@ describe('hiding a workspace window', () => {
     expect(files.get(hidePath(HOME))).toBe(HIDE_SCRIPT)
     expect(toasts.at(-1)).toBe('Practice RBAC hidden: its agents keep running; Open brings it back.')
     await ui.unmount()
+  })
+})
+
+describe('workspace windows open where they were', () => {
+  test('placements: kept ones checked; the first is most of the screen, in the font of the window it is opened from', async () => {
+    expect(placementFrom({ x: 10.4, y: 20, width: 1200, height: 800, fontSize: 13 })).toEqual({ x: 10, y: 20, width: 1200, height: 800, fontSize: 13 })
+    expect(placementFrom({ x: 0, y: 0, width: 1200, height: 800, fontSize: 200 })?.fontSize).toBe(0)
+    for (const bad of [null, 'x', { x: 0, y: 0, width: 100, height: 800 }, { x: 'a', y: 0, width: 1200, height: 800 }, { y: 0, width: 1200, height: 800 }]) expect(placementFrom(bad)).toBeUndefined()
+    expect(defaultPlacement({ x: 0, y: 30, width: 2560, height: 1410 }, 14)).toEqual({ x: 192, y: 136, width: 2176, height: 1199, fontSize: 14 })
+    expect(defaultPlacement({ x: 0, y: 30, width: 2560, height: 1410 }, 0).fontSize).toBe(0)
+  })
+
+  test('a new window opens where the workspace\'s was when hidden; else most of the screen, in this tab\'s font', async ($, on) => {
+    const { files, runs } = engine(on, machine, { termProgram: 'Apple_Terminal', selfId: 'session-104' })
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [practice] }))
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const opens = () => runs.filter(r => r[0] === '/usr/bin/osascript' && r[4] === OPEN_SCRIPT).map(r => (r[6] === undefined ? undefined : JSON.parse(r[6])))
+    // never hidden: the screen, and the font of this session's tab (ttys022)
+    await $.command.run({ ...SESSIONS, command: 'workspace', args: 'open practice-rbac' })
+    expect(runs.find(r => r[4] === SCREEN_SCRIPT)?.[5]).toBe('ttys022')
+    expect(opens().at(-1)).toEqual({ x: 192, y: 136, width: 2176, height: 1199, fontSize: 12 })
+    // hidden before: where it was
+    world.started.clear()
+    files.set(placementPath(HOME, 'ws-practice-rbac'), JSON.stringify({ x: 40, y: 60, width: 1500, height: 900, fontSize: 13 }))
+    await $.command.run({ ...SESSIONS, command: 'workspace', args: 'open practice-rbac' })
+    expect(opens().at(-1)).toEqual({ x: 40, y: 60, width: 1500, height: 900, fontSize: 13 })
+    // a kept file that is not a placement is not used
+    world.started.clear()
+    files.set(placementPath(HOME, 'ws-practice-rbac'), '{"x": "far"}')
+    await $.command.run({ ...SESSIONS, command: 'workspace', args: 'open practice-rbac' })
+    expect(opens().at(-1)).toEqual({ x: 192, y: 136, width: 2176, height: 1199, fontSize: 12 })
   })
 })
