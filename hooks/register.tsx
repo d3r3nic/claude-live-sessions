@@ -632,9 +632,11 @@ async function openWorkspace($: EngineInterface, ws: Workspace, at?: { window: s
     await refresh($, 0)
     const snap = await read($, snapshot)
     const now = await $.clock.now()
-    const claude = ws.threads.claude === undefined ? undefined : snap.claude.find(s => s.sessionId === ws.threads!.claude!.id)
+    // only the agents it runs: a conversation kept for one it does not run is never resumed
+    const runs = agentsOf(ws)
+    const claude = ws.threads.claude === undefined || !runs.includes('claude') ? undefined : snap.claude.find(s => s.sessionId === ws.threads!.claude!.id)
     // a Codex conversation open in a terminal, or written a moment ago anywhere (the desktop app, an exec run)
-    const codex = ws.threads.codex === undefined ? undefined : snap.codex.find(s => s.key === ws.threads!.codex!.id && (s.surface === 'terminal' || now - s.updatedAt < WORKING_MS))
+    const codex = ws.threads.codex === undefined || !runs.includes('codex') ? undefined : snap.codex.find(s => s.key === ws.threads!.codex!.id && (s.surface === 'terminal' || now - s.updatedAt < WORKING_MS))
     const elsewhere = [
       ...(claude === undefined ? [] : [`Claude's runs in ${claude.tty === '??' ? 'the background' : claude.tty}`]),
       ...(codex === undefined ? [] : [`Codex's ${codex.surface === 'terminal' ? `runs in ${codex.tty}` : `was written a moment ago (${codex.surface})`}`]),
@@ -1340,7 +1342,8 @@ async function compactAtHandOff($: EngineInterface, answer: string) {
   const self = snap.claude.find(s => s.sessionId === id)
   const pane = self === undefined ? undefined : snap.tmux.panes[self.tty]
   const ws = pane === undefined ? undefined : snap.workspaces.find(w => tmuxName(w) === pane.session)
-  if (self === undefined || ws === undefined || pane?.window !== 'claude' || ws.relay?.mode !== 'auto') return
+  // a workspace of one agent has no hand-off to wait for, even with a relay turned on there by hand
+  if (self === undefined || ws === undefined || pane?.window !== 'claude' || ws.only !== undefined || ws.relay?.mode !== 'auto') return
   const at = ws.compactAt ?? COMPACT_AT
   if (at <= 0) return
   const { context } = await $.session.usage()
@@ -1436,7 +1439,7 @@ export const register: Register = on => {
     await $.command.register({
       name: 'workspace',
       description: 'Named workspaces: a folder, an environment, Claude and Codex (or one of them) in one tmux session',
-      argumentHint: 'new <folder> <env> <name> [--for <purpose>] | open <name> | rm <name>',
+      argumentHint: 'new <folder> <env> <name> [--only claude|codex] [--for <purpose>] | open <name> | rm <name>',
     })
     const kept = await $.store.get('windowMs')
     if (typeof kept === 'number' && kept >= 0) await update($, activeWindow, () => kept)

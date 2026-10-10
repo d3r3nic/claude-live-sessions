@@ -136,6 +136,8 @@ const local = (line: string) =>
 
 /** What a test changes about the machine; engine() resets it. */
 const world = {
+  /** The slash commands the plugin registered, with their hints. */
+  commands: [] as { name: string; argumentHint?: string }[],
   /** A process's `ps` state or command, changed from the fixture. */
   stat: new Map<number, string>(),
   args: new Map<number, string>(),
@@ -199,6 +201,7 @@ const world = {
   codexTaskAnswer: undefined as (() => string) | undefined,
 }
 const resetWorld = () => {
+  world.commands = []
   world.stat.clear()
   world.args.clear()
   world.noTab.clear()
@@ -386,7 +389,10 @@ function engine(
   resetWorld()
   on('session.start', async ($, e) => ({ cwd: e.cwd }))
   on('session.id', async () => ({ value: world.sessionId ?? selfId }))
-  on('command.register', async ($, e) => ({ value: { command: e.name } }))
+  on('command.register', async ($, e) => {
+    world.commands.push({ name: e.name, ...(e.argumentHint === undefined ? {} : { argumentHint: e.argumentHint }) })
+    return { value: { command: e.name } }
+  })
   const panes = new Map<string, { isShown: boolean; isPlaced: boolean }>()
   const focusAsked: string[] = []
   on('ui.open', async ($, e) => {
@@ -3062,6 +3068,8 @@ describe('a workspace of one agent', () => {
     expect(fresh).toContain('1. If the purpose names a branch or worktree already under way, go on there. Otherwise start a branch for this purpose: name it from the purpose, never from the workspace\'s name, in its own worktree in /Users/u/dev/web-app-worktrees/.')
     expect(fresh.endsWith('2. Say in a few lines where things stand and what you would do first, then wait for the owner.')).toBe(true)
     expect(fresh).not.toMatch(/peer-coding|READY FOR|relay passes|moved this conversation/)
+    // a conversation kept for the other agent is not this one's
+    expect(soloPrompt({ ...ws, threads: { claude: { id: 'session-101', dir: '/Users/u/dev/web-app' } } }, 'codex')).toBe(fresh)
     // one brought in keeps what it knows, and its work not committed yet stays where it is
     const brought = soloPrompt({ ...ws, threads: { claude: { id: 'session-101', dir: '/Users/u/dev/web-app' } } }, 'claude')
     expect(brought).toContain('The owner moved this conversation into the workspace: everything above stays yours. You are Claude, the only agent here')
@@ -3072,6 +3080,9 @@ describe('a workspace of one agent', () => {
   test('/workspace new --only codex: saved with its agent, no relay, the one first prompt; it starts alone', async ($, on) => {
     const { files } = engine(on, machine, { termProgram: 'Apple_Terminal' })
     await $.session.start(START)
+    // the command's hint and its usage say how
+    expect(world.commands.find(c => c.name === 'workspace')?.argumentHint).toBe('new <folder> <env> <name> [--only claude|codex] [--for <purpose>] | open <name> | rm <name>')
+    expect((await $.command.run({ ...SESSIONS, command: 'workspace', args: 'new' })).text).toContain('<name> [--only claude | codex] [--for')
     const text = (await $.command.run({ ...SESSIONS, command: 'workspace', args: 'new ~/dev/web-app work Solo --only codex --for roles and permissions' })).text
     expect(text).toContain('Codex starts alone in tmux session ws-solo; it gets ready for the purpose, says where things stand and waits for you.')
     const [saved] = JSON.parse(files.get(WORKSPACES)!).workspaces
@@ -3112,6 +3123,7 @@ describe('a workspace of one agent', () => {
     // Codex only lets Claude go too
     await ui.select({ key: 'form:agents', value: 'codex' })
     expect(await ui.find({ key: 'form:bring claude:session-101' })).toBeUndefined()
+    expect((await ui.find({ key: 'form:purpose' }))?.props.placeholder).toBe('optional: Codex gets ready for it, then waits for you')
     await ui.select({ key: 'form:agents', value: 'claude' })
     expect((await ui.find({ key: 'form:bring claude:session-101' }))?.props.label).toBe('[ ] Claude · WEB CONSOLE')
     await ui.press({ key: 'form:bring claude:session-101' })
@@ -3164,5 +3176,44 @@ describe('a workspace of one agent', () => {
     await clock.advance(4_000)
     await $.command.run(SESSIONS)
     expect(runs.filter(r => r[2] === RELAY_SCRIPT).map(r => r[4])).toEqual(['tell'])
+  })
+
+  test('a Claude alone, with a relay turned on by hand: its hand-off line waits for nothing, compacts nothing, reads nothing', async ($, on) => {
+    const { files, runs, clock } = engine(on, machine, { termProgram: 'Apple_Terminal', selfId: 'session-104' })
+    on('session.usage', async () => ({ value: { startedAt: NOW, context: { tokens: 900_000, window: 1_000_000, percent: 90 }, rateLimits: [] } }))
+    const compacted: (string | undefined)[] = []
+    on('session.compact', async ($, e) => {
+      compacted.push(e.instructions)
+      return { messages: [{ role: 'user' as const, text: 'summary', toolUses: [] }] }
+    })
+    on('turn.complete', async ($, e) => ({ text: e.answer }))
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, checkout: '/Users/u/dev/web-app', purpose: 'RBAC', only: 'claude', relay: relayOn() }] }))
+    // WORKER (session-104, this session) alone in the workspace
+    world.tmuxPanes = 'ws-practice-rbac\tpeers\t/dev/ttys022\t%1\tclaude\n'
+    world.tmuxOwner = String(NOW)
+    world.paneCommands = { '%1': 'claude' }
+    world.turns = { 'session-104': `done\tturn-c1\t${new Date(NOW).toISOString()}\t${READY_CODEX}` }
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    // its turn ends with a hand-off line, as if a pass were recorded: nothing follows
+    files.set('/Users/u/Library/Application Support/live-sessions/relayed/pass-turn-c1', '')
+    await $.turn.complete({ answer: `Done.\n${READY_CODEX}`, durationMs: 1_000, isAborted: false, turnId: 'turn-c1', reason: 'answer' })
+    for (let t = 0; t < 8_000; t += 2_000) await clock.advance(2_000)
+    expect(compacted).toEqual([])
+    expect(runs.filter(r => r[2] === RELAY_SCRIPT || r[2] === TURN_SCRIPT)).toEqual([])
+  })
+
+  test('opened again, a workspace of one agent resumes only that agent\'s conversation; one kept for the other never holds it back', async ($, on) => {
+    const { files, runs } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    const open = async () => (await $.command.run({ ...SESSIONS, command: 'workspace', args: 'open practice-rbac' })).text
+    // its own agent's conversation, running elsewhere, holds it back
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, only: 'codex', threads: { codex: { id: RESUMED_A, dir: '/Users/u/dev/web-app' } } }] }))
+    await $.session.start(START)
+    expect(await open()).toBe('Not opened: its agents go on with their own conversations, and Codex\'s runs in ttys045. Close it there first.')
+    // a Claude conversation kept from before, running in ttys004: the workspace runs Codex alone, so it is no matter
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, only: 'codex', threads: { claude: { id: 'session-101', dir: '/Users/u/dev/web-app' } } }] }))
+    expect(await open()).toBe('Opened ws-practice-rbac in a new Terminal window.')
+    expect(files.get(openScriptPath(HOME, 'practice-rbac'))).not.toContain('session-101')
+    expect(runs.filter(r => r[0] === '/usr/bin/osascript' && r[4] === OPEN_SCRIPT)).toHaveLength(1)
   })
 })
