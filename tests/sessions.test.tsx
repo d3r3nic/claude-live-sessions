@@ -1878,6 +1878,10 @@ describe('relay', () => {
     expect(['not-agent zsh', 'gone', 'failed', ''].map(passFailure)).toEqual(['its pane runs zsh, not the agent', 'its pane is gone', 'tmux could not type into its pane', 'tmux could not type into its pane'])
     expect(passFailure('unsent')).toMatch(/waits in its input: leave copy mode \(q\) and press Enter there$/)
     expect(afterStep(relayOn({ streak: 3 }), { kind: 'tell', key: 'tell-c2', text: '', isForOwner: true }, 'told', NOW)).toEqual(relayOn({ streak: 0, status: 'needs you', at: NOW }))
+    // a cue held at the cap stays held, said so, while the other agent starts again
+    const wait = { kind: 'tell' as const, key: 'wait-c3', text: '', isForOwner: false }
+    expect(afterStep(relayOn({ streak: RELAY_CAP, status: 'waits for you' }), wait, 'told', NOW)).toEqual(relayOn({ streak: RELAY_CAP, status: 'waits for you', at: NOW }))
+    expect(afterStep(relayOn({ streak: 2, status: 'passed to Codex' }), wait, 'told', NOW).status).toBe('waits for the other agent\'s first turn')
   })
 
   test('the owner typing to either agent starts the count over', async () => {

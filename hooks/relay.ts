@@ -72,18 +72,20 @@ export const TURN_SCRIPT = [
   '      elif $o.type == "event_msg" and $o.payload.type == "task_started" then {state: "busy", id: $o.payload.turn_id, at: $o.timestamp, text: ""}',
   '      else . end;',
   '    def text: if (.content | type) == "string" then .content else ([.content[]? | select(.type == "text") | .text] | join("\\n")) end;',
-  // a paste's wrapper is not the owner's words: a cue pasted alone is still only a cue
-  '    def unwrapped: gsub("</?pasted_content[^>]*>"; "") | gsub("^\\\\s+|\\\\s+$"; "");',
-  '    def typed: unwrapped | (test("\\n") | not) and cue != "" | not;',
+  // the relay's own message is one line, a cue; a paste's wrapper is not the owner's words, so a cue pasted alone
+  // is still only a cue (lines are split, not trimmed: a trim's regex slows on a long run of spaces)
+  '    def typed: gsub("</?pasted_content[^>]*>"; "") | [splits("\\n") | select(test("\\\\S"))] | (length == 1 and (.[0] | cue) != "") | not;',
+  '    def textOf: if type == "string" then . elif type == "array" then [.[]? | objects | select(.type == "text") | .text | strings] | join("\\n") else "" end;',
+  '    def kindOf: if type == "object" then .kind else null end;',
   // what the person typed: Claude Code marks it `origin.kind: human` (a prompt, a skill or prompt command, a
   // paste; one typed while the agent works is kept as a queued_command attachment); a record from before
   // that mark is read by its text: not an interrupt, a background task's notice or another engine tag
   '    def keyed: test("^\\\\s*($|\\\\[Request interrupted|<(?!command-name>|command-message>|bash-input>|pasted_content))") | not;',
   '    def owner:',
   '      if .type == "user" then .isMeta != true and .isCompactSummary != true and ([.message.content[]?.type] | index("tool_result") | not)',
-  '        and (if .origin.kind != null then .origin.kind == "human" else (said | keyed) end) and (said | typed)',
+  '        and ((.origin | kindOf) as $k | if $k != null then $k == "human" else (said | keyed) end) and (said | typed)',
   '      elif .type == "attachment" and .attachment.type == "queued_command" then (.attachment.commandMode // "prompt") == "prompt"',
-  '        and (.attachment.origin.kind // "human") == "human" and (.attachment.prompt | type) == "string" and (.attachment.prompt | keyed and typed)',
+  '        and ((.attachment.origin | kindOf) // "human") == "human" and (.attachment.prompt | textOf | keyed and typed)',
   '      elif .type == "event_msg" and .payload.type == "user_message" then .payload.message // "" | typed',
   '      elif .type == "event_msg" and .payload.type == "item_completed" and .payload.item.type == "UserMessage" then .payload.item | text | typed',
   '      else false end;',
@@ -255,6 +257,7 @@ export function afterStep(relay: Relay, step: Step, outcome: string, now: number
   if (step.kind === 'pass' && outcome === 'in-mode') return { ...relay, status: `waits: ${NAME[step.to]}'s pane is scrolled back (copy mode; q leaves it)`, at: now }
   if (step.kind === 'pass') return { ...relay, status: `could not pass to ${NAME[step.to]}`, at: now }
   if (step.key.startsWith('cap-')) return { ...relay, status: 'waits for you', at: now }
-  if (step.key.startsWith('wait-')) return { ...relay, status: 'waits for the other agent\'s first turn', at: now }
+  // a cue held at the cap stays held while the other agent starts again: what the row says, and its continue, stay
+  if (step.key.startsWith('wait-')) return { ...relay, status: relay.status === 'waits for you' ? relay.status : 'waits for the other agent\'s first turn', at: now }
   return step.isForOwner ? { ...relay, streak: 0, status: 'needs you', at: now } : { ...relay, status: 'told you', at: now }
 }

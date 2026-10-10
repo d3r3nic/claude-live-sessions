@@ -633,6 +633,14 @@ except ChildProcessError: pass
     { type: 'user', uuid: 'q7', origin: human, timestamp: '2026-10-09T11:25:00Z', message: { content: '<pasted_content id="p1">\nREADY FOR CLAUDE · peer-coding/feat-x R3 · feat/x@abc1234\n</pasted_content>' } },
     { type: 'attachment', uuid: 'q8', isSidechain: true, timestamp: '2026-10-09T11:30:00Z', attachment: { type: 'queued_command', commandMode: 'prompt', prompt: 'a subagent\'s' } },
   ])
+  // a prompt queued with an image is the owner's by its text; an `origin` of another shape breaks nothing; a
+  // message with a long run of spaces is read at once
+  const typedOdd = jsonl('c-typed-odd.jsonl', [
+    { type: 'user', uuid: 'o1', origin: 'human', timestamp: '2026-10-09T13:00:00Z', message: { content: 'go' } },
+    ended,
+    { type: 'attachment', uuid: 'o2', timestamp: '2026-10-09T13:10:00Z', attachment: { type: 'queued_command', commandMode: 'prompt', origin: human, prompt: [{ type: 'image' }, { type: 'text', text: 'and this screen' }] } },
+    { type: 'user', uuid: 'o3', origin: human, timestamp: '2026-10-09T13:20:00Z', message: { content: `READY FOR CLAUDE · x ·${' '.repeat(80_000)}y@1` } },
+  ])
   const typedPaste = jsonl('c-typed-paste.jsonl', [ended, { type: 'user', uuid: 'r1', origin: human, timestamp: '2026-10-09T12:00:00Z', message: { content: '<pasted_content id="p2">\nREADY FOR CLAUDE · peer-coding/feat-x R3 · feat/x@abc1234\n</pasted_content>\nand mind the login' } }])
   const typedCodex = jsonl('x-typed.jsonl', [
     { type: 'event_msg', timestamp: '2026-10-09T11:00:00Z', payload: { type: 'item_completed', item: { type: 'UserMessage', content: [{ type: 'text', text: 'fix the bug' }] } } },
@@ -648,7 +656,7 @@ except ChildProcessError: pass
     { type: 'event_msg', timestamp: '2026-10-09T12:00:01Z', payload: { type: 'task_started', turn_id: 't-3' } },
     { type: 'event_msg', timestamp: '2026-10-09T12:01:00Z', payload: { type: 'user_message', message: 'NEEDS USER · peer-coding/feat-x · feat/x@abc1234' } },
   ])
-  const out = spawnSync('/bin/sh', ['-c', r.TURN_SCRIPT, 'sh', claudeDone, claudeBusy, codexDone, codexBusy, join(scratch, 'none.jsonl'), afterCommands, interrupted, midTurn, split, codexAborted, skillBusy, skillDone, apiError, typedClaude, typedCommand, typedBash, typedCue, typedCodex, typedCodexOld, typedMarked, typedPaste], { encoding: 'utf8' })
+  const out = spawnSync('/bin/sh', ['-c', r.TURN_SCRIPT, 'sh', claudeDone, claudeBusy, codexDone, codexBusy, join(scratch, 'none.jsonl'), afterCommands, interrupted, midTurn, split, codexAborted, skillBusy, skillDone, apiError, typedClaude, typedCommand, typedBash, typedCue, typedCodex, typedCodexOld, typedMarked, typedPaste, typedOdd], { encoding: 'utf8', timeout: 15_000 })
   const turns = r.parseTurns(out.stdout)
   check('turns: a command run in the session, its output, a compaction or a meta record starts no turn', turns.get(afterCommands)?.state === 'done' && turns.get(afterCommands)?.id === 'e1' && turns.get(afterCommands)?.cue?.line === cue, JSON.stringify(turns.get(afterCommands)))
   check('turns: an interrupt ends a turn, with no cue', turns.get(interrupted)?.state === 'done' && turns.get(interrupted)?.id === 'i1' && turns.get(interrupted)?.cue === undefined)
@@ -666,6 +674,7 @@ except ChildProcessError: pass
   check('typed: the owner\'s prompt or skill command, not the relay\'s cue, a task notice, an interrupt, a skill\'s text, output, meta, summary, tool result, subagent or image alone', typedAt(typedClaude) === Date.parse('2026-10-09T09:30:00Z'), new Date(typedAt(typedClaude)).toISOString())
   check('typed: marked records: the owner\'s prompt queued while the agent worked; no notice, queued notice, cue (pasted or not) or subagent\'s', typedAt(typedMarked) === Date.parse('2026-10-09T11:10:00Z'), new Date(typedAt(typedMarked)).toISOString())
   check('typed: a pasted cue with words of the owner\'s own is theirs', typedAt(typedPaste) === Date.parse('2026-10-09T12:00:00Z'))
+  check('typed: a prompt queued with an image counts by its text; a cue with a long run of spaces stays the relay\'s, read at once; an odd origin breaks nothing', typedAt(typedOdd) === Date.parse('2026-10-09T13:10:00Z') && turns.get(typedOdd)?.state === 'busy', `${typedAt(typedOdd)} ${out.error ?? ''}`)
   check('typed: a command and a shell command typed in the session are the owner\'s', typedAt(typedCommand) === Date.parse('2026-10-09T10:06:00Z') && typedAt(typedBash) === Date.parse('2026-10-09T10:07:00Z'))
   check('typed: a cue pasted with words of the owner\'s own is theirs', typedAt(typedCue) === Date.parse('2026-10-09T10:08:00Z'))
   check('typed: Codex\'s prompt (item_completed, or user_message before), not the relay\'s cue nor injected context', typedAt(typedCodex) === Date.parse('2026-10-09T11:00:00Z') && typedAt(typedCodexOld) === Date.parse('2026-10-09T12:00:00Z'), `${typedAt(typedCodex)} ${typedAt(typedCodexOld)}`)
