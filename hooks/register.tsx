@@ -513,7 +513,7 @@ function refresh($: EngineInterface, maxAgeMs: number): Promise<void> {
     }
     const taken = next
     await update($, snapshot, () => taken)
-    $.ui.status(statusSummary(forAccount(taken, await shownAccount($, home))))
+    $.ui.status(await summaryShown($, home, taken))
   })()
     // the environment can go mid-refresh (a reload); its successor starts afresh
     .catch(() => undefined)
@@ -542,9 +542,16 @@ async function shownAccount($: EngineInterface, home: string): Promise<string> {
   return own === undefined || (await read($, allAccounts)) ? ALL_ACCOUNTS : own
 }
 
+/** The status line's counts, of the account this session shows. */
+async function summaryShown($: EngineInterface, home: string, snap: Snapshot): Promise<string> {
+  return statusSummary(forAccount(snap, await shownAccount($, home)))
+}
+
 async function toggleAccounts($: EngineInterface) {
   const next = await update($, allAccounts, now => !now)
   await $.store.set('allAccounts', next)
+  // the status line follows at once, not at the next collection
+  $.ui.status(await summaryShown($, (await $.env.get('HOME')) ?? '', await read($, snapshot)))
 }
 
 async function setWindow($: EngineInterface, ms: number) {
@@ -1607,8 +1614,7 @@ export const register: Register = on => {
     const windowMs = await read($, activeWindow)
     const showing = windowMs === 0 ? 'all sessions' : `active in the last ${windowLabel(windowMs)}`
     if (opened.isPlaced) return { text: `Sessions pane opened (${showing}).` }
-    const snap = forAccount(await read($, snapshot), await shownAccount($, (await $.env.get('HOME')) ?? ''))
-    return { text: `${statusSummary(snap)} (${showing}; widen the terminal to see the pane)` }
+    return { text: `${await summaryShown($, (await $.env.get('HOME')) ?? '', await read($, snapshot))} (${showing}; widen the terminal to see the pane)` }
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {

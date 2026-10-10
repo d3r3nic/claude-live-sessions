@@ -149,7 +149,8 @@ const targetOf = item => {
 }
 
 // the account it shows: the one it was opened for (--account, as the pane that opened it showed; every account when
-// none or another word), or, by `a`, every account
+// none is given, or a word that cannot be an account's name), or, by `a`, every account; an account's name with no
+// sessions shows an empty screen
 const OWN = (() => {
   const named = process.argv[process.argv.indexOf('--account') + 1]
   return process.argv.includes('--account') && typeof named === 'string' && /^([a-z0-9][a-z0-9_.-]*)?$/i.test(named) ? named : c.ALL_ACCOUNTS
@@ -396,7 +397,9 @@ if (process.argv.includes('--frame')) {
     // this account's or every one's; what came and went is counted afresh, so the switch is no news
     if (keys.includes('a') && OWN !== c.ALL_ACCOUNTS) {
       account = account === c.ALL_ACCOUNTS ? OWN : c.ALL_ACCOUNTS
+      // what came and went was seen in the other view: none of it carries over
       previous = undefined
+      seen.length = 0
       try {
         diff(seenAs(loaded.snap), Date.now())
       } catch {}

@@ -100,7 +100,7 @@ A workspace made for a purpose is checked at milestones: after every 4 hand-offs
 
 ## Ops screen
 
-`Ops screen`, beside `+ New workspace` in the pane (in Terminal.app), opens a full-screen console in a Terminal window of its own (`node ops/ops.mjs --account <the account the pane shows>`, from this plugin's folder; `a` there switches to every account and back; Node 22.18 or later, which runs TypeScript as it is: an older one says so in that window):
+`Ops screen`, beside `+ New workspace` in the pane (in Terminal.app), opens a full-screen console in a Terminal window of its own (`node ops/ops.mjs --account <the account the pane shows>`, from this plugin's folder; `a` there switches to every account and back, starting its list of what came and went afresh; a word that cannot be an account's name shows every account, an account's name with no sessions an empty screen; Node 22.18 or later, which runs TypeScript as it is: an older one says so in that window):
 
 - **Nodes:** each workspace, its Claude and Codex (working or idle), a packet crossing the link after each hand-off, the relay's mode, its count of hand-offs in a row, and what it last did; `OPERATOR INPUT REQUIRED` when it waits for you.
 - **Grid:** the repositories, an agent a cell.
@@ -147,7 +147,7 @@ To change it, edit this folder, then run `/reload-plugins` in a session.
 
 ```sh
 claude plugin validate .
-claude plugin test .                                         # 143 tests
+claude plugin test .                                         # 145 tests
 npx -p typescript@5.6.3 tsc -p .                             # after one load, which lays down .claude-plugin/types
 node --experimental-strip-types tests/host-check.mjs [2d] [--slow]   # on this Mac: SQL, pipelines, a full collection, the move script on throwaway processes, workspaces and the relay on a private tmux server (reading no tmux.conf), the checkout script on throwaway repositories
 E2E_TRUSTED_DIR=<a trusted folder> node --experimental-strip-types tests/e2e-terminal.mjs    # a Terminal window: move a throwaway session to the background

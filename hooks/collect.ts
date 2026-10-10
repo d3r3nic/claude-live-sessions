@@ -23,7 +23,6 @@ export function claudeState(s: ClaudeSession, now: number): string {
   return now - s.since < STALE_BUSY_MS ? 'working' : 'stalled'
 }
 
-/** The status line: how many of each are live, how many working. */
 /** The environment a session's profile belongs to: '' for `claude`/`codex`, `work` for `claude-work`; undefined for none. */
 export function envOfProfile(tool: 'claude' | 'codex', profile: string): string | undefined {
   if (profile === tool) return ''
@@ -51,6 +50,7 @@ export function forAccount(snap: Snapshot, account: string): Snapshot {
   }
 }
 
+/** The status line: how many of each are live, how many working. */
 export function statusSummary(snap: Snapshot): string {
   const busyClaude = snap.claude.filter(s => claudeState(s, snap.checkedAt) === 'working').length
   const busyCodex = snap.codex.filter(s => s.updatedAt > 0 && snap.checkedAt - s.updatedAt < WORKING_MS).length
@@ -563,7 +563,8 @@ export function codexSessions(args: {
   now: number
 }): CodexSession[] {
   const { terminals, threads, now } = args
-  const homeName = (codexHome: string) => profileOf(codexHome.split('/').pop() ?? codexHome)
+  // a home named with a trailing slash is the same home
+  const homeName = (codexHome: string) => profileOf(codexHome.replace(/\/+$/, '').split('/').pop() ?? codexHome)
   const newest = (list: ThreadRow[]) => list.sort((a, b) => b.updated_at_ms - a.updated_at_ms)[0]
 
   const taken = new Set<string>()

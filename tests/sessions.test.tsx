@@ -569,6 +569,9 @@ describe('collect', () => {
       ['Execute research', 'terminal', 'ttys000', 'codex', 0],
       ['session (thread not found)', 'terminal', 'ttys041', 'codex', 0],
     ])
+    // a home named with a trailing slash is the same home: the same account
+    const slashed = codexSessions({ terminals: terminalsOf().map(t => ({ ...t, codexHome: `${t.codexHome}/` })), threads: new Map([...threadsOf()].map(([home, list]) => [`${home}/`, list])), now: NOW })
+    expect(slashed.map(r => r.profile)).toEqual(rows.map(r => r.profile))
   })
 
   test('in one folder, a thread born before the newer terminal started stays with the older', async () => {
@@ -3659,6 +3662,8 @@ describe('one account at a time', () => {
     expect(await ui.find({ key: 'more item:claude-104' })).toBeUndefined()
     await ui.press({ key: 'accounts' })
     expect((await ui.find({ key: 'accounts' }))?.props.label).toBe('all accounts')
+    // the status line follows at once
+    expect(status.at(-1)).toBe('Claude 3 (1 working) · Codex 7 (1 working) · /sessions')
     shown = await texts()
     expect(shown).toContain('Practice RBAC')
     expect(await ui.find({ key: 'more item:claude-104' })).toBeDefined()
@@ -3687,6 +3692,39 @@ describe('one account at a time', () => {
     expect(await ui.find({ key: 'more item:claude-101' })).toBeUndefined()
     await ui.press({ key: 'workspace:new' })
     expect((await ui.find({ key: 'form:env' }))?.props.value).toBe('work')
+    await ui.unmount()
+  })
+  test('a profile the plugin cannot name sees every account, with no switch', async ($, on) => {
+    const { files } = engine(on, machine, { termProgram: 'Apple_Terminal', isOwnAccount: true, configDir: `${HOME}/.claude-default` })
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [practice, { ...practice, id: 'home', name: 'Home', env: '' }] }))
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    expect(await ui.find({ key: 'accounts' })).toBeUndefined()
+    const shown = (await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')
+    expect([shown.includes('Home'), shown.includes('Practice RBAC')]).toEqual([true, true])
+    expect([await ui.find({ key: 'more item:claude-101' }), await ui.find({ key: 'more item:claude-104' })].every(x => x !== undefined)).toBe(true)
+    await ui.unmount()
+  })
+
+  test('in its own account\'s view a session\'s actions and a workspace\'s work as before', async ($, on) => {
+    const { files } = engine(on, machine, { termProgram: 'Apple_Terminal', isOwnAccount: true })
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [practice, { ...practice, id: 'home', name: 'Home', env: '' }] }))
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    // a session of this account: its actions; assigned to this account's workspace from them
+    await reveal(ui, 'item:claude-101')
+    expect((await ui.find({ key: 'open-bar claude-101' }))?.props.label).toBe('Open (o)')
+    await ui.press({ key: 'assign claude-101' })
+    const choices = (await ui.findAll({ type: 'Button' })).map(b => (b.props as { label?: string }).label).filter(l => l !== undefined)
+    expect(choices).toContain('Home')
+    await ui.press({ key: 'assign-to claude-101 home' })
+    expect(JSON.parse(files.get(WORKSPACES)!).workspaces.find((w: Workspace) => w.id === 'home').members).toEqual(['claude:session-101'])
+    // this account's workspace: its relay goes round
+    await reveal(ui, 'ws:home')
+    await ui.press({ key: 'relay-bar home' })
+    expect(JSON.parse(files.get(WORKSPACES)!).workspaces.find((w: Workspace) => w.id === 'home').relay.mode).toBe('auto')
     await ui.unmount()
   })
 })

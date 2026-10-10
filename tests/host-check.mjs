@@ -1079,6 +1079,21 @@ except ChildProcessError: pass
       ownLive.includes('ACCOUNT default') && ownLive.includes('Mine Here') && !ownLive.includes('Theirs There') && ownLive.includes('a all accounts') &&
       toggled.includes('ALL ACCOUNTS') && toggled.includes('Theirs There') && toggled.includes('a this account'),
       `${ownLive.includes('Theirs There')} ${toggled.includes('ALL ACCOUNTS')}`)
+    // what another account's sessions did while every account was shown stays behind when its own view comes back
+    const sessionOf = (key, profile, updatedAt) => ({ key, title: `${key.toUpperCase()} TITLE`, cwd: scratch, profile, surface: 'app', tty: '', updatedAt, lastActive: updatedAt, agents: 0 })
+    const withSessions = theirsAt => snapshot({ workspaces: [], codex: [sessionOf('mine', 'codex', Date.now() - 3_600_000), sessionOf('theirs', 'codex-mmm', theirsAt)] })
+    const sessionsFile = join(scratch, 'sessions-two.json')
+    writeFileSync(sessionsFile, withSessions(Date.now() - 3_600_000))
+    const roundTrip = bare(live(
+      ['os.write(fd, b"a")', 'drain(1.5)', 'open(os.environ["SNAP_PATH"], "w").write(os.environ["NEXT_SNAPSHOT"])', 'drain(2.0)', 'os.write(fd, b"a")', 'drain(1.5)'].join('\n'),
+      { LIVE_SESSIONS_SNAPSHOT: sessionsFile, LIVE_SESSIONS_EVENTS: join(scratch, 'two-events.jsonl'), SNAP_PATH: sessionsFile, NEXT_SNAPSHOT: withSessions(Date.now()) },
+      ['--account', '']))
+    // from the first frame of its own view after the last of every account's
+    const back = roundTrip.slice(roundTrip.indexOf('ACCOUNT default', roundTrip.lastIndexOf('ALL ACCOUNTS')))
+    const during = roundTrip.slice(roundTrip.indexOf('ALL ACCOUNTS'), roundTrip.lastIndexOf('ALL ACCOUNTS') + 1)
+    check('ops, live: another account\'s session events, seen while every account was shown, are gone when its own view comes back',
+      during.includes('THEIRS TITLE') && back.includes('ACCOUNT default') && !back.includes('THEIRS TITLE'),
+      `${during.includes('THEIRS TITLE')} ${back.includes('ACCOUNT default')} ${back.includes('THEIRS TITLE')}`)
     // Claude's side of the agent row, then Codex's: each pane gets the keys; a stopped workspace: said, nothing done
     t('select-pane', '-t', right)
     const agentRow = rowOf('[CLAUDE]')
