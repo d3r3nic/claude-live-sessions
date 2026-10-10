@@ -169,6 +169,8 @@ export const hidePath = (home: string) => `${home}/Library/Application Support/l
 export const CLOSE_SCRIPT = `function run(argv) {
   const tty = '/dev/' + argv[0]
   const terminal = Application('Terminal')
+  // asking a Terminal that is not running would start it
+  if (!terminal.running()) return 'none'
   for (let i = 0; i < 30; i++) {
     const w = terminal.windows().find(x => x.tabs().some(t => t.tty() === tty))
     if (w === undefined) return 'none'
@@ -186,14 +188,20 @@ export const CLOSE_SCRIPT = `function run(argv) {
 /**
  * hide.sh: hides a workspace's window. Detaches the terminal "$1"
  * (`/dev/ttys012`) from tmux, so its agents keep running, then closes its
- * Terminal.app window (CLOSE_SCRIPT). Run by a click on the status bar (in
+ * Terminal.app window (CLOSE_SCRIPT); a terminal tmux did not detach (one
+ * that was not attached: its number may be another window's by now) is
+ * left as it is. A terminal switched to the workspace from another tmux
+ * session (opened from inside the person's own tmux) goes back to that
+ * session instead, its window kept. Run by a click on the status bar (in
  * the tmux server, whose own socket `tmux` then reaches) or by the pane.
  */
 export const HIDE_SCRIPT = [
   '#!/bin/sh',
   'tty=$1',
   'case $tty in /dev/ttys[0-9]*) ;; *) exit 0;; esac',
-  'tmux detach-client -t "$tty" 2>/dev/null',
+  `last=$(tmux display-message -p -c "$tty" '#{client_last_session}' 2>/dev/null)`,
+  'if [ -n "$last" ] && tmux has-session -t "=$last" 2>/dev/null; then tmux switch-client -c "$tty" -t "=$last"; exit 0; fi',
+  'tmux detach-client -t "$tty" 2>/dev/null || exit 0',
   `exec /usr/bin/osascript -l JavaScript - "\${tty#/dev/}" <<'JXA'`,
   CLOSE_SCRIPT,
   'JXA',

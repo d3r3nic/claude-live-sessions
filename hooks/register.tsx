@@ -535,9 +535,36 @@ async function prepareSession($: EngineInterface, home: string, name: string, ti
   for (const args of sessionSetup(name, windows, canHide, title)) await tmux(args)
 }
 
+/** Whether the running tmux session `ws` would use was started for it (its owner mark is its createdAt). */
+async function isOwnSession($: EngineInterface, ws: Workspace) {
+  const out = await $.process
+    .run(['tmux', 'show-options', '-t', tmuxName(ws), '-qv', OWNER_OPTION], { timeoutMs: 10_000 })
+    .catch(() => ({ exitCode: -1, stdout: '', stderr: '' }))
+  return out.exitCode === 0 && out.stdout.trim() === String(ws.createdAt)
+}
+
+/**
+ * After a window was asked to make the workspace's session: once it is
+ * there (a few seconds at most), and is this workspace's, it is prepared.
+ */
+async function prepareWhenMade($: EngineInterface, home: string, ws: Workspace) {
+  for (let i = 0; i < 20; i++) {
+    const has = await $.process.run(['tmux', 'has-session', '-t', `=${tmuxName(ws)}`], { timeoutMs: 5_000 }).catch(() => ({ exitCode: -1 }))
+    if (has.exitCode === 0) {
+      if (await isOwnSession($, ws)) await prepareSession($, home, tmuxName(ws), ws.name)
+      return
+    }
+    await $.clock.sleep(250)
+  }
+}
+
 /** Hides a workspace's windows: each terminal attached to it detached and its Terminal window closed; the agents keep running. */
 async function hideWorkspace($: EngineInterface, ws: Workspace) {
   const home = (await $.env.get('HOME')) ?? ''
+  if (!(await isOwnSession($, ws))) {
+    $.ui.toast(`Not hidden: tmux session ${tmuxName(ws)} was not started for ${ws.name}.`)
+    return
+  }
   await $.fs.write(hidePath(home), HIDE_SCRIPT)
   const listed = await $.process
     .run(['tmux', 'list-clients', '-F', CLIENTS_FORMAT], { timeoutMs: 10_000 })
@@ -564,7 +591,8 @@ async function openWorkspace($: EngineInterface, ws: Workspace, at?: { window: s
   const isDir = await $.fs.stat(ws.dir).then(s => s.kind === 'dir').catch(() => false)
   if (!isDir) return { isOpen: false, text: `Not opened: its folder ${ws.dir} is not there any more.` }
   // a running session of that name must be this workspace's own, not an older one or anyone else's
-  if ((await tmux(['has-session', '-t', `=${name}`])).exitCode === 0) {
+  const wasRunning = (await tmux(['has-session', '-t', `=${name}`])).exitCode === 0
+  if (wasRunning) {
     // show-options takes no `=` target; has-session just found this exact name, which tmux prefers to a prefix
     const owner = (await tmux(['show-options', '-t', name, '-qv', OWNER_OPTION])).stdout.trim()
     if (owner !== String(ws.createdAt)) {
@@ -590,6 +618,7 @@ async function openWorkspace($: EngineInterface, ws: Workspace, at?: { window: s
     const made = await $.process
       .run(['/bin/sh', '-c', openCommand(ws, home, { attach: false })], { timeoutMs: 20_000 })
       .catch((error: unknown) => ({ exitCode: -1, stdout: '', stderr: message(error) }))
+    if (made.exitCode === 0 && !wasRunning) await prepareWhenMade($, home, ws)
     const switched = made.exitCode === 0 ? await tmux(['switch-client', '-t', `=${name}`]) : made
     return switched.exitCode === 0
       ? { isOpen: true, text: `Switched to ${name}.` }
@@ -606,7 +635,10 @@ async function openWorkspace($: EngineInterface, ws: Workspace, at?: { window: s
     if ((await osascript(FOCUS_SCRIPT, tty)).stdout.trim() === 'shown') return { isOpen: true, text: `Brought ${name} to the front.` }
   }
   const opened = await osascript(OPEN_SCRIPT, command)
-  return opened.exitCode === 0 && opened.stdout.trim() === 'opened'
+  const isOpened = opened.exitCode === 0 && opened.stdout.trim() === 'opened'
+  // the window makes the session (made new, or again after it ended): once it is there, its bar gets Hide
+  if (isOpened && !wasRunning) await prepareWhenMade($, home, ws)
+  return isOpened
     ? { isOpen: true, text: `Opened ${name} in a new Terminal window.` }
     : { isOpen: false, text: `Not opened (${firstLine(opened.stderr) || `exit ${opened.exitCode}`}). Run: ${command}` }
 }
@@ -788,17 +820,6 @@ async function makeWorkspace(
   await refresh($, 0)
   const label = `${made.name} (${made.env || 'default'}, ${made.dir})`
   const opened = await openWorkspace($, made)
-  // the window makes the session; once it is there, it gets its status bar's Hide
-  if (opened.isOpen) {
-    for (let i = 0; i < 20; i++) {
-      const has = await $.process.run(['tmux', 'has-session', '-t', `=${tmuxName(made)}`], { timeoutMs: 5_000 }).catch(() => ({ exitCode: -1 }))
-      if (has.exitCode === 0) {
-        await prepareSession($, home, tmuxName(made), made.name)
-        break
-      }
-      await $.clock.sleep(250)
-    }
-  }
   const start = purpose === ''
     ? `Claude and Codex start side by side in tmux session ${tmuxName(made)}.`
     : `Claude and Codex start side by side in tmux session ${tmuxName(made)}; Claude gets peer coding ready for it, and the relay passes each hand-over to the other.`

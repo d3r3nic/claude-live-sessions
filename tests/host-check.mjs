@@ -346,12 +346,64 @@ except ChildProcessError: pass
     spawnSync('tmux', ['-L', socket, '-f', '/dev/null', 'has-session', '-t', '=ws-check']).status === 0, `${hid.join(' → ')} (${hiddenTty})`)
   check('hide: other clicks on the bar stay tmux\'s own', t6('list-keys', '-T', 'root', 'MouseDown1Status').includes(w.STATUS_CLICK))
   check('hide: what the hide prints never shows in a pane (over the agent, in a view the relay waits on)', t6('list-panes', '-s', '-t', '=ws-check', '-F', '#{pane_in_mode}').split('\n').every(m => m === '0'), t6('list-panes', '-s', '-t', '=ws-check', '-F', '#{pane_id}=#{pane_in_mode}').replace(/\n/g, ' '))
-  // hide.sh itself, on a terminal that is no Terminal.app tab: detached; no window touched
+  // hide.sh, the mod's own, run by the bar's click: a terminal switched here from another session goes back to
+  // it, attached, its window untouched (Terminal is never asked)
   const hideFile = join(scratch, 'hide.sh')
   writeFileSync(hideFile, w.HIDE_SCRIPT)
-  const fakeClient = spawnSync('/bin/sh', [hideFile, '/dev/ttys999'], { encoding: 'utf8', env: { ...process.env, TMUX: '' } })
-  check('hide: hide.sh on a terminal no Terminal tab holds closes nothing', fakeClient.stdout.trim() === 'none', fakeClient.stdout.trim() || fakeClient.stderr.trim())
+  t6(...w.hideBinding(hideFile))
+  t6('new-session', '-d', '-s', 'home', 'sleep 30')
+  const back = spawnSync('python3', ['-c', `
+import os, pty, select, subprocess, time, struct, fcntl, termios, sys
+S = sys.argv[1]
+t = lambda *a: subprocess.run(['tmux', '-L', S, '-f', '/dev/null', *a], capture_output=True, text=True).stdout.strip()
+pid, fd = pty.fork()
+if pid == 0:
+    os.environ['TERM'] = 'xterm-256color'
+    os.execvp('tmux', ['tmux', '-L', S, '-f', '/dev/null', 'attach', '-t', '=home'])
+fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack('HHHH', 30, 100, 0, 0))
+def pump(s):
+    end = time.time() + s
+    while time.time() < end:
+        r, _, _ = select.select([fd], [], [], 0.1)
+        if r:
+            try: os.read(fd, 65536)
+            except OSError: return
+pump(1.5)
+tty = t('list-clients', '-F', '#{client_tty}')
+t('switch-client', '-c', tty, '-t', '=ws-check'); pump(1)
+on = t('list-clients', '-F', '#{client_session}')
+os.write(fd, b'\\x1b[<0;90;30M\\x1b[<0;90;30m'); pump(1.5)
+print(on, t('list-clients', '-F', '#{client_session}') or '-')
+t('detach-client', '-t', tty); pump(0.5)
+os.close(fd)
+try: os.waitpid(pid, 0)
+except ChildProcessError: pass
+`, socket], { encoding: 'utf8' }).stdout.trim().split(' ')
+  check('hide: a terminal switched here from another tmux session goes back to it, still attached', back[0] === 'ws-check' && back[1] === 'home', back.join(' → '))
+  t6('kill-session', '-t', '=home')
+  // a terminal tmux does not have attached (its number may be another window's by now): nothing is closed,
+  // Terminal never asked; the private server's socket named so the person's own is never reached
+  const server = join(process.env.TMUX_TMPDIR ?? '/tmp', `tmux-${process.getuid()}`, socket)
+  const notAttached = spawnSync('/bin/sh', [hideFile, '/dev/ttys999'], { encoding: 'utf8', env: { ...process.env, TMUX: `${server},0,0` } })
+  check('hide: a terminal tmux could not detach is left as it is', notAttached.status === 0 && notAttached.stdout === '', notAttached.stdout.trim())
   check('hide: hide.sh refuses what is not a terminal', spawnSync('/bin/sh', [hideFile, '/etc/passwd'], { encoding: 'utf8' }).stdout === '')
+  // the window-closing script, run as written against a stand-in Terminal: it closes only a window of that one
+  // tab once the tab is back at its shell; never one with other tabs, never one still at work, never starts Terminal
+  const closeWith = (running, windows) => {
+    const closed = []
+    const app = () => ({ running: () => running, windows: () => windows.map(w => ({ tabs: () => w.tabs.map(t => ({ tty: () => t.tty, busy: () => t.busy() })), close: () => closed.push(w.name) })) })
+    const result = new Function('Application', 'delay', `${w.CLOSE_SCRIPT}\nreturn run(['ttys050'])`)(app, () => undefined)
+    return [result, closed.join(',')]
+  }
+  let polls = 0
+  const cases = [
+    closeWith(false, [{ name: 'w', tabs: [{ tty: '/dev/ttys050', busy: () => false }] }]),
+    closeWith(true, [{ name: 'w', tabs: [{ tty: '/dev/ttys051', busy: () => false }] }]),
+    closeWith(true, [{ name: 'w', tabs: [{ tty: '/dev/ttys050', busy: () => false }, { tty: '/dev/ttys052', busy: () => false }] }]),
+    closeWith(true, [{ name: 'w', tabs: [{ tty: '/dev/ttys050', busy: () => true }] }]),
+    closeWith(true, [{ name: 'w', tabs: [{ tty: '/dev/ttys050', busy: () => ++polls < 3 }] }]),
+  ]
+  check('hide: the window-closing script closes only a lone tab back at its shell', JSON.stringify(cases) === JSON.stringify([['none', ''], ['none', ''], ['shared', ''], ['busy', ''], ['closed', 'w']]), JSON.stringify(cases))
     // a workspace made before the marks (a window per agent), with a window of the owner's own now current:
     // set up at Open, each window gets the borders, the agents' named by their windows
     t6('new-session', '-d', '-s', 'ws-old', '-n', 'claude', 'sleep 30')

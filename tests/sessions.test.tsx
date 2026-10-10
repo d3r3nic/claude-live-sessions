@@ -158,7 +158,9 @@ const world = {
   /** Panes scrolled back (tmux copy mode). */
   inMode: new Set<string>(),
   /** tmux sessions a window opened by the mod made. */
-  started: new Set<string>(),
+  started: new Map<string, string>(),
+  /** The engine's files, as the mod wrote them (the fake tmux reads what a command line the mod wrote makes). */
+  files: new Map<string, string>(),
   /** What `tmux list-keys -T root MouseDown1Status` prints: tmux's own binding, or one of the person's. */
   statusClick: 'bind-key -T root MouseDown1Status switch-client -t =',
   /** What /bin/rm was given. */
@@ -220,7 +222,12 @@ function machine(argv: readonly string[], env: unknown): Run {
       if (argv[2] === PLACE_SCRIPT) {
         return ok(args.map(d => `==> ${d}\n${GIT[d]?.rev ?? ''}--\n${(GIT[d]?.remotes ?? []).map(r => `${r}\n`).join('')}`).join(''))
       }
-      if (argv[2]?.startsWith('tmux has-session')) return ok('')
+      if (argv[2]?.startsWith('tmux has-session')) {
+        // the command line makes the session, marked with its owner
+        const made = /new-session -d -s '([^']+)'[\s\S]*@live-sessions-workspace '(\d+)'/.exec(argv[2])
+        if (made !== null && !world.tmuxPanes.includes(`${made[1]}\t`)) world.started.set(made[1]!, made[2]!)
+        return ok('')
+      }
       if (argv[2] === MOVE_SCRIPT) return world.move === 0 ? ok('typed') : { exitCode: Number(world.move), stdout: '', stderr: '' }
       if (argv[2] === MODE_SCRIPT) return ok(world.mode)
       if (argv[2] === CHECKOUT_SCRIPT) {
@@ -263,7 +270,7 @@ function machine(argv: readonly string[], env: unknown): Run {
       }
       if (argv[1] === 'list-keys') return ok(`${world.statusClick}\n`)
       if (argv[1] === 'bind-key' || argv[1] === 'set-option' || argv[1] === 'set-window-option') return ok('')
-      if (argv[1] === 'show-options') return ok(`${world.tmuxOwner}\n`)
+      if (argv[1] === 'show-options') return ok(`${world.started.get(argv[3] ?? '') ?? world.tmuxOwner}\n`)
       return { exitCode: 1, stdout: '', stderr: `unexpected tmux ${argv.join(' ')}` }
     case '/usr/sbin/lsof':
       return { exitCode: 1, stdout: LSOF, stderr: '' }
@@ -273,7 +280,9 @@ function machine(argv: readonly string[], env: unknown): Run {
         if (world.openFails) return { exitCode: 1, stdout: '', stderr: 'execution error: Not authorized to send Apple events to Terminal. (-1743)\n' }
         // the window it opens makes the workspace's tmux session
         const id = /\/open\/([a-z0-9-]+)\.sh'$/.exec(argv[5] ?? '')?.[1]
-        if (id !== undefined) world.started.add(`ws-${id}`)
+        // the window runs the open file's command line: the session it makes, with its owner mark
+        const made = /new-session -d -s '([^']+)'[\s\S]*@live-sessions-workspace '(\d+)'/.exec(world.files.get(/^\/bin\/sh '(.*)'$/.exec(argv[5] ?? '')?.[1] ?? '') ?? '')
+        if (id !== undefined && made !== null) world.started.set(made[1]!, made[2]!)
         return ok('opened\n')
       }
       if (argv[4] === HAS_TAB_SCRIPT) return ok(TABS.has(argv[5] ?? '') && !world.noTab.has(argv[5] ?? '') ? 'yes\n' : '\n')
@@ -359,6 +368,7 @@ function engine(
     return { value: { ...run(e.argv, e.init?.env), isStdoutTruncated: false, isStderrTruncated: false } }
   })
   const files = new Map<string, string>(Object.entries(REGISTRY))
+  world.files = files
   on('fs.list', async ($, e) => {
     const entries = LISTINGS[e.path]
     return entries === undefined ? { deny: `ENOENT ${e.path}` } : { value: entries }
@@ -2028,6 +2038,30 @@ describe('hiding a workspace window', () => {
     expect(runs.filter(r => r[0] === 'tmux' && r[1] === 'bind-key')).toEqual([])
     expect(runs.filter(r => r[0] === 'tmux' && r[1] === 'set-option' && r[4] === 'status-right').map(r => r[5])).toEqual([KEEPS_LABEL])
     expect([mayBindHide('bind-key -T root MouseDown1Status switch-client -t ='), mayBindHide(`bind-key -T root MouseDown1Status if-shell -F "#{==:#{mouse_status_range},ls-hide}" x y`), mayBindHide('bind-key -T root MouseDown1Status select-pane -t =')]).toEqual([true, true, false])
+  })
+
+  test('a workspace opened again after its session ended (a restart) gets its Hide too', async ($, on) => {
+    const { files, runs } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [practice] }))
+    await $.session.start(START)
+    expect((await $.command.run({ ...SESSIONS, command: 'workspace', args: 'open practice-rbac' })).text).toBe('Opened ws-practice-rbac in a new Terminal window.')
+    expect(runs.filter(r => r[0] === 'tmux' && r[1] === 'set-option' && r[4] === 'status-right').map(r => r[5])).toEqual([HIDE_LABEL])
+  })
+
+  test('Hide leaves a tmux session not started for the workspace as it is', async ($, on) => {
+    const { files, runs, toasts } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [practice] }))
+    world.tmuxPanes = 'ws-practice-rbac\tpeers\t/dev/ttys004\t%1\tclaude\n'
+    world.tmuxClients = 'ws-practice-rbac\t/dev/ttys001\n'
+    world.tmuxOwner = '12345'
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    await reveal(ui, 'ws:practice-rbac')
+    await ui.press({ key: 'hide practice-rbac' })
+    expect(runs.filter(r => r[0] === '/bin/sh' && r[1] === hidePath(HOME))).toEqual([])
+    expect(toasts.at(-1)).toBe('Not hidden: tmux session ws-practice-rbac was not started for Practice RBAC.')
+    await ui.unmount()
   })
 
   test('Hide window in a workspace\'s actions hides each window attached to it; the agents keep running', async ($, on) => {
