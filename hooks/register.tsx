@@ -8,6 +8,7 @@ import type { RelayEvent, Side, Step } from './relay'
 import { branchOf, checkDue, DRIFT_EVERY, driftRequest, parseVerdict, recordFolderOf, RECORDS_SCRIPT } from './drift'
 import { bringable, codexDir, envOfProfile, codexFlags, CODEX_MODE_SCRIPT, CODEX_TASK_SCRIPT, codexTaskState, JOB_COMMANDS, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, toggled, withThreads } from './bring'
 import {
+  agentsOf,
   CHECKOUT_SCRIPT,
   CLIENTS_FORMAT,
   PROJECTS_SCRIPT,
@@ -33,6 +34,7 @@ import {
   sessionSetup,
   setupPrompt,
   joinPrompt,
+  soloPrompt,
   defaultPlacement,
   isOnScreen,
   hideBinding,
@@ -154,7 +156,7 @@ const activeWindow = atom({ plugin: 'live-sessions', key: 'window' } as const, 0
 const pendingMove = atom({ plugin: 'live-sessions', key: 'pendingMove' } as const, { key: '', at: 0 })
 const CONFIRM_MS = 6_000
 
-const NO_DRAFT = { isOpen: false, name: '', query: '', dir: '', env: '', purpose: '', error: '', bring: [] as string[] }
+const NO_DRAFT = { isOpen: false, name: '', query: '', dir: '', env: '', purpose: '', error: '', bring: [] as string[], only: '' as '' | 'claude' | 'codex' }
 /** The new-workspace form. */
 const draft = atom({ plugin: 'live-sessions', key: 'draft' } as const, NO_DRAFT)
 /** The session whose workspace is being chosen. */
@@ -825,7 +827,7 @@ async function moveChecked($: EngineInterface, move: NonNullable<Item['move']>) 
  */
 async function createWorkspace(
   $: EngineInterface,
-  w: { dir: string; env: string; name: string; purpose: string; bring?: readonly string[] },
+  w: { dir: string; env: string; name: string; purpose: string; bring?: readonly string[]; only?: 'claude' | 'codex' },
 ): Promise<{ isCreated: boolean; text: string }> {
   // one at a time: a second press of create, or Enter then create, never makes a second workspace
   let isMine = false
@@ -843,7 +845,7 @@ async function createWorkspace(
 
 async function makeWorkspace(
   $: EngineInterface,
-  w: { dir: string; env: string; name: string; purpose: string; bring?: readonly string[] },
+  w: { dir: string; env: string; name: string; purpose: string; bring?: readonly string[]; only?: 'claude' | 'codex' },
 ): Promise<{ isCreated: boolean; text: string }> {
   const home = (await $.env.get('HOME')) ?? ''
   const fail = (why: string) => ({ isCreated: false, text: `Not done: ${why}.` })
@@ -869,6 +871,9 @@ async function makeWorkspace(
   // goes on in the workspace alone
   const checked = await checkBring($, home, snap, w.bring ?? [], w.env, dir)
   if ('error' in checked) return fail(checked.error)
+  // a workspace of one agent takes in a session of that agent only
+  const stranger = checked.bring.find(b => !agentsOf(w).includes(b.tool))
+  if (stranger !== undefined) return fail(`${stranger.label} is not ${w.only === 'claude' ? 'Claude' : 'Codex'}, the one agent this workspace runs`)
   const threads: { claude?: Thread; codex?: Thread } = {}
   const notBrought: string[] = []
   const createdAt = await $.clock.now()
@@ -895,8 +900,9 @@ async function makeWorkspace(
       id: slugOf(w.name, [...now.map(x => x.id), ...running]), name: w.name.trim(), env: w.env, dir, createdAt,
       ...(checkout === undefined ? {} : { checkout }),
       ...(threads.claude === undefined && threads.codex === undefined ? {} : { threads }),
-      // made for a purpose: Claude gets it ready, and the relay passes the cues from the start
-      ...(purpose === '' ? {} : { purpose, relay: { mode: 'auto' as const, since: createdAt, streak: 0 } }),
+      ...(w.only === undefined ? {} : { only: w.only }),
+      // made for a purpose: Claude gets it ready, and the relay passes the cues from the start (one agent has no one to pass to)
+      ...(purpose === '' ? {} : { purpose, ...(w.only === undefined ? { relay: { mode: 'auto' as const, since: createdAt, streak: 0 } } : {}) }),
     }
     // the conversations brought in go on in this workspace alone
     return withThreads([...now, ws], ws.id, threads)
@@ -906,18 +912,22 @@ async function makeWorkspace(
     return fail(`${UNREADABLE}${closed.length > 0 ? `; to go on with what was closed: ${closed.join(', ')}` : ''}`)
   }
   const made: Workspace = ws
-  if (purpose !== '') {
+  if (purpose !== '' && made.only === undefined) {
     await $.fs.write(promptPath(home, made.id, 'claude'), made.threads?.claude === undefined ? setupPrompt(made) : joinPrompt(made, 'claude'))
     await $.fs.write(promptPath(home, made.id, 'codex'), made.threads?.codex === undefined ? peerPrompt(made) : joinPrompt(made, 'codex'))
   } else {
     // one left by a removed workspace of the same id never reaches this one's agents
     await removePrompts($, home, made.id)
+    if (purpose !== '' && made.only !== undefined) await $.fs.write(promptPath(home, made.id, made.only), soloPrompt(made, made.only))
   }
   await refresh($, 0)
   const label = `${made.name} (${made.env || 'default'}, ${made.dir})`
   const opened = await openWorkspace($, made)
   const goOn = checked.bring.filter(b => made.threads?.[b.tool] !== undefined).map(b => b.label)
-  const start = (purpose === ''
+  const alone = made.only === undefined ? undefined : made.only === 'claude' ? 'Claude' : 'Codex'
+  const start = (alone !== undefined
+    ? `${alone} starts alone in tmux session ${tmuxName(made)}${purpose === '' ? '.' : '; it gets ready for the purpose, says where things stand and waits for you.'}`
+    : purpose === ''
     ? `Claude and Codex start side by side in tmux session ${tmuxName(made)}.`
     : `Claude and Codex start side by side in tmux session ${tmuxName(made)}; Claude gets peer coding ready for it, and the relay passes each hand-over to the other.`) +
     (goOn.length > 0 ? ` ${goOn.join(' and ')} went on there, each in its own conversation${made.threads?.claude === undefined ? '' : ' (if Claude asks how to resume a large conversation, from a summary or in full, answer it in its pane)'}.` : '') +
@@ -1019,7 +1029,9 @@ async function codexBusy($: EngineInterface, rollout: string): Promise<string | 
 
 async function submitDraft($: EngineInterface) {
   const d = await read($, draft)
-  const made = await createWorkspace($, { name: d.name, dir: d.dir || d.query, env: d.env, purpose: d.purpose, bring: d.bring })
+  // (a form open since before the choice was offered has none: both)
+  const only = d.only === 'claude' || d.only === 'codex' ? d.only : undefined
+  const made = await createWorkspace($, { name: d.name, dir: d.dir || d.query, env: d.env, purpose: d.purpose, bring: d.bring, ...(only === undefined ? {} : { only }) })
   if (made.isCreated) {
     await update($, draft, () => NO_DRAFT)
     $.ui.toast(made.text, { timeoutMs: 15_000 })
@@ -1212,7 +1224,8 @@ async function passCues(
   now: number,
   o: { workspaces: readonly Workspace[]; tmux: Snapshot['tmux']; claude: readonly ClaudeSession[]; codex: readonly CodexSession[]; fileOf: ReadonlyMap<string, string> },
 ) {
-  const live = o.workspaces.filter(ws => ws.relay !== undefined && ws.relay.mode !== 'off')
+  // one agent has no one to pass to: a relay turned on by hand there passes nothing
+  const live = o.workspaces.filter(ws => ws.only === undefined && ws.relay !== undefined && ws.relay.mode !== 'off')
   if (live.length === 0) return
   const panesOf = (ws: Workspace) =>
     Object.entries(o.tmux.panes).filter(([, p]) => p.session === tmuxName(ws) && (p.window === 'claude' || p.window === 'codex') && p.pane !== undefined)
@@ -1422,7 +1435,7 @@ export const register: Register = on => {
     })
     await $.command.register({
       name: 'workspace',
-      description: 'Named workspaces: a folder, an environment, Claude and Codex in one tmux session',
+      description: 'Named workspaces: a folder, an environment, Claude and Codex (or one of them) in one tmux session',
       argumentHint: 'new <folder> <env> <name> [--for <purpose>] | open <name> | rm <name>',
     })
     const kept = await $.store.get('windowMs')
@@ -1448,7 +1461,7 @@ export const register: Register = on => {
     await refresh($, VISIBLE_MAX_AGE_MS)
     const snap = await read($, snapshot)
     const named = snap.envs.filter(env => env !== '')
-    const usage = `Usage: /workspace new <folder> <${['default', ...named].join(' | ')}> <name> [--for <what it is for: Claude gets peer coding ready for it>]; /workspace open <name>; /workspace rm <name>`
+    const usage = `Usage: /workspace new <folder> <${['default', ...named].join(' | ')}> <name> [--only claude | codex] [--for <what it is for: Claude gets peer coding ready for it>]; /workspace open <name>; /workspace rm <name>`
     const command = parseWorkspaceArgs(e.args, named, home)
     const { list, isReadable } = await readWorkspaces($, home)
     const label = (ws: Workspace) => `${ws.name} (${ws.env || 'default'}, ${ws.dir})`
@@ -1522,6 +1535,8 @@ export const register: Register = on => {
     const Input = 'Input' in elements ? elements.Input : undefined
     const Select = 'Select' in elements ? elements.Select : undefined
     const form = await read($, draft)
+    // the agents chosen in the form ('' both; a form open since before the choice was offered has none)
+    const formOnly = form.only === 'claude' || form.only === 'codex' ? form.only : ''
     const choosing = await read($, assigning)
     const isCreating = await read($, creating)
     const openForm = (dir: string) => () => void openDraft($, dir)
@@ -1530,7 +1545,8 @@ export const register: Register = on => {
     // the running sessions the form can bring in: the project's, once one is chosen; any row's for its own action
     const offeredAll = bringable(snap, { now, selfId })
     const formDir = absoluteDir(form.dir || form.query, home)
-    const offered = form.isOpen && formDir !== undefined ? bringable(snap, { now, selfId }, formDir) : []
+    // of the agents chosen: a workspace of one agent takes in a session of that agent only
+    const offered = form.isOpen && formDir !== undefined ? bringable(snap, { now, selfId }, formDir).filter(b => formOnly === '' || b.tool === formOnly) : []
     const matches = form.isOpen ? rankProjects(await read($, projects), [...snap.claude, ...snap.codex].map(s => ({ cwd: s.cwd, at: 'lastActive' in s ? s.lastActive : s.since })), form.dir === '' ? form.query : '', home) : []
     const pending = await read($, pendingMove)
     const isPending = (key: string) => pending.key === key && now - pending.at < CONFIRM_MS
@@ -1755,6 +1771,21 @@ export const register: Register = on => {
                 )
               })}
               <Select
+                key="form:agents"
+                label="agents"
+                options={[
+                  { value: 'both', label: 'Claude and Codex' },
+                  { value: 'claude', label: 'Claude only' },
+                  { value: 'codex', label: 'Codex only' },
+                ]}
+                value={formOnly || 'both'}
+                // a session chosen to bring in that the workspace will not run is let go
+                onSelect={value => {
+                  const only: '' | 'claude' | 'codex' = value === 'claude' ? 'claude' : value === 'codex' ? 'codex' : ''
+                  void update($, draft, d => ({ ...d, only, bring: d.bring.filter(m => only === '' || m.startsWith(`${only}:`)), error: '' }))
+                }}
+              />
+              <Select
                 key="form:env"
                 label="environment"
                 options={snap.envs.map(env => ({ value: env || 'default', label: env || 'default' }))}
@@ -1765,7 +1796,7 @@ export const register: Register = on => {
                 key="form:purpose"
                 label="what it is for"
                 value={form.purpose}
-                placeholder="optional: Claude sets up peer coding for it, and the relay passes each hand-over"
+                placeholder={formOnly === '' ? 'optional: Claude sets up peer coding for it, and the relay passes each hand-over' : `optional: ${formOnly === 'claude' ? 'Claude' : 'Codex'} gets ready for it, then waits for you`}
                 onInput={setForm('purpose')}
                 onSubmit={() => void submitDraft($)}
               />
@@ -1792,7 +1823,7 @@ export const register: Register = on => {
                   <Button key={`wsopen ${ws.key}`} label="Open" onPress={() => void openWorkspaceById($, ws.key)} />
                 </Box>
                 {/* in its actions too: on a narrow pane the row keeps room for the name */}
-                {width >= 80 && (
+                {width >= 80 && ws.only === undefined && (
                   <Box flexShrink={0} marginLeft={2}>
                     <Button key={`relay ${ws.key}`} label={`Relay: ${ws.relay.mode}`} {...(ws.relay.mode === 'auto' ? { variant: 'primary' as const } : {})} onPress={() => void cycleRelay($, ws.key)} />
                   </Box>
@@ -1800,17 +1831,22 @@ export const register: Register = on => {
                 {more(`ws:${ws.key}`)}
               </Box>
               <Box width={width - 4} marginLeft={4}>
-                <Text dimColor wrap="truncate-end">{ws.dir}</Text>
+                <Text dimColor wrap="truncate-end">{`${ws.only === undefined ? '' : `${ws.only === 'claude' ? 'Claude' : 'Codex'} only · `}${ws.dir}`}</Text>
               </Box>
               {open === `ws:${ws.key}` &&
                 bar(`ws:${ws.key}`, 4, [
                   <Button key={`wsopen-bar ${ws.key}`} label="Open (o)" hotkey="o" variant="primary" onPress={() => void openWorkspaceById($, ws.key)} />,
                   // by a click only: turned on, the relay types into the agents
                   ...(ws.isAttached ? [<Button key={`hide ${ws.key}`} label="Hide window" onPress={() => void hideWorkspaceById($, ws.key)} />] : []),
-                  <Button key={`relay-bar ${ws.key}`} label={`Relay: ${ws.relay.mode} → ${RELAY_NEXT[ws.relay.mode]}`} onPress={() => void cycleRelay($, ws.key)} />,
-                  <Button key={`compact ${ws.key}`} label={`Compact at: ${ws.compactAt === 0 ? 'off' : `${ws.compactAt}%`} → ${nextCompactAt(ws.compactAt) === 0 ? 'off' : `${nextCompactAt(ws.compactAt)}%`}`} onPress={() => void cycleCompactAt($, ws.key)} />,
-                  <Button key={`check ${ws.key}`} label="Check now" onPress={() => void checkNow($, ws.key)} />,
-                  <Button key={`check-every ${ws.key}`} label={`Check: ${everyLabel(ws.checkEvery)} → ${everyLabel(nextCheckEvery(ws.checkEvery))}`} onPress={() => void cycleCheckEvery($, ws.key)} />,
+                  // the relay, the compaction at a hand-off and the drift check all go by hand-offs: one agent makes none
+                  ...(ws.only !== undefined
+                    ? []
+                    : [
+                        <Button key={`relay-bar ${ws.key}`} label={`Relay: ${ws.relay.mode} → ${RELAY_NEXT[ws.relay.mode]}`} onPress={() => void cycleRelay($, ws.key)} />,
+                        <Button key={`compact ${ws.key}`} label={`Compact at: ${ws.compactAt === 0 ? 'off' : `${ws.compactAt}%`} → ${nextCompactAt(ws.compactAt) === 0 ? 'off' : `${nextCompactAt(ws.compactAt)}%`}`} onPress={() => void cycleCompactAt($, ws.key)} />,
+                        <Button key={`check ${ws.key}`} label="Check now" onPress={() => void checkNow($, ws.key)} />,
+                        <Button key={`check-every ${ws.key}`} label={`Check: ${everyLabel(ws.checkEvery)} → ${everyLabel(nextCheckEvery(ws.checkEvery))}`} onPress={() => void cycleCheckEvery($, ws.key)} />,
+                      ]),
                   ...moves(WORKSPACES_SCOPE, view.workspaces.map(w => w.key), ws.key),
                   <Button
                     key={`remove ${ws.key}`}

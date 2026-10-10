@@ -495,6 +495,38 @@ except ChildProcessError: pass
   }
 }
 
+// 6b. A workspace of one agent, on a private tmux server: that agent alone in its one pane, marked, given its
+// first prompt; the other agent never started. Stand-ins record their arguments.
+{
+  const socket = `live-sessions-solo-${process.pid}`
+  const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'live-sessions-solo-')))
+  const fakeHome = join(scratch, 'home')
+  const record = tool => `sh -c 'printf "%s\\n" "$@" > "${scratch}/${tool}.args"; sleep 30' rec`
+  const tmux = (...args) => spawnSync('tmux', ['-L', socket, '-f', '/dev/null', ...args], { encoding: 'utf8' }).stdout.trim()
+  try {
+    for (const only of ['codex', 'claude']) {
+      const ws = { id: `solo-${only}`, env: '', dir: scratch, createdAt: 1, checkout: '/x/app', only }
+      mkdirSync(dirname(w.promptPath(fakeHome, ws.id, only)), { recursive: true })
+      writeFileSync(w.promptPath(fakeHome, ws.id, only), `Get ready, ${only}.`)
+      spawnSync('/bin/sh', ['-c', w.openCommand(ws, fakeHome, { socket, attach: false, bins: { claude: record(`${only}-claude`), codex: record(`${only}-codex`) } })], { encoding: 'utf8' })
+      for (let i = 0; i < 30 && !existsSync(`${scratch}/${only}-${only}.args`); i++) await new Promise(r => setTimeout(r, 200))
+      // a moment more: a second pane, had one been made, would have started its stand-in by now
+      await new Promise(r => setTimeout(r, 600))
+      const panes = Object.values(w.parsePanes(tmux('list-panes', '-a', '-F', w.PANES_FORMAT))).filter(p => p.session === `ws-${ws.id}`)
+      const other = only === 'codex' ? 'claude' : 'codex'
+      const args = existsSync(`${scratch}/${only}-${only}.args`) ? readFileSync(`${scratch}/${only}-${only}.args`, 'utf8') : ''
+      check(`workspace of one agent (${only}): its one pane, marked; given its first prompt once; ${other} never started`,
+        JSON.stringify(panes.map(p => p.window)) === JSON.stringify([only]) && args.endsWith(`--\nGet ready, ${only}.\n`) &&
+        !existsSync(`${scratch}/${only}-${other}.args`) && !existsSync(w.promptPath(fakeHome, ws.id, only)),
+        `${panes.map(p => p.window)} ${JSON.stringify(args.slice(-40))}`)
+    }
+  } finally {
+    spawnSync('tmux', ['-L', socket, '-f', '/dev/null', 'kill-server'])
+    rmSync(join(process.env.TMUX_TMPDIR ?? '/tmp', `tmux-${process.getuid()}`, socket), { force: true })
+    rmSync(scratch, { recursive: true, force: true })
+  }
+}
+
 // 7. The main checkout a workspace's agents put worktrees beside: CHECKOUT_SCRIPT on throwaway repositories
 {
   const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'live-sessions-git-')))
@@ -881,6 +913,7 @@ except ChildProcessError: pass
         { id: 'opsx', name: 'Ops X 要確認 ✅ é', env: '', dir: scratch, createdAt: 1 },
         { id: 'stopped', name: 'Stopped one', env: '', dir: scratch, createdAt: 2 },
         { id: '../..', name: 'Forged', env: '', dir: scratch, createdAt: 3 },
+        { id: 'solox', name: 'Solo X', env: '', dir: scratch, createdAt: 4, only: 'codex' },
       ],
       tmux: { panes: { ttys990: { session: 'ws-opsx', window: 'claude', pane: left }, ttys991: { session: 'ws-opsx', window: 'codex', pane: right } }, clients: {} },
       ...fields,
@@ -923,6 +956,12 @@ except ChildProcessError: pass
     check('ops: rows open what they are about; a forged workspace id and an event naming none open nothing; bad lines left out',
       JSON.stringify(targets[at('READY FOR CLAUDE · x')]) === JSON.stringify({ kind: 'workspace', id: 'opsx', agent: 'claude' }) && targets[at('Forged')] === null && targets[at('evil')] === null && at('no time') < 0,
       `${at('READY FOR CLAUDE · x')} ${at('Forged')}`)
+    // a workspace of one agent: that agent alone on its row, no relay line; a click anywhere on the row opens it
+    const solo = at('Solo X')
+    check('ops: a workspace of one agent shows that agent alone, with no relay, and its row opens that agent',
+      solo > 0 && rows[solo + 1].includes('[CODEX]') && rows[solo + 1].includes('alone') && !rows[solo + 1].includes('[CLAUDE]') && !rows[solo + 2].includes('relay') &&
+      JSON.stringify(targets[solo + 1]) === JSON.stringify({ kind: 'workspace', id: 'solox', agent: 'codex' }),
+      `${JSON.stringify(rows[solo + 1])} ${JSON.stringify(targets[solo + 1])}`)
     // the screen, live in a terminal: clicks, keys, signals
     const live = (script, extraEnv = {}) => spawnSync('python3', ['-c', [
       'import os, pty, sys, time, select, struct, fcntl, termios, signal',

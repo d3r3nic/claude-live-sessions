@@ -25,15 +25,16 @@ export function words(args: string): string[] {
 
 export type WorkspaceCommand =
   | { action: 'list' }
-  | { action: 'new'; dir: string; env: string; name: string; purpose: string }
+  | { action: 'new'; dir: string; env: string; name: string; purpose: string; only?: 'claude' | 'codex' }
   | { action: 'open' | 'rm'; ref: string }
   | { action: 'help'; error?: string }
 
 /**
- * `/workspace` arguments: `new <folder> <env> <name> [--for <purpose>]`,
- * `open <name>`, `rm <name>`, or nothing to list. `<env>` is required and
- * must be one of `envs` or `default`: a misspelt one is an error, never
- * another account. `~` in the folder is the home directory. Every word after
+ * `/workspace` arguments: `new <folder> <env> <name> [--only claude|codex]
+ * [--for <purpose>]`, `open <name>`, `rm <name>`, or nothing to list. `<env>`
+ * is required and must be one of `envs` or `default`: a misspelt one is an
+ * error, never another account. `~` in the folder is the home directory.
+ * `--only` before `--for` names the one agent it runs. Every word after
  * `--for` is the purpose.
  */
 export function parseWorkspaceArgs(args: string, envs: readonly string[], home: string): WorkspaceCommand {
@@ -45,10 +46,15 @@ export function parseWorkspaceArgs(args: string, envs: readonly string[], home: 
   if (verb !== 'new') return { action: 'help', error: `"${verb}" is not one of new, open, rm, list` }
   const [folder = '', envWord = '', ...afterEnv] = rest
   const at = afterEnv.indexOf('--for')
-  const nameWords = at >= 0 ? afterEnv.slice(0, at) : afterEnv
+  const beforeFor = at >= 0 ? afterEnv.slice(0, at) : afterEnv
   const purpose = at >= 0 ? afterEnv.slice(at + 1).join(' ').trim() : ''
   if (at >= 0 && purpose === '') return { action: 'help', error: '--for needs what the workspace is for' }
+  const onlyAt = beforeFor.indexOf('--only')
+  const only = onlyAt >= 0 ? beforeFor[onlyAt + 1]?.toLowerCase() : undefined
+  if (onlyAt >= 0 && only !== 'claude' && only !== 'codex') return { action: 'help', error: '--only takes claude or codex' }
+  const nameWords = onlyAt >= 0 ? [...beforeFor.slice(0, onlyAt), ...beforeFor.slice(onlyAt + 2)] : beforeFor
   const option = nameWords.find(word => word.startsWith('--'))
+  if (option === '--only') return { action: 'help', error: '--only is given once' }
   if (option !== undefined) return { action: 'help', error: `"${option}" is not an option /workspace takes` }
   const name = nameWords.join(' ').trim()
   if (folder === '' || envWord === '' || name === '') return { action: 'help', error: 'new needs a folder, an environment and a name' }
@@ -56,7 +62,7 @@ export function parseWorkspaceArgs(args: string, envs: readonly string[], home: 
   const env = envWord === 'default' ? '' : envWord
   const dir = absoluteDir(folder, home)
   if (dir === undefined) return { action: 'help', error: 'the folder must be absolute or start with ~/' }
-  return { action: 'new', dir, env, name, purpose }
+  return { action: 'new', dir, env, name, purpose, ...(only === 'claude' || only === 'codex' ? { only } : {}) }
 }
 
 /** A folder as typed, as an absolute path: `~` and `~/...` are the home directory; anything else relative, undefined. */
@@ -65,6 +71,9 @@ export function absoluteDir(typed: string, home: string): string | undefined {
   const dir = text === '~' ? home : text.startsWith('~/') ? `${home}${text.slice(1)}` : text
   return dir.startsWith('/') ? dir.replace(/\/+$/, '') || '/' : undefined
 }
+
+/** The agents a workspace runs: the one the owner chose, or Claude and Codex. */
+export const agentsOf = (ws: Pick<Workspace, 'only'>): ('claude' | 'codex')[] => (ws.only === undefined ? ['claude', 'codex'] : [ws.only])
 
 /** The workspace `ref` names: its id, or its name in any case. */
 export const findWorkspace = (list: readonly Workspace[], ref: string) =>
@@ -343,14 +352,15 @@ export const OWNER_OPTION = '@live-sessions-workspace'
 /**
  * The command line that opens a workspace in a terminal: creates its tmux
  * session if it is not running (one window, `peers`, with Claude on the left
- * and Codex on the right, in its folder, each pane marked with its agent and
- * leaving a shell when its agent exits), then attaches. Closing that
+ * and Codex on the right, or the one agent the owner chose, in its folder,
+ * each pane marked with its agent and leaving a shell when its agent exits),
+ * then attaches. Closing that
  * terminal detaches; the agents keep running in tmux. `socket` (a private
  * server that reads no tmux.conf) and `bins` are for tests; `attach: false`
  * only creates.
  */
 export function openCommand(
-  ws: Pick<Workspace, 'id' | 'env' | 'dir' | 'createdAt' | 'checkout' | 'threads'> & { name?: string },
+  ws: Pick<Workspace, 'id' | 'env' | 'dir' | 'createdAt' | 'checkout' | 'threads' | 'only'> & { name?: string },
   home: string,
   o: { socket?: string; bins?: { claude: string; codex: string }; attach?: boolean } = {},
 ): string {
@@ -361,12 +371,12 @@ export function openCommand(
   // tmux expands `#` sequences in -c: a literal `#` is `##`
   const dir = shellWord(ws.dir.replace(/#/g, '##'))
   // each command in the sequence acts on the pane the one before made
+  const [first, second] = agentsOf(ws)
   const create = [
     `${tmux} has-session -t ${shellWord(`=${name}`)} 2>/dev/null ||`,
-    `${tmux} new-session -d -s ${shellWord(name)} -c ${dir} -n peers ${pane('claude')}`,
-    `\\; set-option -p ${AGENT_OPTION} claude`,
-    `\\; split-window -h -c ${dir} ${pane('codex')}`,
-    `\\; set-option -p ${AGENT_OPTION} codex`,
+    `${tmux} new-session -d -s ${shellWord(name)} -c ${dir} -n peers ${pane(first!)}`,
+    `\\; set-option -p ${AGENT_OPTION} ${first}`,
+    ...(second === undefined ? [] : [`\\; split-window -h -c ${dir} ${pane(second)}`, `\\; set-option -p ${AGENT_OPTION} ${second}`]),
     // set-option takes no `=` exact-match target; the session was just made under this exact name
     `\\; set-option -t ${shellWord(name)} ${OWNER_OPTION} ${shellWord(String(ws.createdAt))}`,
     ...sessionSetup(name, [`${name}:peers`], false, ws.name ?? '').map(args => `\\; ${args.map((a, i) => (i === 0 ? a : shellWord(a))).join(' ')}`),
@@ -444,7 +454,9 @@ export function workspacesFrom(raw: unknown): Workspace[] {
     // likewise the drift check's interval, and its last verdict (one this does not read is dropped)
     const checkEvery = checkEveryFrom(ws.checkEvery)
     const check = checkFrom(ws.check)
-    const { members: _, threads: __, compactAt: ___, checkEvery: ____, check: _____, ...rest } = ws
+    // an agent this does not read is dropped: Claude and Codex both start
+    const only = ws.only === 'claude' || ws.only === 'codex' ? ws.only : undefined
+    const { members: _, threads: __, compactAt: ___, checkEvery: ____, check: _____, only: ______, ...rest } = ws
     return {
       ...rest,
       ...(members !== undefined && members.length > 0 ? { members } : {}),
@@ -452,6 +464,7 @@ export function workspacesFrom(raw: unknown): Workspace[] {
       ...(compactAt === undefined ? {} : { compactAt }),
       ...(checkEvery === undefined ? {} : { checkEvery }),
       ...(check === undefined ? {} : { check }),
+      ...(only === undefined ? {} : { only }),
     }
   })
 }
@@ -573,6 +586,27 @@ export function joinPrompt(ws: Pick<Workspace, 'name' | 'purpose' | 'checkout' |
     '1. If this repository is not set up for peer coding in the current layout, set it up. Record the owner\'s decisions you already know and ask for the rest with NEEDS USER.',
     `2. If the work above already has a peer-coding branch, go on with it. Otherwise start one for this purpose: name it from the purpose by the settings' branch naming, never from the workspace's name, in its own worktree in ${ws.checkout ?? '<checkout>'}-worktrees/. Work of yours not committed yet stays where it is: ask the owner with NEEDS USER before moving any of it.`,
     '3. Make your alignment move for that branch, telling Codex where the work stands, and end your turn with the line the rules\' cue prints.',
+  ].join('\n')
+}
+
+/**
+ * The first prompt of a workspace's one agent, made for a purpose: with no
+ * peer and no relay there is no peer coding; it gets ready on a branch for
+ * the purpose (going on with one already under way), says where things stand
+ * and waits for the owner. One brought in keeps everything it knows.
+ */
+export function soloPrompt(ws: Pick<Workspace, 'name' | 'purpose' | 'checkout' | 'threads'>, tool: 'claude' | 'codex'): string {
+  const isBrought = ws.threads?.[tool] !== undefined
+  return [
+    `This is the workspace "${ws.name}". What it is for: ${ws.purpose ?? ''}`,
+    '',
+    `${isBrought ? 'The owner moved this conversation into the workspace: everything above stays yours. ' : ''}You are ${tool === 'claude' ? 'Claude' : 'Codex'}, the only agent here: the owner chose to work with you alone, so there is no peer and no relay, and the owner gives you each next step.`,
+    '',
+    'Get ready for this purpose:',
+    isBrought
+      ? `1. If the work above already has a branch, go on with it. Otherwise start one for this purpose: name it from the purpose, never from the workspace's name, in its own worktree in ${ws.checkout ?? '<checkout>'}-worktrees/. Work of yours not committed yet stays where it is: ask the owner before moving any of it.`
+      : `1. If the purpose names a branch or worktree already under way, go on there. Otherwise start a branch for this purpose: name it from the purpose, never from the workspace's name, in its own worktree in ${ws.checkout ?? '<checkout>'}-worktrees/.`,
+    '2. Say in a few lines where things stand and what you would do first, then wait for the owner.',
   ].join('\n')
 }
 

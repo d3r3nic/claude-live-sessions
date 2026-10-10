@@ -80,6 +80,8 @@ import {
   mayBindHide,
   setupPrompt,
   joinPrompt,
+  soloPrompt,
+  agentsOf,
   envsFrom,
   findWorkspace,
   openCommand,
@@ -3018,5 +3020,149 @@ describe('workspace windows open where they were', () => {
     files.set(placementPath(HOME, 'ws-practice-rbac'), '{"x": "far"}')
     await $.command.run({ ...SESSIONS, command: 'workspace', args: 'open practice-rbac' })
     expect(opens().at(-1)).toEqual({ x: 192, y: 136, width: 2176, height: 1199, fontSize: 12 })
+  })
+})
+
+describe('a workspace of one agent', () => {
+  test('--only names the agent; its tmux session runs that agent alone; a value this does not read starts both', async () => {
+    expect(parseWorkspaceArgs('new /x work Practice --only codex --for roles', ['work'], HOME)).toEqual({ action: 'new', dir: '/x', env: 'work', name: 'Practice', purpose: 'roles', only: 'codex' })
+    expect(parseWorkspaceArgs('new /x default --only Claude My Name', ['work'], HOME)).toEqual({ action: 'new', dir: '/x', env: '', name: 'My Name', purpose: '', only: 'claude' })
+    // after --for, every word is the purpose's
+    expect(parseWorkspaceArgs('new /x work Name --for use --only codex', ['work'], HOME)).toEqual({ action: 'new', dir: '/x', env: 'work', name: 'Name', purpose: 'use --only codex' })
+    for (const bad of ['new /x work Name --only', 'new /x work Name --only gemini', 'new /x work Name --only --for x']) {
+      expect(parseWorkspaceArgs(bad, ['work'], HOME)).toEqual({ action: 'help', error: '--only takes claude or codex' })
+    }
+    expect(parseWorkspaceArgs('new /x work Name --only claude --only codex', ['work'], HOME)).toEqual({ action: 'help', error: '--only is given once' })
+    // the agent is no name
+    expect(parseWorkspaceArgs('new /x work --only codex', ['work'], HOME)).toEqual({ action: 'help', error: 'new needs a folder, an environment and a name' })
+    expect([agentsOf({}), agentsOf({ only: 'claude' }), agentsOf({ only: 'codex' })]).toEqual([['claude', 'codex'], ['claude'], ['codex']])
+    // one pane, marked with its agent, given that agent's first prompt; nothing split, the other never started
+    const codex = openCommand({ ...practice, checkout: '/Users/u/dev/web-app', only: 'codex' }, HOME)
+    const firstPane = codex.slice(codex.indexOf('-n peers '), codex.indexOf('\\; set-option -p @live-sessions-agent'))
+    expect(firstPane).toContain('practice-rbac-codex.txt')
+    expect(firstPane).toContain('codex -c check_for_update_on_startup=false --sandbox workspace-write')
+    expect(codex).toContain("\\; set-option -p @live-sessions-agent codex \\; set-option -t 'ws-practice-rbac' @live-sessions-workspace")
+    expect(codex).not.toContain('split-window')
+    expect(codex).not.toContain('practice-rbac-claude.txt')
+    expect(codex).not.toContain('@live-sessions-agent claude')
+    const claude = openCommand({ ...practice, only: 'claude' }, HOME)
+    expect(claude).toContain('\\; set-option -p @live-sessions-agent claude \\; set-option -t')
+    expect(claude).not.toContain('split-window')
+    expect(claude).not.toContain('practice-rbac-codex.txt')
+    // a workspace made before the choice, or with one this does not read, runs both
+    expect(workspacesFrom({ workspaces: [{ ...practice, only: 'codex' }, { ...practice, id: 'b', only: 'gemini' }, { ...practice, id: 'c', only: 'Claude' }] }))
+      .toEqual([{ ...practice, only: 'codex' }, { ...practice, id: 'b' }, { ...practice, id: 'c' }])
+    expect(openCommand({ ...practice, id: 'b' }, HOME)).toContain('split-window')
+  })
+
+  test('its first prompt: the purpose, a branch to go on with or start, no peer coding, then it waits for the owner', async () => {
+    const ws = { ...practice, checkout: '/Users/u/dev/web-app', purpose: 'resume feat/rbac' }
+    const fresh = soloPrompt(ws, 'codex')
+    expect(fresh.startsWith('This is the workspace "Practice RBAC". What it is for: resume feat/rbac\n\nYou are Codex, the only agent here: the owner chose to work with you alone, so there is no peer and no relay')).toBe(true)
+    expect(fresh).toContain('1. If the purpose names a branch or worktree already under way, go on there. Otherwise start a branch for this purpose: name it from the purpose, never from the workspace\'s name, in its own worktree in /Users/u/dev/web-app-worktrees/.')
+    expect(fresh.endsWith('2. Say in a few lines where things stand and what you would do first, then wait for the owner.')).toBe(true)
+    expect(fresh).not.toMatch(/peer-coding|READY FOR|relay passes|moved this conversation/)
+    // one brought in keeps what it knows, and its work not committed yet stays where it is
+    const brought = soloPrompt({ ...ws, threads: { claude: { id: 'session-101', dir: '/Users/u/dev/web-app' } } }, 'claude')
+    expect(brought).toContain('The owner moved this conversation into the workspace: everything above stays yours. You are Claude, the only agent here')
+    expect(brought).toContain('1. If the work above already has a branch, go on with it.')
+    expect(brought).toContain('Work of yours not committed yet stays where it is: ask the owner before moving any of it.')
+  })
+
+  test('/workspace new --only codex: saved with its agent, no relay, the one first prompt; it starts alone', async ($, on) => {
+    const { files } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    await $.session.start(START)
+    const text = (await $.command.run({ ...SESSIONS, command: 'workspace', args: 'new ~/dev/web-app work Solo --only codex --for roles and permissions' })).text
+    expect(text).toContain('Codex starts alone in tmux session ws-solo; it gets ready for the purpose, says where things stand and waits for you.')
+    const [saved] = JSON.parse(files.get(WORKSPACES)!).workspaces
+    expect(saved).toEqual({ id: 'solo', name: 'Solo', env: 'work', dir: '/Users/u/dev/web-app', createdAt: expect.any(Number), checkout: '/Users/u/dev/web-app', only: 'codex', purpose: 'roles and permissions' })
+    // any first prompt a removed workspace of the same id left is gone; then this one's agent gets its own
+    expect(world.removed).toEqual([promptPath(HOME, 'solo', 'claude'), promptPath(HOME, 'solo', 'codex')])
+    expect(files.get(promptPath(HOME, 'solo', 'codex'))).toBe(soloPrompt(saved, 'codex'))
+    expect(files.has(promptPath(HOME, 'solo', 'claude'))).toBe(false)
+    expect(files.get(openScriptPath(HOME, 'solo'))).toBe(`${openCommand(saved, HOME)}\n`)
+    // without a purpose: no first prompt at all, and no relay
+    const bare = (await $.command.run({ ...SESSIONS, command: 'workspace', args: 'new ~/dev/web-app work Bare --only claude' })).text
+    expect(bare).toContain('Claude starts alone in tmux session ws-bare.')
+    expect(files.has(promptPath(HOME, 'bare', 'claude')) || files.has(promptPath(HOME, 'bare', 'codex'))).toBe(false)
+    const second = JSON.parse(files.get(WORKSPACES)!).workspaces[1]
+    expect([second.id, second.only, second.relay]).toEqual(['bare', 'claude', undefined])
+  })
+
+  test('the form: agents to choose; only the chosen agent\'s sessions are offered, one chosen for another let go', async ($, on) => {
+    const { files } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    // WEB CONSOLE (ttys004, default environment) between turns, working in web-app
+    files.set('/Users/u/.claude/sessions/101.json', JSON.stringify({ ...JSON.parse(files.get('/Users/u/.claude/sessions/101.json')!), status: 'idle', statusUpdatedAt: NOW - 60_000 }))
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    await reveal(ui, 'item:claude-101')
+    await ui.press({ key: 'bring claude-101' })
+    const agents = await ui.find({ key: 'form:agents' })
+    expect([agents?.props.value, (agents?.props.options as { label: string }[]).map(o => o.label)]).toEqual(['both', ['Claude and Codex', 'Claude only', 'Codex only']])
+    await ui.press({ key: `form:bring codex:${HELD}` })
+    expect((await ui.find({ key: `form:bring codex:${HELD}` }))?.props.label).toMatch(/^\[x\] Codex · /)
+    // Claude only: the Codex sessions are not offered, and the one chosen is let go
+    await ui.select({ key: 'form:agents', value: 'claude' })
+    expect(await ui.find({ key: `form:bring codex:${HELD}` })).toBeUndefined()
+    expect((await ui.find({ key: 'form:bring claude:session-101' }))?.props.label).toBe('[x] Claude · WEB CONSOLE')
+    expect((await ui.find({ key: 'form:purpose' }))?.props.placeholder).toBe('optional: Claude gets ready for it, then waits for you')
+    await ui.select({ key: 'form:agents', value: 'both' })
+    expect((await ui.find({ key: `form:bring codex:${HELD}` }))?.props.label).toMatch(/^\[ \] Codex · /)
+    // Codex only lets Claude go too
+    await ui.select({ key: 'form:agents', value: 'codex' })
+    expect(await ui.find({ key: 'form:bring claude:session-101' })).toBeUndefined()
+    await ui.select({ key: 'form:agents', value: 'claude' })
+    expect((await ui.find({ key: 'form:bring claude:session-101' }))?.props.label).toBe('[ ] Claude · WEB CONSOLE')
+    await ui.press({ key: 'form:bring claude:session-101' })
+    await ui.input({ key: 'form:name', text: 'Console', kind: 'change' })
+    await ui.input({ key: 'form:purpose', text: 'finish the console', kind: 'change' })
+    await ui.press({ key: 'form:create' })
+    // only Claude was closed where it ran and goes on in the workspace, alone; no relay
+    expect(world.stopped).toEqual(['ttys004 claude 101'])
+    const [saved] = JSON.parse(files.get(WORKSPACES)!).workspaces
+    expect([saved.only, Object.keys(saved.threads), saved.relay]).toEqual(['claude', ['claude'], undefined])
+    expect(files.get(promptPath(HOME, 'console', 'claude'))).toBe(soloPrompt(saved, 'claude'))
+    expect(files.has(promptPath(HOME, 'console', 'codex'))).toBe(false)
+    expect(files.get(openScriptPath(HOME, 'console'))).toBe(`${openCommand(saved, HOME)}\n`)
+    await ui.unmount()
+  })
+
+  test('its row: which agent, Open and Remove; no relay, compaction or check, which go by hand-offs', async ($, on) => {
+    const { files } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, only: 'codex', purpose: 'roles' }, { ...practice, id: 'pair', name: 'Pair', purpose: 'roles' }] }))
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    const shown = (await ui.findAll({ type: 'Text' })).map(t => t.text)
+    expect(shown).toContain('Codex only · ~/dev/web-app')
+    expect(shown).toContain('~/dev/web-app')
+    expect(await ui.find({ key: 'relay practice-rbac' })).toBeUndefined()
+    expect(await ui.find({ key: 'relay pair' })).toBeDefined()
+    await reveal(ui, 'ws:practice-rbac')
+    for (const key of ['relay-bar', 'compact', 'check', 'check-every']) expect(await ui.find({ key: `${key} practice-rbac` })).toBeUndefined()
+    for (const key of ['wsopen-bar', 'remove']) expect(await ui.find({ key: `${key} practice-rbac` })).toBeDefined()
+    await reveal(ui, 'ws:pair')
+    for (const key of ['relay-bar', 'compact', 'check', 'check-every']) expect(await ui.find({ key: `${key} pair` })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('a relay turned on by hand in a workspace of one agent passes nothing, tells nothing, reads nothing', async ($, on) => {
+    const { files, runs, clock } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, checkout: '/Users/u/dev/web-app', purpose: 'RBAC', only: 'codex', relay: relayOn() }] }))
+    // Codex alone in the workspace, its turn ended with a hand-off to a Claude that is not there
+    world.tmuxPanes = 'ws-practice-rbac\tpeers\t/dev/ttys045\t%2\tcodex\n'
+    world.tmuxOwner = String(NOW)
+    world.paneCommands = { '%2': 'codex' }
+    world.turns = { '/rollouts/a.jsonl': `done\tturn-x1\t${new Date(NOW - 60_000).toISOString()}\t${READY_CLAUDE}` }
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    expect(runs.filter(r => r[2] === RELAY_SCRIPT || r[2] === TURN_SCRIPT)).toEqual([])
+    expect(JSON.parse(files.get(WORKSPACES)!).workspaces[0].relay).toEqual(relayOn())
+    // the same workspace with both agents tells the owner Claude is not there: a relay that ran would have been seen
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, checkout: '/Users/u/dev/web-app', purpose: 'RBAC', relay: relayOn() }] }))
+    await clock.advance(4_000)
+    await $.command.run(SESSIONS)
+    expect(runs.filter(r => r[2] === RELAY_SCRIPT).map(r => r[4])).toEqual(['tell'])
   })
 })

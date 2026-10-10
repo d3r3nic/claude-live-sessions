@@ -918,6 +918,8 @@ export type WorkspaceView = {
   /** The environment's name; '' for the default. */
   env: string
   dir: string
+  /** The one agent it runs, when the owner chose one; unset: Claude and Codex. */
+  only?: 'claude' | 'codex'
   /** Its tmux session is running; a terminal is attached to it. */
   isRunning: boolean
   isAttached: boolean
@@ -1057,6 +1059,7 @@ export function viewOf(
     name: ws.name,
     env: ws.env,
     dir: tilde(ws.dir, o.home),
+    ...(ws.only === undefined ? {} : { only: ws.only }),
     isRunning: sessionsRunning.has(tmuxName(ws)),
     isAttached: (snap.tmux.clients[tmuxName(ws)]?.length ?? 0) > 0,
     items: arrange(inWorkspaces.get(tmuxName(ws)) ?? [], i => i.key, order[itemsScope(`ws:${ws.id}`)], byActivity),

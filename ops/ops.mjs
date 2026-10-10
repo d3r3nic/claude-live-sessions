@@ -200,7 +200,9 @@ function frame(snap, now, cols, rows, tick, note = '') {
     const relay = raw?.relay
     const claude = ws.items.find(i => i.tool === 'claude')
     const codex = ws.items.find(i => i.tool === 'codex')
-    const needs = relay?.status === 'needs you' || relay?.status === 'waits for you'
+    // one agent the owner chose: its row alone, no link and no relay (it has no one to pass to)
+    const only = raw?.only === 'claude' || raw?.only === 'codex' ? raw.only : undefined
+    const needs = only === undefined && (relay?.status === 'needs you' || relay?.status === 'waits for you')
     const node = WORKSPACE_ID.test(ws.key) ? { kind: 'workspace', id: ws.key } : undefined
     line(` ${rgb(needs && tick % 6 < 3 ? G.red : G.hi, bold(`▓▒░ ${clean(ws.name)} ░▒▓`))}  ${rgb(G.lo, `env ${clean(ws.env) || 'default'} · ${ws.isAttached ? '● window open' : ws.isRunning ? '◐ hidden, running' : '○ stopped'}`)}`, node)
     const agent = (label, item) => {
@@ -217,12 +219,16 @@ function frame(snap, now, cols, rows, tick, note = '') {
       const pos = tick % linkWidth
       link = rgb(G.cyan, [...'─'.repeat(linkWidth)].map((ch, k) => (k === (toCodex ? pos : linkWidth - 1 - pos) ? (toCodex ? '▸' : '◂') : ch)).join(''))
     }
-    // a click left of Codex's part opens Claude's pane; on it, Codex's
-    const left = `   ${agent('CLAUDE', claude)}  ${link}  `
-    line(`${left}${agent('CODEX', codex)}`, node === undefined ? undefined : { ...node, agent: 'claude', codexFrom: 1 + width(left) })
-    const mode = clean(relay?.mode ?? 'off')
-    const combo = Number.isFinite(relay?.streak) ? relay.streak : 0
-    line(`   ${rgb(G.lo, 'relay')} ${rgb(mode === 'auto' ? G.hi : G.lo, mode.toUpperCase())}  ${rgb(G.lo, 'combo')} ${rgb(combo > 0 ? G.amber : G.lo, `x${combo}`)}  ${rgb(G.lo, 'last')} ${rgb(needs ? G.red : G.mid, clean(relay?.status) || '—')}${relay?.at !== undefined ? rgb(G.lo, ` ${c.ago(now - relay.at)} ago`) : ''}`, node)
+    if (only !== undefined) {
+      line(`   ${agent(only.toUpperCase(), only === 'claude' ? claude : codex)}  ${rgb(G.lo, 'alone')}`, node === undefined ? undefined : { ...node, agent: only })
+    } else {
+      // a click left of Codex's part opens Claude's pane; on it, Codex's
+      const left = `   ${agent('CLAUDE', claude)}  ${link}  `
+      line(`${left}${agent('CODEX', codex)}`, node === undefined ? undefined : { ...node, agent: 'claude', codexFrom: 1 + width(left) })
+      const mode = clean(relay?.mode ?? 'off')
+      const combo = Number.isFinite(relay?.streak) ? relay.streak : 0
+      line(`   ${rgb(G.lo, 'relay')} ${rgb(mode === 'auto' ? G.hi : G.lo, mode.toUpperCase())}  ${rgb(G.lo, 'combo')} ${rgb(combo > 0 ? G.amber : G.lo, `x${combo}`)}  ${rgb(G.lo, 'last')} ${rgb(needs ? G.red : G.mid, clean(relay?.status) || '—')}${relay?.at !== undefined ? rgb(G.lo, ` ${c.ago(now - relay.at)} ago`) : ''}`, node)
+    }
     if (needs) line(`   ${rgb(tick % 6 < 3 ? G.red : G.amber, bold('⚠ OPERATOR INPUT REQUIRED ⚠'))}  ${rgb(G.mid, 'click to open')}`, node)
     line()
   }
