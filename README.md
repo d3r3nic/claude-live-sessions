@@ -3,6 +3,7 @@
 A Claude Code plugin (a function-hooks mod) that lists the live Claude Code and Codex sessions on this Mac.
 
 - `/sessions` shows or hides the pane. A status line under the prompt keeps the counts: `Claude 22 (3 working) · Codex 11 (1 working)`.
+- **One account at a time.** A session's pane, its status line and the ops screen it opens show its own account: the Claude sessions and Codex conversations of that account's profiles (`claude` and `codex` for the default account, `claude-<name>` and `codex-<name>` for another) and that account's workspaces. `account: default` (or the account's name), beside the activity buttons, switches to `all accounts` and back; the choice is kept for that account's next sessions. A session under a profile the plugin cannot name sees every account. A new workspace starts in the session's own account. Each account sees its own only where this plugin is installed for it (`claude plugin install` under that account's `CLAUDE_CONFIG_DIR`).
 - The pane groups sessions by repository (its origin, `owner/repo`), then worktree or branch, then each session, labelled `claude` (orange) or `codex` (blue). An idle row is white.
 - A session is listed where it has been working, not where it started. That is the worktree it used most among the last 40 folders its transcript or rollout records.
 - The `1d 2d 3d 7d all` buttons, or `/sessions 2d | 12h | all`, list only the sessions active that recently. The choice is kept.
@@ -99,7 +100,7 @@ A workspace made for a purpose is checked at milestones: after every 4 hand-offs
 
 ## Ops screen
 
-`Ops screen`, beside `+ New workspace` in the pane (in Terminal.app), opens a full-screen console in a Terminal window of its own (`node ops/ops.mjs`, from this plugin's folder; Node 22.18 or later, which runs TypeScript as it is: an older one says so in that window):
+`Ops screen`, beside `+ New workspace` in the pane (in Terminal.app), opens a full-screen console in a Terminal window of its own (`node ops/ops.mjs --account <the account the pane shows>`, from this plugin's folder; `a` there switches to every account and back; Node 22.18 or later, which runs TypeScript as it is: an older one says so in that window):
 
 - **Nodes:** each workspace, its Claude and Codex (working or idle), a packet crossing the link after each hand-off, the relay's mode, its count of hand-offs in a row, and what it last did; `OPERATOR INPUT REQUIRED` when it waits for you.
 - **Grid:** the repositories, an agent a cell.
@@ -146,7 +147,7 @@ To change it, edit this folder, then run `/reload-plugins` in a session.
 
 ```sh
 claude plugin validate .
-claude plugin test .                                         # 140 tests
+claude plugin test .                                         # 143 tests
 npx -p typescript@5.6.3 tsc -p .                             # after one load, which lays down .claude-plugin/types
 node --experimental-strip-types tests/host-check.mjs [2d] [--slow]   # on this Mac: SQL, pipelines, a full collection, the move script on throwaway processes, workspaces and the relay on a private tmux server (reading no tmux.conf), the checkout script on throwaway repositories
 E2E_TRUSTED_DIR=<a trusted folder> node --experimental-strip-types tests/e2e-terminal.mjs    # a Terminal window: move a throwaway session to the background

@@ -1015,6 +1015,29 @@ except ChildProcessError: pass
     check('ops: rows open what they are about; a forged workspace id and an event naming none open nothing; bad lines left out',
       JSON.stringify(targets[at('READY FOR CLAUDE · x')]) === JSON.stringify({ kind: 'workspace', id: 'opsx', agent: 'claude' }) && targets[at('Forged')] === null && targets[at('evil')] === null && at('no time') < 0,
       `${at('READY FOR CLAUDE · x')} ${at('Forged')}`)
+    // one account's ops screen: its workspaces and their events only; every account's by default, and for a word that
+    // names no account
+    {
+      const twoSnap = join(scratch, 'two-accounts.json')
+      const twoEvents = join(scratch, 'two-events.jsonl')
+      writeFileSync(twoSnap, snapshot({ workspaces: [
+        { id: 'mine', name: 'Mine Here', env: '', dir: scratch, createdAt: 1 },
+        { id: 'theirs', name: 'Theirs There', env: 'mmm', dir: scratch, createdAt: 2 },
+      ] }))
+      writeFileSync(twoEvents, [
+        JSON.stringify({ at: now - 10_000, kind: 'relay', text: 'Mine Here: a hand-off of mine', workspace: 'mine' }),
+        JSON.stringify({ at: now - 9_000, kind: 'relay', text: 'Theirs There: a hand-off of theirs', workspace: 'theirs' }),
+      ].join('\n') + '\n')
+      const shows = (...extra) => spawnSync(process.execPath, ['--no-warnings', opsFile, '--frame', '--plain', ...extra], { encoding: 'utf8', env: { ...env, LIVE_SESSIONS_SNAPSHOT: twoSnap, LIVE_SESSIONS_EVENTS: twoEvents, COLS: '120', ROWS: '30' } }).stdout
+      const own = shows('--account', '')
+      const theirs = shows('--account', 'mmm')
+      const every = [shows(), shows('--account', '../x')]
+      check('ops: one account\'s screen shows its workspaces and their events, every account\'s by default or for a word naming none',
+        own.includes('ACCOUNT default') && own.includes('Mine Here') && own.includes('a hand-off of mine') && !own.includes('Theirs There') && !own.includes('a hand-off of theirs') &&
+        theirs.includes('ACCOUNT mmm') && theirs.includes('Theirs There') && !theirs.includes('Mine Here') && !theirs.includes('a hand-off of mine') &&
+        every.every(f => f.includes('ALL ACCOUNTS') && f.includes('Mine Here') && f.includes('Theirs There') && f.includes('a hand-off of theirs')),
+        [own, theirs, ...every].map(f => f.split('\n').find(l => /ACCOUNT/.test(l))?.trim().slice(0, 60)).join(' | '))
+    }
     // a workspace of one agent: that agent alone on its row, no relay line; a click anywhere on the row opens it
     const solo = at('Solo X')
     check('ops: a workspace of one agent shows that agent alone, with no relay, and its row opens that agent',
@@ -1022,7 +1045,7 @@ except ChildProcessError: pass
       JSON.stringify(targets[solo + 1]) === JSON.stringify({ kind: 'workspace', id: 'solox', agent: 'codex' }),
       `${JSON.stringify(rows[solo + 1])} ${JSON.stringify(targets[solo + 1])}`)
     // the screen, live in a terminal: clicks, keys, signals
-    const live = (script, extraEnv = {}) => spawnSync('python3', ['-c', [
+    const live = (script, extraEnv = {}, args = []) => spawnSync('python3', ['-c', [
       'import os, pty, sys, time, select, struct, fcntl, termios, signal',
       'pid, fd = pty.fork()',
       'if pid == 0:',
@@ -1045,8 +1068,17 @@ except ChildProcessError: pass
       'except ChildProcessError:',
       '    status = 0',
       'sys.stdout.write(json.dumps({"out": out.decode("utf8", "replace"), "status": status}) if False else out.decode("utf8", "replace"))',
-    ].join('\n'), process.execPath, '--no-warnings', opsFile], { encoding: 'utf8', timeout: 30_000, env: { ...env, ...extraEnv } }).stdout
+    ].join('\n'), process.execPath, '--no-warnings', opsFile, ...args], { encoding: 'utf8', timeout: 30_000, env: { ...env, ...extraEnv } }).stdout
     const rowOf = text => at(text) + 1
+    // live, opened for one account: its own; `a` shows every account's (the two-account snapshot written above)
+    const twoAccounts = { LIVE_SESSIONS_SNAPSHOT: join(scratch, 'two-accounts.json'), LIVE_SESSIONS_EVENTS: join(scratch, 'two-events.jsonl') }
+    const bare = out => out.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')
+    const ownLive = bare(live('pass', twoAccounts, ['--account', '']))
+    const toggled = bare(live('os.write(fd, b"a")', twoAccounts, ['--account', '']))
+    check('ops, live: opened for one account it shows its own; a shows every account\'s',
+      ownLive.includes('ACCOUNT default') && ownLive.includes('Mine Here') && !ownLive.includes('Theirs There') && ownLive.includes('a all accounts') &&
+      toggled.includes('ALL ACCOUNTS') && toggled.includes('Theirs There') && toggled.includes('a this account'),
+      `${ownLive.includes('Theirs There')} ${toggled.includes('ALL ACCOUNTS')}`)
     // Claude's side of the agent row, then Codex's: each pane gets the keys; a stopped workspace: said, nothing done
     t('select-pane', '-t', right)
     const agentRow = rowOf('[CLAUDE]')

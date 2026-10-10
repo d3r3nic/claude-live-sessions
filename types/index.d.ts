@@ -151,6 +151,8 @@ declare module 'claude-code' {
       background: string
       /** Only sessions active this recently are listed (ms); 0 lists all. */
       window: number
+      /** Every account's sessions and workspaces shown, not only this session's account's. */
+      allAccounts: boolean
       /** The person's own order: per scope (`repos`, `trees:<repo>`, `items:<tree>`), keys top first. */
       order: Record<string, string[]>
       /** A move to the background pressed once: the row's key and when; a second press confirms it. */

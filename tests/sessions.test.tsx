@@ -48,6 +48,8 @@ import {
   parseThreads,
   readOnlyArgs,
   threadQuery,
+  forAccount,
+  ALL_ACCOUNTS,
 } from '../hooks/collect'
 import type { CodexProc, ThreadRow } from '../hooks/collect'
 import type { ClaudeSession, CodexSession, Snapshot, Workspace } from '../types'
@@ -413,7 +415,9 @@ function engine(
     configDir,
     moveTakesMs = 0,
     checkoutTakesMs = 0,
-  }: { canWrite?: boolean; selfId?: string; termProgram?: string; configDir?: string; moveTakesMs?: number; checkoutTakesMs?: number } = {},
+    // the fixtures hold sessions and workspaces of two accounts: shown all at once unless a test asks for its own
+    isOwnAccount = false,
+  }: { canWrite?: boolean; selfId?: string; termProgram?: string; configDir?: string; moveTakesMs?: number; checkoutTakesMs?: number; isOwnAccount?: boolean } = {},
 ) {
   resetWorld()
   on('session.start', async ($, e) => ({ cwd: e.cwd }))
@@ -438,7 +442,7 @@ function engine(
       id, title: 'Sessions', isShown: pane.isShown, isFocused: false, isPlaced: pane.isPlaced, plugin: 'live-sessions',
     })),
   }))
-  const store = new Map<string, unknown>()
+  const store = new Map<string, unknown>(isOwnAccount ? [] : [['allAccounts', true]])
   on('store.get', async ($, e) => ({ value: store.get(e.key) }))
   on('store.set', async ($, e) => {
     store.set(e.key, e.value)
@@ -2911,7 +2915,8 @@ describe('the ops screen', () => {
     const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
     await ui.press({ key: 'ops' })
     const opened = runs.find(r => r[0] === '/usr/bin/osascript' && r[4] === OPEN_SCRIPT)
-    expect(opened?.[5]).toMatch(/^node --no-warnings '\/.*\/ops\/ops\.mjs'$/)
+    // for the accounts the pane shows: here all of them
+    expect(opened?.[5]).toMatch(/^node --no-warnings '\/.*\/ops\/ops\.mjs' --account '\*'$/)
     expect(JSON.parse(opened![6]!)).toMatchObject({ x: expect.any(Number), y: expect.any(Number), width: expect.any(Number), height: expect.any(Number), fontSize: expect.any(Number) })
     await ui.unmount()
   })
@@ -3617,6 +3622,71 @@ describe('going on with a branch', () => {
     await ui.press({ key: 'form:create' })
     expect((await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')).toContain('Not done: the branch checked out in /Users/u/dev/build is now fix/other, not fix/build; choose again.')
     expect(files.has(WORKSPACES)).toBe(false)
+    await ui.unmount()
+  })
+})
+
+describe('one account at a time', () => {
+  test('what one account sees: its own sessions (by profile) and workspaces; every account: all of it', async () => {
+    const snap = { ...snapshotOf(), workspaces: [practice, { ...practice, id: 'home', name: 'Home', env: '' }] }
+    const own = forAccount(snap, '')
+    expect(own.claude.every(s => s.profile === 'claude') && own.claude.length > 0).toBe(true)
+    expect(own.codex.every(s => s.profile === 'codex') && own.codex.length > 0).toBe(true)
+    expect(own.workspaces.map(w => w.id)).toEqual(['home'])
+    const work = forAccount(snap, 'work')
+    expect([work.claude.map(s => s.profile), [...new Set(work.codex.map(s => s.profile))], work.workspaces.map(w => w.id)]).toEqual([['claude-work'], ['codex-work'], ['practice-rbac']])
+    // the rest as it is: folders, tmux, the environments, problems
+    expect([own.places, own.tmux, own.envs, own.problems]).toEqual([snap.places, snap.tmux, snap.envs, snap.problems])
+    expect(forAccount(snap, ALL_ACCOUNTS)).toBe(snap)
+    expect(own.claude.length + work.claude.length).toBe(snap.claude.length)
+    // which account a profile is, as before (and from where it was)
+    expect([envOfProfile('claude', 'claude'), envOfProfile('codex', 'codex-work'), envOfProfile('claude', 'claude-default'), envOfProfile('claude', 'codex')]).toEqual(['', 'work', undefined, undefined])
+  })
+
+  test('a session sees its own account; all accounts at a press, kept for its next sessions; its status line counts its own', async ($, on) => {
+    const { files, store, status, runs } = engine(on, machine, { termProgram: 'Apple_Terminal', isOwnAccount: true })
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [practice, { ...practice, id: 'home', name: 'Home', env: '' }] }))
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    // of all accounts' 3 Claude and 7 Codex, this one's: the work account's WORKER and its Codex left out
+    expect(status.at(-1)).toBe('Claude 2 (1 working) · Codex 6 (1 working) · /sessions')
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    const texts = async () => (await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')
+    expect((await ui.find({ key: 'accounts' }))?.props.label).toBe('account: default')
+    let shown = await texts()
+    expect(shown).toContain('Home')
+    expect(shown).not.toContain('Practice RBAC')
+    expect(await ui.find({ key: 'more item:claude-104' })).toBeUndefined()
+    await ui.press({ key: 'accounts' })
+    expect((await ui.find({ key: 'accounts' }))?.props.label).toBe('all accounts')
+    shown = await texts()
+    expect(shown).toContain('Practice RBAC')
+    expect(await ui.find({ key: 'more item:claude-104' })).toBeDefined()
+    expect(store.get('allAccounts')).toBe(true)
+    // the ops screen opens on the accounts the pane shows
+    await ui.press({ key: 'ops' })
+    expect(runs.filter(r => r[4] === OPEN_SCRIPT).at(-1)?.[5]).toMatch(/ --account '\*'$/)
+    await ui.press({ key: 'accounts' })
+    await ui.press({ key: 'ops' })
+    expect(runs.filter(r => r[4] === OPEN_SCRIPT).at(-1)?.[5]).toMatch(/ --account ''$/)
+    expect(store.get('allAccounts')).toBe(false)
+    await ui.unmount()
+  })
+
+  test('a session of another account sees that one\'s, and a new workspace starts in it', async ($, on) => {
+    const { files } = engine(on, machine, { termProgram: 'Apple_Terminal', isOwnAccount: true, configDir: `${HOME}/.claude-work` })
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [practice, { ...practice, id: 'home', name: 'Home', env: '' }] }))
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    expect((await ui.find({ key: 'accounts' }))?.props.label).toBe('account: work')
+    const shown = (await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')
+    expect(shown).toContain('Practice RBAC')
+    expect(shown).not.toContain('Home')
+    expect(await ui.find({ key: 'more item:claude-104' })).toBeDefined()
+    expect(await ui.find({ key: 'more item:claude-101' })).toBeUndefined()
+    await ui.press({ key: 'workspace:new' })
+    expect((await ui.find({ key: 'form:env' }))?.props.value).toBe('work')
     await ui.unmount()
   })
 })

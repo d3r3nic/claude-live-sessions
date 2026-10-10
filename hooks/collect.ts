@@ -24,6 +24,33 @@ export function claudeState(s: ClaudeSession, now: number): string {
 }
 
 /** The status line: how many of each are live, how many working. */
+/** The environment a session's profile belongs to: '' for `claude`/`codex`, `work` for `claude-work`; undefined for none. */
+export function envOfProfile(tool: 'claude' | 'codex', profile: string): string | undefined {
+  if (profile === tool) return ''
+  const m = new RegExp(`^${tool}-([a-z0-9][a-z0-9_.-]*)$`, 'i').exec(profile)
+  return m === null || m[1]!.toLowerCase() === 'default' ? undefined : m[1]!
+}
+
+/** Every account at once: no environment is named so (an environment's name starts with a letter or digit). */
+export const ALL_ACCOUNTS = '*'
+
+/**
+ * What one account sees of a snapshot: its own Claude sessions and Codex
+ * conversations (by their profiles: `claude`/`codex` are the default
+ * account '', `claude-<env>`/`codex-<env>` the environment) and its own
+ * workspaces; folders, tmux, the environments and problems as they are.
+ * ALL_ACCOUNTS: the whole of it.
+ */
+export function forAccount(snap: Snapshot, account: string): Snapshot {
+  if (account === ALL_ACCOUNTS) return snap
+  return {
+    ...snap,
+    claude: snap.claude.filter(s => envOfProfile('claude', s.profile) === account),
+    codex: snap.codex.filter(s => envOfProfile('codex', s.profile) === account),
+    workspaces: snap.workspaces.filter(ws => ws.env === account),
+  }
+}
+
 export function statusSummary(snap: Snapshot): string {
   const busyClaude = snap.claude.filter(s => claudeState(s, snap.checkedAt) === 'working').length
   const busyCodex = snap.codex.filter(s => s.updatedAt > 0 && snap.checkedAt - s.updatedAt < WORKING_MS).length

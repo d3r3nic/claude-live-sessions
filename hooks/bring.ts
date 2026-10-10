@@ -2,20 +2,16 @@
 // runs and its pane in the workspace resumes the same conversation. Pure: no
 // `$`, so the tests drive it directly.
 import type { CodexSession, Snapshot, Thread, Workspace } from '../types'
-import { claudeState, WORKING_MS } from './collect'
+import { claudeState, envOfProfile, WORKING_MS } from './collect'
 import { tmuxName } from './workspaces'
+
+// which account a profile is: kept with the view, which shows one account at a time
+export { envOfProfile } from './collect'
 
 type Tool = 'claude' | 'codex'
 
 /** An id that goes into a command line as it is: letters, digits and dashes, never first a dash (an option). */
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/
-
-/** The environment a session's profile belongs to: '' for `claude`/`codex`, `work` for `claude-work`; undefined for none. */
-export function envOfProfile(tool: Tool, profile: string): string | undefined {
-  if (profile === tool) return ''
-  const m = new RegExp(`^${tool}-([a-z0-9][a-z0-9_.-]*)$`, 'i').exec(profile)
-  return m === null || m[1]!.toLowerCase() === 'default' ? undefined : m[1]!
-}
 
 /** A running session the form can bring in. */
 export type Bringable = {

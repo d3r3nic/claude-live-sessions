@@ -104,6 +104,8 @@ import {
   isFromTerminal,
   isSnapshot,
   SHARED_VERSION,
+  ALL_ACCOUNTS,
+  forAccount,
 } from './collect'
 import type { CodexProc, Item, Proc, ThreadRow } from './collect'
 
@@ -156,6 +158,8 @@ const IDLE_BACKGROUND = '#ffffff'
 
 /** The activity window; kept across sessions in `$.store` as `windowMs`. */
 const activeWindow = atom({ plugin: 'live-sessions', key: 'window' } as const, 0)
+/** Every account's sessions and workspaces shown, not only this session's account's; kept across sessions. */
+const allAccounts = atom({ plugin: 'live-sessions', key: 'allAccounts' } as const, false)
 /** A move to the background asked for once: the row, and when. A second press within CONFIRM_MS makes it. */
 const pendingMove = atom({ plugin: 'live-sessions', key: 'pendingMove' } as const, { key: '', at: 0 })
 const CONFIRM_MS = 6_000
@@ -509,7 +513,7 @@ function refresh($: EngineInterface, maxAgeMs: number): Promise<void> {
     }
     const taken = next
     await update($, snapshot, () => taken)
-    $.ui.status(statusSummary(taken))
+    $.ui.status(statusSummary(forAccount(taken, await shownAccount($, home))))
   })()
     // the environment can go mid-refresh (a reload); its successor starts afresh
     .catch(() => undefined)
@@ -530,6 +534,17 @@ async function learnBackground($: EngineInterface) {
     .catch(() => undefined)
   const color = parseBackground(out?.stdout ?? '')
   if (color !== undefined) await update($, background, () => color)
+}
+
+/** The account this session's pane, status line and ops screen show: its own, or ALL_ACCOUNTS (also when its own is not known). */
+async function shownAccount($: EngineInterface, home: string): Promise<string> {
+  const own = await ownEnv($, home)
+  return own === undefined || (await read($, allAccounts)) ? ALL_ACCOUNTS : own
+}
+
+async function toggleAccounts($: EngineInterface) {
+  const next = await update($, allAccounts, now => !now)
+  await $.store.set('allAccounts', next)
 }
 
 async function setWindow($: EngineInterface, ms: number) {
@@ -705,7 +720,9 @@ async function openOps($: EngineInterface) {
       .catch((error: unknown) => ({ exitCode: -1, stdout: '', stderr: message(error) }))
   const seen = await screens($, osascript)
   const place = seen === undefined ? undefined : { ...seen.screens[0]!, fontSize: seen.fontSize }
-  const command = `node --no-warnings ${shellQuote(`${$.plugin.root}/ops/ops.mjs`)}`
+  const home = (await $.env.get('HOME')) ?? ''
+  // the account this pane shows
+  const command = `node --no-warnings ${shellQuote(`${$.plugin.root}/ops/ops.mjs`)} --account ${shellQuote(await shownAccount($, home))}`
   const opened = await osascript(OPEN_SCRIPT, command, ...(place === undefined ? [] : [JSON.stringify(place)]))
   if (opened.stdout.trim() !== 'opened') $.ui.toast(`The ops screen did not open (${firstLine(opened.stderr) || `exit ${opened.exitCode}`}). Run: ${command}`, { timeoutMs: 15_000 })
 }
@@ -1108,7 +1125,10 @@ async function removePrompts($: EngineInterface, home: string, id: string) {
 async function openDraft($: EngineInterface, dir: string, with_?: { member: string; env: string }) {
   const home = (await $.env.get('HOME')) ?? ''
   const shown = dir.startsWith(`${home}/`) ? `~${dir.slice(home.length)}` : dir
-  await update($, draft, () => ({ ...NO_DRAFT, isOpen: true, dir, query: shown, ...(with_ === undefined ? {} : { bring: [with_.member], env: with_.env }) }))
+  // in this session's own environment unless a session brought in names another
+  const own = await ownEnv($, home)
+  const env = own !== undefined && (await read($, snapshot)).envs.includes(own) ? own : ''
+  await update($, draft, () => ({ ...NO_DRAFT, isOpen: true, dir, query: shown, env, ...(with_ === undefined ? {} : { bring: [with_.member], env: with_.env }) }))
   // a form opened anew shows no worktrees another one found
   await update($, worktrees, () => ({ dir: '', list: [] }))
   // while this pane has the keys (the form opened by its key), what is typed next goes into the name, not to the pane's keys
@@ -1515,6 +1535,8 @@ export const register: Register = on => {
     })
     const kept = await $.store.get('windowMs')
     if (typeof kept === 'number' && kept >= 0) await update($, activeWindow, () => kept)
+    const keptAll = await $.store.get('allAccounts')
+    if (typeof keptAll === 'boolean') await update($, allAccounts, () => keptAll)
     const keptOrder = orderFrom(await $.store.get('order'))
     if (keptOrder !== undefined) await update($, manualOrder, () => keptOrder)
     // a status line only where a person sees one; a pane wherever one is opened
@@ -1585,16 +1607,19 @@ export const register: Register = on => {
     const windowMs = await read($, activeWindow)
     const showing = windowMs === 0 ? 'all sessions' : `active in the last ${windowLabel(windowMs)}`
     if (opened.isPlaced) return { text: `Sessions pane opened (${showing}).` }
-    const snap = await read($, snapshot)
+    const snap = forAccount(await read($, snapshot), await shownAccount($, (await $.env.get('HOME')) ?? ''))
     return { text: `${statusSummary(snap)} (${showing}; widen the terminal to see the pane)` }
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
-    const snap = await read($, snapshot)
+    const home = (await $.env.get('HOME')) ?? ''
+    // what this session's account sees (or every account's): its sessions, its workspaces, its offers
+    const own = await ownEnv($, home)
+    const account = await shownAccount($, home)
+    const snap = forAccount(await read($, snapshot), account)
     const windowMs = await read($, activeWindow)
     const now = await $.clock.now()
-    const home = (await $.env.get('HOME')) ?? ''
     const selfId = await $.session.id()
     const paint = (await read($, background)) || undefined
     const width = e.props.bodyColumns
@@ -1796,6 +1821,14 @@ export const register: Register = on => {
             />
           ))}
           {!WINDOWS.some(w => w.ms === windowMs) && <Text color="warning">{windowLabel(windowMs)}</Text>}
+          {own !== undefined && (
+            <Button
+              key="accounts"
+              label={account === ALL_ACCOUNTS ? 'all accounts' : `account: ${own || 'default'}`}
+              {...(account === ALL_ACCOUNTS ? { variant: 'primary' as const } : {})}
+              onPress={() => void toggleAccounts($)}
+            />
+          )}
           {Object.keys(order).length > 0 && (
             <Button key="reset-order" label="reset order" onPress={() => void resetOrder($)} />
           )}

@@ -1,7 +1,7 @@
 // The live-sessions ops screen: a full-screen console of the workspaces, their agents and what the relay does,
 // drawn from the snapshot every Claude Code session with this plugin keeps, and the relay's event log. A click on
 // a node, an agent or an event opens what it is about: the workspace's window at that agent, or a session's tab.
-//   node ops/ops.mjs                       live, full screen (t theme, q quit)
+//   node ops/ops.mjs [--account <env>]     live, full screen, one account's or every one's (a accounts, t theme, q quit)
 //   node ops/ops.mjs --frame [--plain]     one frame, printed (COLS, ROWS, TICK); --targets prints what each row opens
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync, writeSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
@@ -148,6 +148,16 @@ const targetOf = item => {
   return undefined
 }
 
+// the account it shows: the one it was opened for (--account, as the pane that opened it showed; every account when
+// none or another word), or, by `a`, every account
+const OWN = (() => {
+  const named = process.argv[process.argv.indexOf('--account') + 1]
+  return process.argv.includes('--account') && typeof named === 'string' && /^([a-z0-9][a-z0-9_.-]*)?$/i.test(named) ? named : c.ALL_ACCOUNTS
+})()
+let account = OWN
+/** What the account shown sees of a snapshot. */
+const seenAs = snap => c.forAccount(snap, account)
+
 const seen = []
 let previous
 /** What changed between two snapshots (sessions coming, going, at work, idle), each with what it opens. */
@@ -192,7 +202,7 @@ function frame(snap, now, cols, rows, tick, note = '') {
   const clock = new Date(now).toTimeString().slice(0, 8)
   const blink = tick % 10 < 5 ? '●' : '○'
   rule('LIVE//SESSIONS :: OPS', '╔', '╗')
-  line(` ${rgb(G.hi, clock)}   ${rgb(G.mid, `CLAUDE ${snap.claude.length}`)}  ${rgb(G.mid, `CODEX ${snap.codex.length}`)}  ${rgb(working > 0 ? G.amber : G.lo, `WORKING ${working}`)}   ${rgb(age < 40 ? G.hi : G.red, `SIGNAL ${blink} ${age}s`)}`)
+  line(` ${rgb(G.hi, clock)}   ${rgb(G.lo, account === c.ALL_ACCOUNTS ? 'ALL ACCOUNTS' : `ACCOUNT ${clean(account) || 'default'}`)}   ${rgb(G.mid, `CLAUDE ${snap.claude.length}`)}  ${rgb(G.mid, `CODEX ${snap.codex.length}`)}  ${rgb(working > 0 ? G.amber : G.lo, `WORKING ${working}`)}   ${rgb(age < 40 ? G.hi : G.red, `SIGNAL ${blink} ${age}s`)}`)
   // workspaces: nodes, each its agents and the link the relay passes hand-offs over
   rule(`NODES ${view.workspaces.length}`)
   for (const ws of view.workspaces) {
@@ -243,7 +253,10 @@ function frame(snap, now, cols, rows, tick, note = '') {
   }
   rule('EVENT LOG · click one to open it')
   const room = Math.max(3, rows - out.length - 2)
-  for (const e of allEvents().slice(0, room)) {
+  // the relay's events of the workspaces shown (one account's: its own; every account: all of them)
+  const shownIds = new Set(snap.workspaces.map(x => x.id))
+  const events = allEvents().filter(e => account === c.ALL_ACCOUNTS || e.target?.kind !== 'workspace' || shownIds.has(e.target.id))
+  for (const e of events.slice(0, room)) {
     const color = /ALERT|NEEDS|WAITS|DRIFT|FAILED/.test(e.kind) ? G.red : /RELAY|PASS|NOTIFY/.test(e.kind) ? G.cyan : /EXEC|COMPACT/.test(e.kind) ? G.amber : G.mid
     line(` ${rgb(G.lo, new Date(e.at).toTimeString().slice(0, 8))}  ${rgb(color, pad(e.kind, 7))} ${rgb(G.mid, cut(e.text, inner - 22))}${e.target !== undefined ? rgb(G.lo, ' ›') : ''}`, e.target)
   }
@@ -261,7 +274,7 @@ function frame(snap, now, cols, rows, tick, note = '') {
     out.push(rgb(G.lo, '║') + rain + rgb(G.lo, '║'))
     targets.push(undefined)
   }
-  const keys = ` ${note === '' ? '' : `${clean(note)} · `}click opens · t theme: ${themeName} · q quit `
+  const keys = ` ${note === '' ? '' : `${clean(note)} · `}click opens · ${OWN === c.ALL_ACCOUNTS ? '' : `a ${account === c.ALL_ACCOUNTS ? 'this account' : 'all accounts'} · `}t theme: ${themeName} · q quit `
   out.push(rgb(G.lo, '╚' + '═'.repeat(Math.max(0, inner - width(keys) - 2))) + rgb(note === '' ? G.mid : G.amber, keys) + rgb(G.lo, '══╝'))
   targets.push(undefined)
   // the theme's background under every cell, to the line's end
@@ -312,8 +325,8 @@ function open(target, snap) {
 if (process.argv.includes('--frame')) {
   const loaded = load()
   const now = Number(process.env.NOW ?? Date.now())
-  diff(loaded.snap, now)
-  const { lines, targets } = frame(loaded.snap, now, Number(process.env.COLS ?? 110), Number(process.env.ROWS ?? 34), Number(process.env.TICK ?? 3))
+  diff(seenAs(loaded.snap), now)
+  const { lines, targets } = frame(seenAs(loaded.snap), now, Number(process.env.COLS ?? 110), Number(process.env.ROWS ?? 34), Number(process.env.TICK ?? 3))
   if (process.argv.includes('--targets')) process.stdout.write(`${JSON.stringify(targets)}\n`)
   else process.stdout.write((process.argv.includes('--plain') ? lines.map(strip) : lines).join('\n') + '\n')
 } else {
@@ -380,16 +393,24 @@ if (process.argv.includes('--frame')) {
       nextTheme()
       process.stdout.write(bgOn() + '\x1b[2J')
     }
+    // this account's or every one's; what came and went is counted afresh, so the switch is no news
+    if (keys.includes('a') && OWN !== c.ALL_ACCOUNTS) {
+      account = account === c.ALL_ACCOUNTS ? OWN : c.ALL_ACCOUNTS
+      previous = undefined
+      try {
+        diff(seenAs(loaded.snap), Date.now())
+      } catch {}
+    }
   })
   try {
-    diff(loaded.snap, Date.now())
+    diff(seenAs(loaded.snap), Date.now())
   } catch {}
   setInterval(() => {
     const again = load()
     if (again !== undefined && again.mtime !== loaded.mtime) {
       loaded = again
       try {
-        diff(loaded.snap, Date.now())
+        diff(seenAs(loaded.snap), Date.now())
       } catch {}
     }
     tick++
@@ -400,7 +421,7 @@ if (process.argv.includes('--frame')) {
       // too small a window: said, nothing else drawn
       shown = cols < 40 || rows < 8
         ? { lines: [...Array(rows)].map((_, r) => bgOn() + clip(r === 0 ? rgb(G.mid, ' window too small for ops') : '', cols) + `${ESC}49m`), targets: [] }
-        : frame(loaded.snap, Date.now(), cols, rows, tick, note)
+        : frame(seenAs(loaded.snap), Date.now(), cols, rows, tick, note)
     } catch (error) {
       shown = { lines: [bgOn() + clip(rgb(G.red, ` cannot draw: ${clean(String(error).split('\n')[0])}`), cols) + `${ESC}49m`], targets: [] }
     }
