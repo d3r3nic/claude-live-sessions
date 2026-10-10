@@ -3,8 +3,8 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { ClaudeSession, CodexSession, Place, Relay, Snapshot, Thread, Workspace } from '../types'
 import type { Screen } from './workspaces'
-import { AGENT_COMMANDS, afterOwner, afterStep, claudeKeep, compactStep, COMPACT_AT, cueOf, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_SCRIPT } from './relay'
-import type { Side, Step } from './relay'
+import { AGENT_COMMANDS, afterOwner, afterStep, claudeKeep, compactStep, COMPACT_AT, cueOf, eventOf, EVENT_SCRIPT, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_SCRIPT } from './relay'
+import type { RelayEvent, Side, Step } from './relay'
 import { bringable, codexDir, codexFlags, CODEX_MODE_SCRIPT, CODEX_TASK_SCRIPT, codexTaskState, JOB_COMMANDS, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, toggled, withThreads } from './bring'
 import {
   CHECKOUT_SCRIPT,
@@ -683,6 +683,22 @@ async function openWorkspace($: EngineInterface, ws: Workspace, at?: { window: s
     : { isOpen: false, text: `Not opened (${firstLine(opened.stderr) || `exit ${opened.exitCode}`}). Run: ${command}` }
 }
 
+/**
+ * The ops screen (ops/ops.mjs, beside this plugin's hooks) in a Terminal window of its own, filling the screen in
+ * use (what the menu bar and Dock leave), in this tab's font size.
+ */
+async function openOps($: EngineInterface) {
+  const osascript = (script: string, ...args: string[]) =>
+    $.process
+      .run(['/usr/bin/osascript', '-l', 'JavaScript', '-e', script, ...args], { timeoutMs: 10_000 })
+      .catch((error: unknown) => ({ exitCode: -1, stdout: '', stderr: message(error) }))
+  const seen = await screens($, osascript)
+  const place = seen === undefined ? undefined : { ...seen.screens[0]!, fontSize: seen.fontSize }
+  const command = `node --no-warnings ${shellQuote(`${$.plugin.root}/ops/ops.mjs`)}`
+  const opened = await osascript(OPEN_SCRIPT, command, ...(place === undefined ? [] : [JSON.stringify(place)]))
+  if (opened.stdout.trim() !== 'opened') $.ui.toast(`The ops screen did not open (${firstLine(opened.stderr) || `exit ${opened.exitCode}`}). Run: ${command}`, { timeoutMs: 15_000 })
+}
+
 /** The screens there are now (the one in use first), and the font size of this session's own tab. */
 async function screens($: EngineInterface, osascript: (script: string, ...args: string[]) => Promise<{ stdout: string }>) {
   const selfId = await $.session.id()
@@ -1121,6 +1137,8 @@ async function passCues(
       changeWorkspaces($, home, list => list.map(w => (w.id === ws.id && w.relay !== undefined ? { ...w, relay: afterStep(w.relay, step, outcome, now) } : w)))
     // a step's outcome, kept on the workspace (a step taken already, by this or another session, changes nothing)
     const settle = async (step: Step, outcome: string) => {
+      const event = eventOf(ws, step, outcome)
+      if (event !== undefined) await logEvent($, home, event)
       if (outcome === 'taken') return
       const next = ws.relay === undefined ? undefined : afterStep(ws.relay, step, outcome, now)
       // a pass waiting on a scrolled-back pane says so once, not at every collection
@@ -1155,6 +1173,15 @@ async function passCues(
       }
     }
   }
+}
+
+/** The relay's event log, which the ops screen reads. */
+const eventsPath = (home: string) => `${home}/Library/Caches/live-sessions/events.jsonl`
+
+/** Adds an event to the relay's event log, timed now. */
+async function logEvent($: EngineInterface, home: string, event: RelayEvent) {
+  const line = JSON.stringify({ at: await $.clock.now(), ...event })
+  await $.process.run(['/bin/sh', '-c', EVENT_SCRIPT, 'sh', eventsPath(home), line], { timeoutMs: 10_000 }).catch(() => undefined)
 }
 
 /**
@@ -1199,6 +1226,7 @@ async function compactAtHandOff($: EngineInterface, answer: string) {
   }
   // still the same conversation (not cleared or resumed into another while it waited)
   if ((await $.session.id()) !== id) return
+  await logEvent($, home, { kind: 'compact', text: `${ws.name}: Claude compacting (its context ${Math.round(context.percent)}% full)`, workspace: ws.id, agent: 'claude' })
   await $.session.compact({ instructions: claudeKeep(ws.name) }).catch(() => undefined)
 }
 
@@ -1555,6 +1583,7 @@ export const register: Register = on => {
           <Box flexDirection="row" width={width} columnGap={1}>
             <Text bold>Workspaces</Text>
             {Input !== undefined && !form.isOpen && <Button key="workspace:new" label="+ New workspace (n)" hotkey="n" onPress={openForm('')} />}
+            {canOpen && <Button key="ops" label="Ops screen" onPress={() => void openOps($)} />}
           </Box>
           {view.workspaces.length === 0 && !form.isOpen && (
             <Text dimColor wrap="truncate-end">{'  none yet: + New workspace, or /workspace new <folder> <env> <name> --for <purpose>'}</Text>

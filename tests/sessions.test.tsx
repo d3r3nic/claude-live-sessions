@@ -51,7 +51,7 @@ import {
 } from '../hooks/collect'
 import type { CodexProc, ThreadRow } from '../hooks/collect'
 import type { ClaudeSession, CodexSession, Snapshot, Workspace } from '../types'
-import { afterOwner, afterStep, claudeKeep, compactStep, COMPACT_AT, cueOf, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_MAX_AGE_MS, TURN_SCRIPT } from '../hooks/relay'
+import { afterOwner, afterStep, claudeKeep, compactStep, COMPACT_AT, cueOf, eventOf, EVENT_SCRIPT, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_MAX_AGE_MS, TURN_SCRIPT } from '../hooks/relay'
 import type { Side } from '../hooks/relay'
 import { bringable, codexDir, codexFlags, CODEX_MODE_SCRIPT, CODEX_TASK_SCRIPT, codexTaskState, envOfProfile, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, threadFrom, toggled, withThreads } from '../hooks/bring'
 import {
@@ -177,6 +177,8 @@ const world = {
   /** What STOP_SCRIPT answers for a terminal (default `stopped`), and what it was run for. */
   stop: {} as Record<string, string>,
   stopped: [] as string[],
+  /** The relay's event log, as written. */
+  events: [] as Record<string, unknown>[],
   /** This session's id, when it changed since the engine started (a /clear, a /resume). */
   sessionId: undefined as string | undefined,
   /** What lsof answers now, when not the fixture's. */
@@ -222,6 +224,7 @@ const resetWorld = () => {
   world.codexTask = '"type":"task_complete"\n'
   world.codexTaskAnswer = undefined
   world.sessionId = undefined
+  world.events = []
 }
 const changed = (pid: number, line: string) => {
   const stat = world.stat.get(pid)
@@ -262,6 +265,10 @@ function machine(argv: readonly string[], env: unknown): Run {
       }
       if (argv[2] === MOVE_SCRIPT) return world.move === 0 ? ok('typed') : { exitCode: Number(world.move), stdout: '', stderr: '' }
       if (argv[2] === MODE_SCRIPT) return ok(world.mode)
+      if (argv[2] === EVENT_SCRIPT) {
+        world.events.push(JSON.parse(args[1] ?? '{}'))
+        return ok('')
+      }
       if (argv[2] === STOP_SCRIPT) {
         world.stopped.push(`${args[0]} ${args[1]} ${args[2]}`)
         const answer = world.stop[args[0] ?? ''] ?? 'stopped'
@@ -2617,6 +2624,55 @@ describe('the context guard', () => {
       seen.push(JSON.parse(files.get(WORKSPACES)!).workspaces[0].compactAt)
     }
     expect(seen).toEqual(['Compact at: 50% → 60%', 60, 70, 80, 0, 50])
+    await ui.unmount()
+  })
+})
+
+describe('the ops screen', () => {
+  test('the relay\'s event log: a hand-off passed or not, what is the owner\'s, a hold, a compaction; nothing for a step taken already', async () => {
+    const ws = { id: 'rbac', name: 'RBAC' }
+    const pass = { kind: 'pass' as const, key: 'pass-x1', from: 'codex' as const, to: 'claude' as const, pane: '%1', line: READY_CLAUDE }
+    expect(eventOf(ws, pass, 'passed')).toEqual({ kind: 'relay', text: `RBAC: Codex → Claude: ${READY_CLAUDE}`, workspace: 'rbac', agent: 'claude' })
+    expect(eventOf(ws, pass, 'not-agent zsh')).toEqual({ kind: 'failed', text: 'RBAC: not passed to Claude: its pane runs zsh, not the agent', workspace: 'rbac', agent: 'claude' })
+    for (const outcome of ['taken', 'in-mode']) expect(eventOf(ws, pass, outcome)).toBeUndefined()
+    expect(eventOf(ws, { kind: 'tell', key: 'tell-c2', from: 'claude', text: 'RBAC: Claude needs you. NEEDS USER · x', isForOwner: true }, 'told')).toEqual({ kind: 'needs', text: 'RBAC: Claude needs you. NEEDS USER · x', workspace: 'rbac', agent: 'claude' })
+    expect(eventOf(ws, { kind: 'tell', key: 'tell-c3', from: 'claude', text: 'paste it', isForOwner: false }, 'told')?.kind).toBe('notify')
+    expect(eventOf(ws, { kind: 'tell', key: 'cap-c4', text: 'held', isForOwner: true }, 'told')).toEqual({ kind: 'waits', text: 'held', workspace: 'rbac' })
+    expect(eventOf(ws, { kind: 'compact', key: 'compact-x1', to: 'codex', pane: '%2', line: '/compact', filled: 62 }, 'passed')).toEqual({ kind: 'compact', text: 'RBAC: Codex compacting (its context 62% full)', workspace: 'rbac', agent: 'codex' })
+    expect(eventOf(ws, { kind: 'compact', key: 'compact-x1', to: 'codex', pane: '%2', line: '/compact', filled: 62 }, 'unsent')).toBeUndefined()
+  })
+
+  test('the collecting session writes what the relay did to the event log', async ($, on) => {
+    const { files } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, checkout: '/Users/u/dev/web-app', relay: relayOn() }] }))
+    world.tmuxPanes = 'ws-practice-rbac\tpeers\t/dev/ttys022\t%1\tclaude\nws-practice-rbac\tpeers\t/dev/ttys045\t%2\tcodex\n'
+    world.tmuxOwner = String(NOW)
+    world.paneCommands = { '%1': 'claude', '%2': 'codex' }
+    world.turns = { 'session-104': `done\tturn-c0\t${new Date(NOW - 300_000).toISOString()}\tReady.`, '/rollouts/a.jsonl': `done\tturn-x1\t${new Date(NOW - 60_000).toISOString()}\t${READY_CLAUDE}\t\t62` }
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    expect(world.events.map(e => [e.kind, e.workspace, e.agent])).toEqual([['relay', 'practice-rbac', 'claude'], ['compact', 'practice-rbac', 'codex']])
+    expect(world.events.every(e => typeof e.at === 'number')).toBe(true)
+  })
+
+  test('Ops screen opens the ops console, from this plugin\'s folder, in a Terminal window over the screen in use', async ($, on) => {
+    const { runs } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    await ui.press({ key: 'ops' })
+    const opened = runs.find(r => r[0] === '/usr/bin/osascript' && r[4] === OPEN_SCRIPT)
+    expect(opened?.[5]).toMatch(/^node --no-warnings '\/.*\/ops\/ops\.mjs'$/)
+    expect(JSON.parse(opened![6]!)).toMatchObject({ x: expect.any(Number), y: expect.any(Number), width: expect.any(Number), height: expect.any(Number), fontSize: expect.any(Number) })
+    await ui.unmount()
+  })
+
+  test('outside Terminal.app there is no Ops screen button: it opens a Terminal window', async ($, on) => {
+    engine(on, machine, { termProgram: 'vscode' })
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    expect(await ui.find({ key: 'ops' })).toBeUndefined()
     await ui.unmount()
   })
 })

@@ -216,6 +216,42 @@ export function claudeKeep(name: string): string {
   return `Peer-coding workspace "${name.replace(/[\u0000-\u001f\u007f]/g, ' ')}": keep what it is for, the peer-coding branch and its worktree, the round, where the peer-coding records are (CURRENT.md), what the owner decided, and the cue you last sent; the details stay in those records.`
 }
 
+/** One line of the relay's event log, which the ops screen reads: what happened, in a workspace, at an agent. */
+export type RelayEvent = { kind: string; text: string; workspace: string; agent?: Tool }
+
+/**
+ * What a step that was carried out is, for the event log (none for one taken
+ * already, or waiting on a scrolled-back pane): a hand-off passed, one that
+ * could not be, what is the owner's, a hold, a compaction.
+ */
+export function eventOf(ws: Pick<Workspace, 'id' | 'name'>, step: Step, outcome: string): RelayEvent | undefined {
+  if (outcome === 'taken' || outcome === 'in-mode') return undefined
+  const at = { workspace: ws.id }
+  if (step.kind === 'compact') return outcome === 'passed' ? { ...at, kind: 'compact', text: `${ws.name}: ${NAME[step.to]} compacting (its context ${step.filled}% full)`, agent: step.to } : undefined
+  if (step.kind === 'pass') {
+    const why = passFailure(outcome)
+    return why === undefined
+      ? { ...at, kind: 'relay', text: `${ws.name}: ${step.from === undefined ? '' : `${NAME[step.from]} → `}${NAME[step.to]}: ${step.line}`, agent: step.to }
+      : { ...at, kind: 'failed', text: `${ws.name}: not passed to ${NAME[step.to]}: ${why}`, agent: step.to }
+  }
+  const kind = step.key.startsWith('cap-') || step.key.startsWith('wait-') ? 'waits' : step.isForOwner ? 'needs' : 'notify'
+  return { ...at, kind, text: step.text, ...(step.from === undefined ? {} : { agent: step.from }) }
+}
+
+/**
+ * Adds the JSON event "$2" as a line of the event log "$1", made if need be;
+ * past 2000 lines, the last 1000 are kept. One `>>` a line, so sessions
+ * writing at once never mix their lines.
+ */
+export const EVENT_SCRIPT = [
+  'f=$1; line=$2',
+  'mkdir -p "$(dirname "$f")" || exit 0',
+  `printf '%s\n' "$line" >> "$f"`,
+  'n=$(/usr/bin/wc -l < "$f" | /usr/bin/tr -d " ")',
+  'if [ "$n" -gt 2000 ]; then /usr/bin/tail -n 1000 "$f" > "$f.$$" && /bin/mv "$f.$$" "$f"; fi',
+  'exit 0',
+].join('\n')
+
 /** The agent a pane must have in its foreground for the relay to type into it: never only a shell. */
 export const AGENT_COMMANDS: Record<Tool, string> = { claude: 'claude', codex: 'codex' }
 

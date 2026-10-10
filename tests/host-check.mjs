@@ -859,4 +859,102 @@ except ChildProcessError: pass
   }
 }
 
+// the ops screen, drawn from this Mac's own snapshot (read only) and an event log of its own: every frame exactly the
+// window's size (no row wraps or scrolls), each row knowing what a click on it opens
+{
+  const snapshotFile = join(home, 'Library', 'Caches', 'live-sessions', 'snapshot.json')
+  if (existsSync(snapshotFile)) {
+    const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'live-sessions-ops-')))
+    try {
+      const snap = JSON.parse(readFileSync(snapshotFile, 'utf8')).snapshot
+      const ws = snap.workspaces[0]?.id ?? 'none'
+      const events = join(scratch, 'events.jsonl')
+      writeFileSync(events, [
+        JSON.stringify({ at: Date.now() - 60_000, kind: 'relay', text: 'passed to Codex', workspace: ws, agent: 'codex' }),
+        'not json',
+        JSON.stringify({ at: Date.now() - 30_000, kind: 'needs', text: '要確認 · the owner is needed 🚨', workspace: '../etc' }),
+        JSON.stringify({ at: 'later', kind: 'x', text: 'no time' }),
+      ].join('\n') + '\n')
+      const draw = (cols, rows, extra = []) => spawnSync(process.execPath, ['--no-warnings', join(import.meta.dirname, '..', 'ops', 'ops.mjs'), '--frame', ...extra], {
+        encoding: 'utf8', env: { ...process.env, COLS: String(cols), ROWS: String(rows), LIVE_SESSIONS_EVENTS: events },
+      })
+      const cellsOf = text => [...text.replace(/\x1b\[[0-9;]*m/g, '')].reduce((n, ch) => {
+        const cp = ch.codePointAt(0)
+        return n + ((cp >= 0x1100 && cp <= 0x115f) || (cp >= 0x2e80 && cp <= 0xa4cf) || (cp >= 0xac00 && cp <= 0xd7a3) || (cp >= 0xf900 && cp <= 0xfaff) || (cp >= 0xfe30 && cp <= 0xfe4f) || (cp >= 0xff00 && cp <= 0xff60) || (cp >= 0xffe0 && cp <= 0xffe6) || (cp >= 0x1f300 && cp <= 0x1faff) ? 2 : 1)
+      }, 0)
+      const sizes = [[80, 24], [120, 40], [200, 60], [60, 12]]
+      const exact = sizes.map(([cols, rows]) => {
+        const lines = draw(cols, rows).stdout.replace(/\n$/, '').split('\n')
+        return lines.length === rows && lines.every(l => cellsOf(l) === cols) ? 'ok' : `${cols}x${rows}: ${lines.length} rows, widths ${[...new Set(lines.map(cellsOf))].join(',')}`
+      })
+      check('ops: every frame is the window\'s size exactly, wide characters and all', exact.every(r => r === 'ok'), exact.filter(r => r !== 'ok').join(' | '))
+      const targets = JSON.parse(draw(120, 40, ['--targets']).stdout)
+      const plain = draw(120, 40, ['--plain']).stdout.split('\n')
+      const relayRow = plain.findIndex(l => l.includes('passed to Codex'))
+      const needsRow = plain.findIndex(l => l.includes('the owner is needed'))
+      // a real click, in a terminal: on Codex's side of a workspace's agent row, Codex's pane gets the keys (a private
+      // tmux server; the workspace never opened from /sessions here, so no window opens, and the screen says so)
+      const socket = `live-sessions-ops-${process.pid}`
+      const t = (...args) => spawnSync('tmux', ['-L', socket, '-f', '/dev/null', ...args], { encoding: 'utf8' })
+      try {
+        t('new-session', '-d', '-s', 'ws-opsx', '-n', 'peers', 'sleep 60')
+        t('split-window', '-h', '-t', '=ws-opsx:peers', 'sleep 60')
+        const [left, right] = t('list-panes', '-t', '=ws-opsx:peers', '-F', '#{pane_id}').stdout.trim().split('\n')
+        t('select-pane', '-t', left)
+        const fixture = join(scratch, 'snapshot.json')
+        writeFileSync(fixture, JSON.stringify({ snapshot: {
+          claude: [], codex: [], places: {}, envs: [''], problems: [], checkedAt: Date.now(),
+          workspaces: [{ id: 'opsx', name: 'Ops X', env: '', dir: scratch, createdAt: 1 }],
+          tmux: { panes: { ttys990: { session: 'ws-opsx', window: 'claude', pane: left }, ttys991: { session: 'ws-opsx', window: 'codex', pane: right } }, clients: {} },
+        } }))
+        const py = spawnSync('python3', ['-c', [
+          'import os, pty, sys, time, select, struct, fcntl, termios',
+          'pid, fd = pty.fork()',
+          'if pid == 0:',
+          '    os.execvpe(sys.argv[1], sys.argv[1:], os.environ)',
+          'fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 120, 0, 0))',
+          'out = b""',
+          'def drain(s):',
+          '    global out',
+          '    end = time.time() + s',
+          '    while time.time() < end:',
+          '        r, _, _ = select.select([fd], [], [], 0.1)',
+          '        if r:',
+          '            try: out += os.read(fd, 65536)',
+          '            except OSError: return',
+          'drain(1.5)',
+          'os.write(fd, b"\x1b[<0;100;5M\x1b[<0;100;5m")',
+          'drain(1.5)',
+          'os.write(fd, b"q")',
+          'drain(0.5)',
+          'sys.stdout.write("SAID:" + ("open Ops X once from /sessions first" in out.decode("utf8", "replace")).__str__())',
+        ].join('\n'), process.execPath, '--no-warnings', join(import.meta.dirname, '..', 'ops', 'ops.mjs')], {
+          encoding: 'utf8', timeout: 20_000,
+          env: { ...process.env, LIVE_SESSIONS_SNAPSHOT: fixture, LIVE_SESSIONS_EVENTS: join(scratch, 'none.jsonl'), LIVE_SESSIONS_TMUX_SOCKET: socket, HOME: scratch },
+        })
+        const active = t('display-message', '-p', '-t', '=ws-opsx:peers', '#{pane_id}').stdout.trim()
+        check('ops: a click on Codex\'s side of an agent row gives Codex\'s pane the keys, and the screen says what it did', active === right && py.stdout.includes('SAID:True'), `${active} vs ${right}; ${py.stdout.slice(-20)} ${py.stderr.slice(-200)}`)
+      } finally {
+        t('kill-server')
+        rmSync(join(process.env.TMUX_TMPDIR ?? '/tmp', `tmux-${process.getuid()}`, socket), { force: true })
+      }
+      // the relay's event log: a line each, made with its folder; past 2000 lines, the last 1000 kept
+      const log = join(scratch, 'log', 'events.jsonl')
+      for (let i = 0; i < 2001; i++) {
+        if (i < 3 || i > 1995) spawnSync('/bin/sh', ['-c', r.EVENT_SCRIPT, 'sh', log, JSON.stringify({ at: i, kind: 'relay', text: `it's "#${i}"` })])
+        else if (i === 3) writeFileSync(log, readFileSync(log, 'utf8') + Array.from({ length: 1993 }, (_, k) => JSON.stringify({ at: k + 3 })).join('\n') + '\n')
+      }
+      const logged = readFileSync(log, 'utf8').trim().split('\n')
+      check('ops: the event log takes each event as one line; past 2000 lines its last 1000 are kept', logged.length === 1000 && JSON.parse(logged.at(-1)).text === 'it\'s "#2000"', `${logged.length} lines`)
+      check('ops: an event opens its workspace at its agent; one naming no workspace this reads opens nothing; bad lines are left out',
+        targets.length === 40 && (ws === 'none' || JSON.stringify(targets[relayRow]) === JSON.stringify({ kind: 'workspace', id: ws, agent: 'codex' })) && needsRow > 0 && targets[needsRow] === null && !plain.some(l => l.includes('no time')),
+        `${relayRow} ${JSON.stringify(targets[relayRow])} ${needsRow}`)
+    } finally {
+      rmSync(scratch, { recursive: true, force: true })
+    }
+  } else {
+    console.log('skip ops screen: no snapshot on this Mac yet')
+  }
+}
+
 process.exitCode = failures > 0 ? 1 : 0
