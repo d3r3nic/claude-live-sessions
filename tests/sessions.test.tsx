@@ -3214,6 +3214,10 @@ describe('a workspace of one agent', () => {
     files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, only: 'codex', threads: { claude: { id: 'session-101', dir: '/Users/u/dev/web-app' } } }] }))
     expect(await open()).toBe('Opened ws-practice-rbac in a new Terminal window.')
     expect(files.get(openScriptPath(HOME, 'practice-rbac'))).not.toContain('session-101')
-    expect(runs.filter(r => r[0] === '/usr/bin/osascript' && r[4] === OPEN_SCRIPT)).toHaveLength(1)
+    // and the other way: a Claude alone, a Codex conversation kept from before running in ttys045
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, id: 'solo-claude', name: 'Solo Claude', only: 'claude', threads: { codex: { id: RESUMED_A, dir: '/Users/u/dev/web-app' } } }] }))
+    expect((await $.command.run({ ...SESSIONS, command: 'workspace', args: 'open solo-claude' })).text).toBe('Opened ws-solo-claude in a new Terminal window.')
+    expect(files.get(openScriptPath(HOME, 'solo-claude'))).not.toContain(RESUMED_A)
+    expect(runs.filter(r => r[0] === '/usr/bin/osascript' && r[4] === OPEN_SCRIPT)).toHaveLength(2)
   })
 })
