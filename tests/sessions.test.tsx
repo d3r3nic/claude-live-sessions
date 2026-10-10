@@ -417,7 +417,9 @@ function engine(
     checkoutTakesMs = 0,
     // the fixtures hold sessions and workspaces of two accounts: shown all at once unless a test asks for its own
     isOwnAccount = false,
-  }: { canWrite?: boolean; selfId?: string; termProgram?: string; configDir?: string; moveTakesMs?: number; checkoutTakesMs?: number; isOwnAccount?: boolean } = {},
+    // a terminal too narrow to seat the pane
+    isNarrow = false,
+  }: { canWrite?: boolean; selfId?: string; termProgram?: string; configDir?: string; moveTakesMs?: number; checkoutTakesMs?: number; isOwnAccount?: boolean; isNarrow?: boolean } = {},
 ) {
   resetWorld()
   on('session.start', async ($, e) => ({ cwd: e.cwd }))
@@ -430,8 +432,8 @@ function engine(
   const focusAsked: string[] = []
   on('ui.open', async ($, e) => {
     if (e.focus === true) focusAsked.push(e.id)
-    panes.set(e.id, { isShown: true, isPlaced: true })
-    return { value: { isPlaced: true as const } }
+    panes.set(e.id, { isShown: true, isPlaced: !isNarrow })
+    return { value: isNarrow ? { isPlaced: false as const, reason: 'the terminal is 80 columns; the pane needs 110' } : { isPlaced: true as const } }
   })
   on('ui.close', async ($, e) => {
     panes.delete(e.id)
@@ -3719,6 +3721,8 @@ describe('one account at a time', () => {
     await ui.press({ key: 'assign claude-101' })
     const choices = (await ui.findAll({ type: 'Button' })).map(b => (b.props as { label?: string }).label).filter(l => l !== undefined)
     expect(choices).toContain('Home')
+    // this account's workspaces only
+    expect(choices).not.toContain('Practice RBAC')
     await ui.press({ key: 'assign-to claude-101 home' })
     expect(JSON.parse(files.get(WORKSPACES)!).workspaces.find((w: Workspace) => w.id === 'home').members).toEqual(['claude:session-101'])
     // this account's workspace: its relay goes round
@@ -3726,5 +3730,11 @@ describe('one account at a time', () => {
     await ui.press({ key: 'relay-bar home' })
     expect(JSON.parse(files.get(WORKSPACES)!).workspaces.find((w: Workspace) => w.id === 'home').relay.mode).toBe('auto')
     await ui.unmount()
+  })
+  test('/sessions in a terminal too narrow for the pane counts the account shown', async ($, on) => {
+    const { files } = engine(on, machine, { termProgram: 'Apple_Terminal', isOwnAccount: true, isNarrow: true })
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [] }))
+    await $.session.start(START)
+    expect((await $.command.run(SESSIONS)).text).toMatch(/^Claude 2 \(1 working\) · Codex 6 \(1 working\) · \/sessions \(/)
   })
 })
