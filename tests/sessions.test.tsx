@@ -82,6 +82,10 @@ import {
   joinPrompt,
   soloPrompt,
   agentsOf,
+  branchFrom,
+  BRANCH_SCRIPT,
+  parseWorktrees,
+  WORKTREES_SCRIPT,
   envsFrom,
   findWorkspace,
   openCommand,
@@ -136,6 +140,8 @@ const local = (line: string) =>
 
 /** What a test changes about the machine; engine() resets it. */
 const world = {
+  /** The branch checked out in each folder, as BRANCH_SCRIPT prints it; none: a detached HEAD. */
+  branches: {} as Record<string, string>,
   /** The slash commands the plugin registered, with their hints. */
   commands: [] as { name: string; argumentHint?: string }[],
   /** A process's `ps` state or command, changed from the fixture. */
@@ -201,6 +207,7 @@ const world = {
   codexTaskAnswer: undefined as (() => string) | undefined,
 }
 const resetWorld = () => {
+  world.branches = { '/Users/u/dev/web-app': 'main', '/Users/u/dev/build': 'fix/build' }
   world.commands = []
   world.stat.clear()
   world.args.clear()
@@ -291,6 +298,15 @@ function machine(argv: readonly string[], env: unknown): Run {
       if (argv[2] === ROLLOUT_SCRIPT) return ok(args[0] === '/Users/u/.codex' && (args[1] === RESUMED_A || args[1] === HELD) ? `/rollouts/${args[1]}.jsonl\n` : '')
       if (argv[2] === CODEX_TASK_SCRIPT) return ok(world.codexTaskAnswer?.() ?? world.codexTask)
       if (argv[2] === CODEX_MODE_SCRIPT) return ok(world.codexMode)
+      if (argv[2] === WORKTREES_SCRIPT) {
+        // web-app's main checkout, its worktree for fix/build, and one with no branch checked out
+        return ['/Users/u/dev/web-app', '/Users/u/dev/build'].some(d => args[0] === d || args[0]?.startsWith(`${d}/`))
+          ? ok('worktree /Users/u/dev/web-app\nHEAD 1111\nbranch refs/heads/main\n\nworktree /Users/u/dev/build\nHEAD 2222\nbranch refs/heads/fix/build\n\nworktree /Users/u/dev/web-app-worktrees/probe\nHEAD 3333\ndetached\n\n')
+          : { exitCode: 128, stdout: '', stderr: 'fatal: not a git repository\n' }
+      }
+      if (argv[2] === BRANCH_SCRIPT) return world.branches[args[0] ?? ''] === undefined ? { exitCode: 1, stdout: '', stderr: '' } : ok(`${world.branches[args[0]!]}\n`)
+      // build is a worktree of web-app's
+      if (argv[2] === CHECKOUT_SCRIPT && args[0] === '/Users/u/dev/build') return ok('ok /Users/u/dev/web-app\n')
       if (argv[2] === CHECKOUT_SCRIPT) {
         // web-app and api are repositories; anything else is not
         const main = ['/Users/u/dev/web-app', '/Users/u/dev/api'].find(m => args[0] === m || args[0]?.startsWith(`${m}/`))
@@ -1668,7 +1684,7 @@ describe('workspaces, from the pane', () => {
     expect(rankProjects(paths, activity, 'WEB', HOME)).toEqual([{ path: '/Users/u/dev/web-app', label: '~/dev/web-app' }])
     expect(rankProjects(paths, [], '~/dev/', HOME, 1).map(p => p.label)).toEqual(['~/dev/api'])
     // Claude's first prompt: the purpose, the rules, a branch named for the purpose (never the workspace's name)
-    const prompt = setupPrompt({ name: 'Practice RBAC', purpose: 'roles and permissions for admins', checkout: '/Users/u/dev/web-app' })
+    const prompt = setupPrompt({ name: 'Practice RBAC', purpose: 'roles and permissions for admins', checkout: '/Users/u/dev/web-app', dir: '/Users/u/dev/web-app' })
     expect(prompt).toContain('What it is for: roles and permissions for admins')
     expect(prompt).toContain('peer-coding skill')
     expect(prompt).toContain('never from the workspace\'s name')
@@ -3081,8 +3097,8 @@ describe('a workspace of one agent', () => {
     const { files } = engine(on, machine, { termProgram: 'Apple_Terminal' })
     await $.session.start(START)
     // the command's hint and its usage say how
-    expect(world.commands.find(c => c.name === 'workspace')?.argumentHint).toBe('new <folder> <env> <name> [--only claude|codex] [--for <purpose>] | open <name> | rm <name>')
-    expect((await $.command.run({ ...SESSIONS, command: 'workspace', args: 'new' })).text).toContain('<name> [--only claude | codex] [--for')
+    expect(world.commands.find(c => c.name === 'workspace')?.argumentHint).toBe('new <folder> <env> <name> [--only claude|codex] [--go-on] [--for <purpose>] | open <name> | rm <name>')
+    expect((await $.command.run({ ...SESSIONS, command: 'workspace', args: 'new' })).text).toContain('<name> [--only claude | codex] [--go-on: with the branch checked out in <folder>] [--for')
     const text = (await $.command.run({ ...SESSIONS, command: 'workspace', args: 'new ~/dev/web-app work Solo --only codex --for roles and permissions' })).text
     expect(text).toContain('Codex starts alone in tmux session ws-solo; it gets ready for the purpose, says where things stand and waits for you.')
     const [saved] = JSON.parse(files.get(WORKSPACES)!).workspaces
@@ -3219,5 +3235,116 @@ describe('a workspace of one agent', () => {
     expect((await $.command.run({ ...SESSIONS, command: 'workspace', args: 'open solo-claude' })).text).toBe('Opened ws-solo-claude in a new Terminal window.')
     expect(files.get(openScriptPath(HOME, 'solo-claude'))).not.toContain(RESUMED_A)
     expect(runs.filter(r => r[0] === '/usr/bin/osascript' && r[4] === OPEN_SCRIPT)).toHaveLength(2)
+  })
+})
+
+describe('going on with a branch', () => {
+  test('--go-on; the worktrees offered; branch names read only as git could give them', async () => {
+    expect(parseWorkspaceArgs('new ~/dev/build work Build --go-on --for fix it', ['work'], HOME)).toEqual({ action: 'new', dir: '/Users/u/dev/build', env: 'work', name: 'Build', purpose: 'fix it', goOn: true })
+    expect(parseWorkspaceArgs('new /x work --go-on Name --only codex', ['work'], HOME)).toEqual({ action: 'new', dir: '/x', env: 'work', name: 'Name', purpose: '', only: 'codex', goOn: true })
+    expect(parseWorkspaceArgs('new /x work Name --go-on --go-on', ['work'], HOME)).toEqual({ action: 'help', error: '--go-on is given once' })
+    // after --for it is the purpose's
+    expect(parseWorkspaceArgs('new /x work Name --for use --go-on', ['work'], HOME)).toEqual({ action: 'new', dir: '/x', env: 'work', name: 'Name', purpose: 'use --go-on' })
+    // the linked worktrees with a branch checked out: not the main checkout, a detached one, a bare one or one about to be pruned
+    const listed = [
+      'worktree /r', 'HEAD 1', 'branch refs/heads/main', '',
+      'worktree /r-worktrees/feat-a', 'HEAD 2', 'branch refs/heads/feat/a', '',
+      'worktree /r-worktrees/probe', 'HEAD 3', 'detached', '',
+      'worktree /r-worktrees/gone', 'HEAD 4', 'branch refs/heads/gone', 'prunable gitdir file points to non-existent location', '',
+      'worktree /r-worktrees/locked', 'HEAD 5', 'branch refs/heads/fix/b', 'locked', '',
+      'worktree relative', 'HEAD 6', 'branch refs/heads/c', '',
+    ].join('\n')
+    expect(parseWorktrees(listed)).toEqual([{ path: '/r-worktrees/feat-a', branch: 'feat/a' }, { path: '/r-worktrees/locked', branch: 'fix/b' }])
+    expect(parseWorktrees('')).toEqual([])
+    expect(['feat/a', 'fix/ü-1', 'release-2.0'].map(branchFrom)).toEqual(['feat/a', 'fix/ü-1', 'release-2.0'])
+    for (const bad of ['', 'a b', 'a\tb', 'x\u001b[31m', 'x\u009b', 'x‮y', 'x⁦', '-rf', 'a:b', 'a..b'.replace('..', '~'), 'x'.repeat(201), 7, undefined]) expect(branchFrom(bad)).toBeUndefined()
+    expect(workspacesFrom({ workspaces: [{ ...practice, branch: 'feat/rbac' }, { ...practice, id: 'b', branch: 'a b' }] })).toEqual([{ ...practice, branch: 'feat/rbac' }, { ...practice, id: 'b' }])
+  })
+
+  test('first prompts: go on with the branch chosen, in its worktree, and start no other', async () => {
+    const ws = { ...practice, dir: '/Users/u/dev/build', checkout: '/Users/u/dev/web-app', purpose: 'fix the build', branch: 'fix/build' }
+    const goOn = 'Go on with the branch the owner chose, fix/build, in its worktree /Users/u/dev/build: the work there is under way. Start no other branch.'
+    const setup = setupPrompt(ws)
+    expect(setup).toContain(`\n2. ${goOn}\n3. Make your alignment move for that branch`)
+    expect(setup).not.toContain('Start a branch for this purpose')
+    const join = joinPrompt({ ...ws, threads: { claude: { id: 'session-101', dir: '/Users/u/dev/build' } } }, 'claude')
+    expect(join).toContain(`\n2. ${goOn} Work of yours not committed yet stays where it is: ask the owner with NEEDS USER before moving any of it.\n`)
+    expect(join).not.toContain('If the work above already has a peer-coding branch')
+    expect(soloPrompt(ws, 'codex')).toContain(`\n1. ${goOn}\n2. Say in a few lines`)
+    expect(soloPrompt({ ...ws, threads: { codex: { id: 'x', dir: '/Users/u/dev/build' } } }, 'codex')).toContain(`\n1. ${goOn} Work of yours not committed yet stays where it is: ask the owner before moving any of it.\n`)
+    // Codex, waiting for Claude's hand-off, is told nothing more
+    const { branch: _, ...noBranch } = ws
+    expect(peerPrompt(ws)).toBe(peerPrompt(noBranch))
+  })
+
+  test('/workspace new --go-on: the branch read from git where the folder is, said in the prompts; nothing made without one', async ($, on) => {
+    const { files, runs } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    await $.session.start(START)
+    const text = (await $.command.run({ ...SESSIONS, command: 'workspace', args: 'new ~/dev/build work Build --go-on --for fix the build' })).text
+    expect(text).toContain('Claude gets peer coding ready for it, going on with fix/build, and the relay passes')
+    expect(runs.filter(r => r[2] === BRANCH_SCRIPT).map(r => r[4])).toEqual(['/Users/u/dev/build'])
+    const [saved] = JSON.parse(files.get(WORKSPACES)!).workspaces
+    expect([saved.dir, saved.checkout, saved.branch]).toEqual(['/Users/u/dev/build', '/Users/u/dev/web-app', 'fix/build'])
+    expect(files.get(promptPath(HOME, 'build', 'claude'))).toBe(setupPrompt(saved))
+    expect(files.get(promptPath(HOME, 'build', 'claude'))).toContain('Go on with the branch the owner chose, fix/build')
+    // a detached HEAD, or a name git would not give: said, nothing made, nothing opened
+    const opened = () => runs.filter(r => r[4] === OPEN_SCRIPT).length
+    for (const head of [undefined, '-x']) {
+      if (head === undefined) delete world.branches['/Users/u/dev/build']
+      else world.branches['/Users/u/dev/build'] = head
+      expect((await $.command.run({ ...SESSIONS, command: 'workspace', args: 'new ~/dev/build work Again --go-on --for more' })).text).toBe('Not done: /Users/u/dev/build has no branch checked out to go on with.')
+    }
+    expect(JSON.parse(files.get(WORKSPACES)!).workspaces).toHaveLength(1)
+    expect(opened()).toBe(1)
+    // without --go-on no branch is read, and the agents start one
+    await $.command.run({ ...SESSIONS, command: 'workspace', args: 'new ~/dev/web-app work Fresh --for something new' })
+    expect(runs.filter(r => r[2] === BRANCH_SCRIPT)).toHaveLength(3)
+    expect(JSON.parse(files.get(WORKSPACES)!).workspaces[1].branch).toBeUndefined()
+  })
+
+  test('the form: once the project is picked, its worktrees to go on with; the one chosen is the folder; its row says the branch', async ($, on) => {
+    const { files, runs } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    await ui.press({ key: 'workspace:new' })
+    // no project yet: no branch to choose
+    expect(await ui.find({ key: 'form:branch' })).toBeUndefined()
+    await ui.select({ key: 'form:pick', value: '/Users/u/dev/web-app' })
+    expect(runs.filter(r => r[2] === WORKTREES_SCRIPT).map(r => r[4])).toEqual(['/Users/u/dev/web-app'])
+    const branch = await ui.find({ key: 'form:branch' })
+    expect([branch?.props.value, (branch?.props.options as { label: string }[]).map(o => o.label)]).toEqual(['new', ['start a new one for the purpose', 'go on with fix/build · ~/dev/build']])
+    // typing another project's folder lets the choice go: web-app's worktrees are not api's, and api is what is made
+    await ui.select({ key: 'form:branch', value: '/Users/u/dev/build' })
+    await ui.input({ key: 'form:project', text: '~/dev/api', kind: 'change' })
+    expect(await ui.find({ key: 'form:branch' })).toBeUndefined()
+    await ui.input({ key: 'form:name', text: 'Api', kind: 'change' })
+    await ui.press({ key: 'form:create' })
+    const [api] = JSON.parse(files.get(WORKSPACES)!).workspaces
+    expect([api.dir, api.branch]).toEqual(['/Users/u/dev/api', undefined])
+    await ui.press({ key: 'workspace:new' })
+    await ui.select({ key: 'form:pick', value: '/Users/u/dev/web-app' })
+    expect((await ui.find({ key: 'form:branch' }))?.props.value).toBe('new')
+    await ui.select({ key: 'form:branch', value: '/Users/u/dev/build' })
+    await ui.input({ key: 'form:name', text: 'Build', kind: 'change' })
+    await ui.input({ key: 'form:purpose', text: 'fix the build', kind: 'change' })
+    await ui.press({ key: 'form:create' })
+    const [, saved] = JSON.parse(files.get(WORKSPACES)!).workspaces
+    expect([saved.dir, saved.checkout, saved.branch]).toEqual(['/Users/u/dev/build', '/Users/u/dev/web-app', 'fix/build'])
+    expect(files.get(promptPath(HOME, 'build', 'claude'))).toBe(setupPrompt(saved))
+    expect((await ui.findAll({ type: 'Text' })).map(t => t.text)).toContain('on fix/build · ~/dev/build')
+    await ui.unmount()
+  })
+
+  test('New workspace here on a branch row offers that repository\'s worktrees at once', async ($, on) => {
+    const { runs } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    await reveal(ui, 'tree:/Users/u/dev/build')
+    await ui.press({ key: 'new-from:/Users/u/dev/build' })
+    expect(runs.filter(r => r[2] === WORKTREES_SCRIPT).map(r => r[4])).toEqual(['/Users/u/dev/build'])
+    expect(((await ui.find({ key: 'form:branch' }))?.props.options as { label: string }[]).map(o => o.label)).toEqual(['start a new one for the purpose', 'go on with fix/build · ~/dev/build'])
+    await ui.unmount()
   })
 })

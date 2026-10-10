@@ -81,6 +81,8 @@ export type Workspace = {
   purpose?: string
   /** The one agent it runs, when the owner chose one; unset: Claude and Codex side by side. */
   only?: 'claude' | 'codex'
+  /** The branch the owner chose to go on with, checked out in its folder; unset: the agents start one for the purpose. */
+  branch?: string
   /** The repository's main checkout; the agents may also work in `<checkout>-worktrees/`. */
   checkout?: string
   /** Passing each agent's cue to the other: on (`auto`), only telling the owner (`notify`), or `off`. */
@@ -154,7 +156,9 @@ declare module 'claude-code' {
       /** A move to the background pressed once: the row's key and when; a second press confirms it. */
       pendingMove: { key: string; at: number }
       /** The new-workspace form, while open. */
-      draft: { isOpen: boolean; name: string; query: string; dir: string; env: string; purpose: string; error: string; bring: string[]; only: '' | 'claude' | 'codex' }
+      draft: { isOpen: boolean; name: string; query: string; dir: string; env: string; purpose: string; error: string; bring: string[]; only: '' | 'claude' | 'codex'; goOn: string }
+      /** The worktrees of the form's project the agents can go on with, as found for its folder. */
+      worktrees: { dir: string; list: { path: string; branch: string }[] }
       /** The row whose actions are shown under it: `item:<key>`, `tree:<key>`, `repo:<key>` or `ws:<id>`; '' for none. */
       selected: string
       /** The git repositories found on this Mac (main checkouts), for the form to offer; [] until looked for. */

@@ -920,6 +920,8 @@ export type WorkspaceView = {
   dir: string
   /** The one agent it runs, when the owner chose one; unset: Claude and Codex. */
   only?: 'claude' | 'codex'
+  /** The branch the owner chose for its agents to go on with. */
+  branch?: string
   /** Its tmux session is running; a terminal is attached to it. */
   isRunning: boolean
   isAttached: boolean
@@ -1060,6 +1062,7 @@ export function viewOf(
     env: ws.env,
     dir: tilde(ws.dir, o.home),
     ...(ws.only === undefined ? {} : { only: ws.only }),
+    ...(ws.branch === undefined ? {} : { branch: ws.branch }),
     isRunning: sessionsRunning.has(tmuxName(ws)),
     isAttached: (snap.tmux.clients[tmuxName(ws)]?.length ?? 0) > 0,
     items: arrange(inWorkspaces.get(tmuxName(ws)) ?? [], i => i.key, order[itemsScope(`ws:${ws.id}`)], byActivity),

@@ -35,6 +35,10 @@ import {
   setupPrompt,
   joinPrompt,
   soloPrompt,
+  branchFrom,
+  BRANCH_SCRIPT,
+  parseWorktrees,
+  WORKTREES_SCRIPT,
   defaultPlacement,
   isOnScreen,
   hideBinding,
@@ -156,7 +160,7 @@ const activeWindow = atom({ plugin: 'live-sessions', key: 'window' } as const, 0
 const pendingMove = atom({ plugin: 'live-sessions', key: 'pendingMove' } as const, { key: '', at: 0 })
 const CONFIRM_MS = 6_000
 
-const NO_DRAFT = { isOpen: false, name: '', query: '', dir: '', env: '', purpose: '', error: '', bring: [] as string[], only: '' as '' | 'claude' | 'codex' }
+const NO_DRAFT = { isOpen: false, name: '', query: '', dir: '', env: '', purpose: '', error: '', bring: [] as string[], only: '' as '' | 'claude' | 'codex', goOn: '' }
 /** The new-workspace form. */
 const draft = atom({ plugin: 'live-sessions', key: 'draft' } as const, NO_DRAFT)
 /** The session whose workspace is being chosen. */
@@ -167,6 +171,8 @@ const creating = atom({ plugin: 'live-sessions', key: 'creating' } as const, fal
 const selected = atom({ plugin: 'live-sessions', key: 'selected' } as const, '')
 /** The git repositories on this Mac, for the form; looked for when it opens. */
 const projects = atom({ plugin: 'live-sessions', key: 'projects' } as const, [] as string[])
+/** The worktrees of the form's project its agents can go on with, as found for its folder. */
+const worktrees = atom({ plugin: 'live-sessions', key: 'worktrees' } as const, { dir: '', list: [] as { path: string; branch: string }[] })
 /** Where the relay keeps each step it took, so no step is taken twice. */
 const ledgerPath = (home: string) => `${home}/Library/Application Support/live-sessions/relayed`
 
@@ -829,7 +835,7 @@ async function moveChecked($: EngineInterface, move: NonNullable<Item['move']>) 
  */
 async function createWorkspace(
   $: EngineInterface,
-  w: { dir: string; env: string; name: string; purpose: string; bring?: readonly string[]; only?: 'claude' | 'codex' },
+  w: { dir: string; env: string; name: string; purpose: string; bring?: readonly string[]; only?: 'claude' | 'codex'; goOn?: boolean },
 ): Promise<{ isCreated: boolean; text: string }> {
   // one at a time: a second press of create, or Enter then create, never makes a second workspace
   let isMine = false
@@ -847,7 +853,7 @@ async function createWorkspace(
 
 async function makeWorkspace(
   $: EngineInterface,
-  w: { dir: string; env: string; name: string; purpose: string; bring?: readonly string[]; only?: 'claude' | 'codex' },
+  w: { dir: string; env: string; name: string; purpose: string; bring?: readonly string[]; only?: 'claude' | 'codex'; goOn?: boolean },
 ): Promise<{ isCreated: boolean; text: string }> {
   const home = (await $.env.get('HOME')) ?? ''
   const fail = (why: string) => ({ isCreated: false, text: `Not done: ${why}.` })
@@ -867,6 +873,14 @@ async function makeWorkspace(
   const purpose = w.purpose.trim()
   if (purpose !== '' && 'error' in place) return fail(place.error)
   const checkout = 'checkout' in place ? place.checkout : undefined
+  // going on with the branch checked out in the folder: read from git, never typed
+  let branch: string | undefined
+  if (w.goOn === true) {
+    if (checkout === undefined) return fail('that folder is not in a git checkout, so it has no branch to go on with')
+    const head = await $.process.run(['/bin/sh', '-c', BRANCH_SCRIPT, 'sh', typed], { timeoutMs: 10_000 }).catch(() => ({ exitCode: -1, stdout: '', stderr: '' }))
+    branch = branchFrom(head.stdout.trim())
+    if (branch === undefined) return fail(`${typed} has no branch checked out to go on with`)
+  }
   await refresh($, VISIBLE_MAX_AGE_MS)
   const snap = await read($, snapshot)
   // the sessions brought in, each checked as it runs now; then closed where they run, so each conversation
@@ -903,6 +917,7 @@ async function makeWorkspace(
       ...(checkout === undefined ? {} : { checkout }),
       ...(threads.claude === undefined && threads.codex === undefined ? {} : { threads }),
       ...(w.only === undefined ? {} : { only: w.only }),
+      ...(branch === undefined ? {} : { branch }),
       // made for a purpose: Claude gets it ready, and the relay passes the cues from the start (one agent has no one to pass to)
       ...(purpose === '' ? {} : { purpose, ...(w.only === undefined ? { relay: { mode: 'auto' as const, since: createdAt, streak: 0 } } : {}) }),
     }
@@ -927,11 +942,12 @@ async function makeWorkspace(
   const opened = await openWorkspace($, made)
   const goOn = checked.bring.filter(b => made.threads?.[b.tool] !== undefined).map(b => b.label)
   const alone = made.only === undefined ? undefined : made.only === 'claude' ? 'Claude' : 'Codex'
+  const onBranch = made.branch === undefined ? '' : `, going on with ${made.branch}`
   const start = (alone !== undefined
-    ? `${alone} starts alone in tmux session ${tmuxName(made)}${purpose === '' ? '.' : '; it gets ready for the purpose, says where things stand and waits for you.'}`
+    ? `${alone} starts alone in tmux session ${tmuxName(made)}${purpose === '' ? '.' : `; it gets ready for the purpose${onBranch}, says where things stand and waits for you.`}`
     : purpose === ''
     ? `Claude and Codex start side by side in tmux session ${tmuxName(made)}.`
-    : `Claude and Codex start side by side in tmux session ${tmuxName(made)}; Claude gets peer coding ready for it, and the relay passes each hand-over to the other.`) +
+    : `Claude and Codex start side by side in tmux session ${tmuxName(made)}; Claude gets peer coding ready for it${onBranch}, and the relay passes each hand-over to the other.`) +
     (goOn.length > 0 ? ` ${goOn.join(' and ')} went on there, each in its own conversation${made.threads?.claude === undefined ? '' : ' (if Claude asks how to resume a large conversation, from a summary or in full, answer it in its pane)'}.` : '') +
     (notBrought.length > 0 ? ` Not brought in: ${notBrought.join('; ')}.` : '')
   return {
@@ -1033,13 +1049,21 @@ async function submitDraft($: EngineInterface) {
   const d = await read($, draft)
   // (a form open since before the choice was offered has none: both)
   const only = d.only === 'claude' || d.only === 'codex' ? d.only : undefined
-  const made = await createWorkspace($, { name: d.name, dir: d.dir || d.query, env: d.env, purpose: d.purpose, bring: d.bring, ...(only === undefined ? {} : { only }) })
+  // a worktree chosen to go on with is the workspace's folder (likewise none in a form from before the choice)
+  const goOn = typeof d.goOn === 'string' && d.goOn.startsWith('/') ? d.goOn : undefined
+  const made = await createWorkspace($, { name: d.name, dir: goOn ?? (d.dir || d.query), env: d.env, purpose: d.purpose, bring: d.bring, ...(only === undefined ? {} : { only }), ...(goOn === undefined ? {} : { goOn: true }) })
   if (made.isCreated) {
     await update($, draft, () => NO_DRAFT)
     $.ui.toast(made.text, { timeoutMs: 15_000 })
   } else {
     await update($, draft, now => ({ ...now, error: made.text }))
   }
+}
+
+/** The worktrees of the repository holding `dir` that the form can offer to go on with; none for a folder in no repository. */
+async function lookWorktrees($: EngineInterface, dir: string) {
+  const found = await $.process.run(['/bin/sh', '-c', WORKTREES_SCRIPT, 'sh', dir], { timeoutMs: 15_000 }).catch(() => ({ exitCode: -1, stdout: '', stderr: '' }))
+  await update($, worktrees, () => ({ dir, list: found.exitCode === 0 ? parseWorktrees(found.stdout) : [] }))
 }
 
 /** A workspace's first-prompt files, gone. */
@@ -1054,6 +1078,7 @@ async function openDraft($: EngineInterface, dir: string, with_?: { member: stri
   await update($, draft, () => ({ ...NO_DRAFT, isOpen: true, dir, query: shown, ...(with_ === undefined ? {} : { bring: [with_.member], env: with_.env }) }))
   // while this pane has the keys (the form opened by its key), what is typed next goes into the name, not to the pane's keys
   await $.ui.focus({ requestId: PANE, key: 'form:name' }).catch(() => undefined)
+  if (dir.startsWith('/')) await lookWorktrees($, dir)
   if ((await read($, projects)).length > 0) return
   const found = await $.process
     .run(['/bin/sh', '-c', PROJECTS_SCRIPT, 'sh', home], { timeoutMs: 30_000 })
@@ -1439,7 +1464,7 @@ export const register: Register = on => {
     await $.command.register({
       name: 'workspace',
       description: 'Named workspaces: a folder, an environment, Claude and Codex (or one of them) in one tmux session',
-      argumentHint: 'new <folder> <env> <name> [--only claude|codex] [--for <purpose>] | open <name> | rm <name>',
+      argumentHint: 'new <folder> <env> <name> [--only claude|codex] [--go-on] [--for <purpose>] | open <name> | rm <name>',
     })
     const kept = await $.store.get('windowMs')
     if (typeof kept === 'number' && kept >= 0) await update($, activeWindow, () => kept)
@@ -1464,7 +1489,7 @@ export const register: Register = on => {
     await refresh($, VISIBLE_MAX_AGE_MS)
     const snap = await read($, snapshot)
     const named = snap.envs.filter(env => env !== '')
-    const usage = `Usage: /workspace new <folder> <${['default', ...named].join(' | ')}> <name> [--only claude | codex] [--for <what it is for: Claude gets peer coding ready for it>]; /workspace open <name>; /workspace rm <name>`
+    const usage = `Usage: /workspace new <folder> <${['default', ...named].join(' | ')}> <name> [--only claude | codex] [--go-on: with the branch checked out in <folder>] [--for <what it is for: Claude gets peer coding ready for it>]; /workspace open <name>; /workspace rm <name>`
     const command = parseWorkspaceArgs(e.args, named, home)
     const { list, isReadable } = await readWorkspaces($, home)
     const label = (ws: Workspace) => `${ws.name} (${ws.env || 'default'}, ${ws.dir})`
@@ -1538,6 +1563,8 @@ export const register: Register = on => {
     const Input = 'Input' in elements ? elements.Input : undefined
     const Select = 'Select' in elements ? elements.Select : undefined
     const form = await read($, draft)
+    // the project's worktrees to go on with, once found for the folder the form names
+    const found = await read($, worktrees)
     // the agents chosen in the form ('' both; a form open since before the choice was offered has none)
     const formOnly = form.only === 'claude' || form.only === 'codex' ? form.only : ''
     const choosing = await read($, assigning)
@@ -1550,6 +1577,7 @@ export const register: Register = on => {
     const formDir = absoluteDir(form.dir || form.query, home)
     // of the agents chosen: a workspace of one agent takes in a session of that agent only
     const offered = form.isOpen && formDir !== undefined ? bringable(snap, { now, selfId }, formDir).filter(b => formOnly === '' || b.tool === formOnly) : []
+    const branches = form.isOpen && formDir !== undefined && found.dir === formDir ? found.list : []
     const matches = form.isOpen ? rankProjects(await read($, projects), [...snap.claude, ...snap.codex].map(s => ({ cwd: s.cwd, at: 'lastActive' in s ? s.lastActive : s.since })), form.dir === '' ? form.query : '', home) : []
     const pending = await read($, pendingMove)
     const isPending = (key: string) => pending.key === key && now - pending.at < CONFIRM_MS
@@ -1741,7 +1769,7 @@ export const register: Register = on => {
                 label="project"
                 value={form.query}
                 placeholder="type to search your repositories, or a folder"
-                onInput={value => void update($, draft, d => ({ ...d, query: value, dir: '', bring: [], error: '' }))}
+                onInput={value => void update($, draft, d => ({ ...d, query: value, dir: '', bring: [], goOn: '', error: '' }))}
                 onSubmit={() => void submitDraft($)}
               />
               {form.dir === '' && matches.length > 0 && (
@@ -1749,7 +1777,10 @@ export const register: Register = on => {
                   key="form:pick"
                   label="pick"
                   options={matches.map(m => ({ value: m.path, label: m.label }))}
-                  onSelect={value => void update($, draft, d => ({ ...d, dir: value, query: rankProjects([value], [], '', home)[0]?.label ?? value, bring: [], error: '' }))}
+                  onSelect={value => {
+                    void update($, draft, d => ({ ...d, dir: value, query: rankProjects([value], [], '', home)[0]?.label ?? value, bring: [], goOn: '', error: '' }))
+                    void lookWorktrees($, value)
+                  }}
                 />
               )}
               {offered.length > 0 && <Text dimColor wrap="truncate-end">{'bring in (each closes where it runs and goes on here, in its own conversation):'}</Text>}
@@ -1773,6 +1804,18 @@ export const register: Register = on => {
                   </Box>
                 )
               })}
+              {branches.length > 0 && (
+                <Select
+                  key="form:branch"
+                  label="branch"
+                  options={[
+                    { value: 'new', label: 'start a new one for the purpose' },
+                    ...branches.map(b => ({ value: b.path, label: `go on with ${b.branch} · ${b.path.startsWith(`${home}/`) ? `~${b.path.slice(home.length)}` : b.path}` })),
+                  ]}
+                  value={branches.some(b => b.path === form.goOn) ? form.goOn : 'new'}
+                  onSelect={value => void update($, draft, d => ({ ...d, goOn: value === 'new' ? '' : value, error: '' }))}
+                />
+              )}
               <Select
                 key="form:agents"
                 label="agents"
@@ -1834,7 +1877,7 @@ export const register: Register = on => {
                 {more(`ws:${ws.key}`)}
               </Box>
               <Box width={width - 4} marginLeft={4}>
-                <Text dimColor wrap="truncate-end">{`${ws.only === undefined ? '' : `${ws.only === 'claude' ? 'Claude' : 'Codex'} only · `}${ws.dir}`}</Text>
+                <Text dimColor wrap="truncate-end">{`${ws.only === undefined ? '' : `${ws.only === 'claude' ? 'Claude' : 'Codex'} only · `}${ws.branch === undefined ? '' : `on ${ws.branch} · `}${ws.dir}`}</Text>
               </Box>
               {open === `ws:${ws.key}` &&
                 bar(`ws:${ws.key}`, 4, [

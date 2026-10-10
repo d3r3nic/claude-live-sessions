@@ -556,6 +556,17 @@ except ChildProcessError: pass
   check('checkout: with a separate git dir, the checkout, not the store', find(apart).checkout === apart)
   git('-C', apart, 'worktree', 'add', '-q', '-b', 'feat/s', join(scratch, 'apart-wt'))
   check('checkout: from a separate git dir\'s worktree, refused rather than guessed', find(join(scratch, 'apart-wt')).error?.includes('main checkout') === true)
+  // the branches a workspace can go on with: the linked worktrees with a branch, read by real git; the branch where a
+  // folder is
+  git('-C', repo, 'worktree', 'add', '-q', '--detach', `${repo}-worktrees/probe`)
+  const listed = w.parseWorktrees(spawnSync('/bin/sh', ['-c', w.WORKTREES_SCRIPT, 'sh', join(repo, 'sub')], { encoding: 'utf8', env }).stdout)
+  check('go on: the worktrees offered are the linked ones with a branch, not the main checkout or a detached one',
+    JSON.stringify(listed) === JSON.stringify([{ path: `${repo}-worktrees/feat-a`, branch: 'feat/a' }]), JSON.stringify(listed))
+  const head = dir => spawnSync('/bin/sh', ['-c', w.BRANCH_SCRIPT, 'sh', dir], { encoding: 'utf8', env })
+  const onFeat = head(`${repo}-worktrees/feat-a`)
+  const onProbe = head(`${repo}-worktrees/probe`)
+  check('go on: the branch checked out where the folder is; none for a detached HEAD',
+    onFeat.stdout === 'feat/a\n' && onProbe.stdout === '' && onProbe.status !== 0, `${JSON.stringify(onFeat.stdout)} ${JSON.stringify(onProbe.stdout)} ${onProbe.status}`)
   // the projects the form offers: main checkouts only; never what is inside a .git, a hidden folder or a worktrees folder
   const fakeHome = join(scratch, 'projects-home')
   for (const d of ['dev/a/.git/inner/.git', 'dev/b/.git', 'dev/b-worktrees/feat/.git', '.hidden/c/.git', 'Library/d/.git']) mkdirSync(join(fakeHome, d), { recursive: true })

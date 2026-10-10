@@ -25,17 +25,18 @@ export function words(args: string): string[] {
 
 export type WorkspaceCommand =
   | { action: 'list' }
-  | { action: 'new'; dir: string; env: string; name: string; purpose: string; only?: 'claude' | 'codex' }
+  | { action: 'new'; dir: string; env: string; name: string; purpose: string; only?: 'claude' | 'codex'; goOn?: true }
   | { action: 'open' | 'rm'; ref: string }
   | { action: 'help'; error?: string }
 
 /**
  * `/workspace` arguments: `new <folder> <env> <name> [--only claude|codex]
- * [--for <purpose>]`, `open <name>`, `rm <name>`, or nothing to list. `<env>`
- * is required and must be one of `envs` or `default`: a misspelt one is an
- * error, never another account. `~` in the folder is the home directory.
- * `--only` before `--for` names the one agent it runs. Every word after
- * `--for` is the purpose.
+ * [--go-on] [--for <purpose>]`, `open <name>`, `rm <name>`, or nothing to
+ * list. `<env>` is required and must be one of `envs` or `default`: a
+ * misspelt one is an error, never another account. `~` in the folder is the
+ * home directory. Before `--for`: `--only` names the one agent it runs;
+ * `--go-on` has the agents go on with the branch checked out in the folder.
+ * Every word after `--for` is the purpose.
  */
 export function parseWorkspaceArgs(args: string, envs: readonly string[], home: string): WorkspaceCommand {
   const [verb = '', ...rest] = words(args)
@@ -52,9 +53,11 @@ export function parseWorkspaceArgs(args: string, envs: readonly string[], home: 
   const onlyAt = beforeFor.indexOf('--only')
   const only = onlyAt >= 0 ? beforeFor[onlyAt + 1]?.toLowerCase() : undefined
   if (onlyAt >= 0 && only !== 'claude' && only !== 'codex') return { action: 'help', error: '--only takes claude or codex' }
-  const nameWords = onlyAt >= 0 ? [...beforeFor.slice(0, onlyAt), ...beforeFor.slice(onlyAt + 2)] : beforeFor
+  const withoutOnly = onlyAt >= 0 ? [...beforeFor.slice(0, onlyAt), ...beforeFor.slice(onlyAt + 2)] : beforeFor
+  const goOnAt = withoutOnly.indexOf('--go-on')
+  const nameWords = goOnAt >= 0 ? [...withoutOnly.slice(0, goOnAt), ...withoutOnly.slice(goOnAt + 1)] : withoutOnly
   const option = nameWords.find(word => word.startsWith('--'))
-  if (option === '--only') return { action: 'help', error: '--only is given once' }
+  if (option === '--only' || option === '--go-on') return { action: 'help', error: `${option} is given once` }
   if (option !== undefined) return { action: 'help', error: `"${option}" is not an option /workspace takes` }
   const name = nameWords.join(' ').trim()
   if (folder === '' || envWord === '' || name === '') return { action: 'help', error: 'new needs a folder, an environment and a name' }
@@ -62,7 +65,7 @@ export function parseWorkspaceArgs(args: string, envs: readonly string[], home: 
   const env = envWord === 'default' ? '' : envWord
   const dir = absoluteDir(folder, home)
   if (dir === undefined) return { action: 'help', error: 'the folder must be absolute or start with ~/' }
-  return { action: 'new', dir, env, name, purpose, ...(only === 'claude' || only === 'codex' ? { only } : {}) }
+  return { action: 'new', dir, env, name, purpose, ...(only === 'claude' || only === 'codex' ? { only } : {}), ...(goOnAt >= 0 ? { goOn: true as const } : {}) }
 }
 
 /** A folder as typed, as an absolute path: `~` and `~/...` are the home directory; anything else relative, undefined. */
@@ -456,7 +459,9 @@ export function workspacesFrom(raw: unknown): Workspace[] {
     const check = checkFrom(ws.check)
     // an agent this does not read is dropped: Claude and Codex both start
     const only = ws.only === 'claude' || ws.only === 'codex' ? ws.only : undefined
-    const { members: _, threads: __, compactAt: ___, checkEvery: ____, check: _____, only: ______, ...rest } = ws
+    // a branch only as git names one (it is shown, never run)
+    const branch = branchFrom(ws.branch)
+    const { members: _, threads: __, compactAt: ___, checkEvery: ____, check: _____, only: ______, branch: _______, ...rest } = ws
     return {
       ...rest,
       ...(members !== undefined && members.length > 0 ? { members } : {}),
@@ -465,8 +470,18 @@ export function workspacesFrom(raw: unknown): Workspace[] {
       ...(checkEvery === undefined ? {} : { checkEvery }),
       ...(check === undefined ? {} : { check }),
       ...(only === undefined ? {} : { only }),
+      ...(branch === undefined ? {} : { branch }),
     }
   })
+}
+
+/**
+ * A branch's name, if it is one git could have given and that shows as it
+ * is: no spaces, control or invisible direction characters, at most 200
+ * characters, not starting with a dash.
+ */
+export function branchFrom(raw: unknown): string | undefined {
+  return typeof raw === 'string' && /^[^\s\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff~^:?*[\\]{1,200}$/.test(raw) && !raw.startsWith('-') ? raw : undefined
 }
 
 /** The list with `member` assigned to the workspace `id` only, or to none when `id` is ''. */
@@ -518,12 +533,41 @@ export function checkoutResult(stdout: string): { checkout: string } | { error: 
 }
 
 /**
+ * The worktrees of the repository holding the folder "$1", as `git worktree
+ * list --porcelain` prints them (parseWorktrees reads them); with git's
+ * settings as the other scripts here set them.
+ */
+export const WORKTREES_SCRIPT = 'git -c core.hooksPath=/dev/null -c core.fsmonitor= -C "$1" worktree list --porcelain'
+
+/**
+ * The branches a workspace can go on with: each linked worktree (not the
+ * main checkout, the first listed) with a branch checked out, there and
+ * not about to be pruned.
+ */
+export function parseWorktrees(stdout: string): { path: string; branch: string }[] {
+  const blocks = stdout.split(/\n\s*\n/).map(b => b.split('\n').filter(Boolean)).filter(b => b.length > 0)
+  return blocks.slice(1).flatMap(lines => {
+    const path = lines.find(l => l.startsWith('worktree '))?.slice(9)
+    const branch = branchFrom(lines.find(l => l.startsWith('branch refs/heads/'))?.slice(18))
+    if (path === undefined || !path.startsWith('/') || branch === undefined || lines.some(l => l === 'bare' || l.startsWith('prunable'))) return []
+    return [{ path, branch }]
+  })
+}
+
+/** The branch checked out in the folder "$1", by its short name; nothing for a detached HEAD. */
+export const BRANCH_SCRIPT = 'git -c core.hooksPath=/dev/null -c core.fsmonitor= -C "$1" symbolic-ref --short -q HEAD'
+
+/** Step 2 of a first prompt when the owner chose the branch: go on with it there, and start no other. */
+const goOnStep = (ws: Pick<Workspace, 'branch' | 'dir'>) =>
+  `Go on with the branch the owner chose, ${ws.branch}, in its worktree ${ws.dir}: the work there is under way. Start no other branch.`
+
+/**
  * Claude's first prompt in a workspace made for a purpose: get peer coding
  * ready under the peer-coding rules, on a branch named for the purpose (the
  * workspace's name is the owner's label only), and hand over by its cue,
  * which the workspace's relay passes on.
  */
-export function setupPrompt(ws: Pick<Workspace, 'name' | 'purpose' | 'checkout' | 'threads'>): string {
+export function setupPrompt(ws: Pick<Workspace, 'name' | 'purpose' | 'checkout' | 'threads' | 'branch' | 'dir'>): string {
   const codex = ws.threads?.codex === undefined ? 'Codex runs in the pane beside you' : 'Codex runs in the pane beside you, in its own conversation, which the owner brought in: your alignment brief can ask it where its work stands'
   return [
     `This is the workspace "${ws.name}". What it is for: ${ws.purpose ?? ''}`,
@@ -532,7 +576,9 @@ export function setupPrompt(ws: Pick<Workspace, 'name' | 'purpose' | 'checkout' 
     '',
     'Get the workspace ready for peer coding, using the peer-coding skill and the rules it leads to:',
     '1. If this repository is not set up for peer coding in the current layout, set it up. Record the owner\'s decisions you already know and ask for the rest with NEEDS USER.',
-    `2. Start a branch for this purpose: name it from the purpose by the settings' branch naming, never from the workspace's name, in its own worktree in ${ws.checkout ?? '<checkout>'}-worktrees/.`,
+    ws.branch !== undefined
+      ? `2. ${goOnStep(ws)}`
+      : `2. Start a branch for this purpose: name it from the purpose by the settings' branch naming, never from the workspace's name, in its own worktree in ${ws.checkout ?? '<checkout>'}-worktrees/.`,
     '3. Make your alignment move for that branch and end your turn with the line the rules\' cue prints.',
   ].join('\n')
 }
@@ -564,7 +610,7 @@ const RELAY_FOR_CODEX = 'The owner turned on this workspace\'s relay, which stan
  * with a branch the work already has) and tells Codex where the work stands;
  * Codex waits for that hand-off, then adds what its own work knows.
  */
-export function joinPrompt(ws: Pick<Workspace, 'name' | 'purpose' | 'checkout' | 'threads'>, tool: 'claude' | 'codex'): string {
+export function joinPrompt(ws: Pick<Workspace, 'name' | 'purpose' | 'checkout' | 'threads' | 'branch' | 'dir'>, tool: 'claude' | 'codex'): string {
   const moved = 'The owner moved this conversation into the workspace: everything above stays yours.'
   if (tool === 'codex') {
     const claude = ws.threads?.claude === undefined ? 'Claude runs in the pane beside you' : 'Claude runs in the pane beside you, in its own conversation, brought in too,'
@@ -584,7 +630,9 @@ export function joinPrompt(ws: Pick<Workspace, 'name' | 'purpose' | 'checkout' |
     '',
     'From here, work as a peer under the peer-coding rules, using the peer-coding skill:',
     '1. If this repository is not set up for peer coding in the current layout, set it up. Record the owner\'s decisions you already know and ask for the rest with NEEDS USER.',
-    `2. If the work above already has a peer-coding branch, go on with it. Otherwise start one for this purpose: name it from the purpose by the settings' branch naming, never from the workspace's name, in its own worktree in ${ws.checkout ?? '<checkout>'}-worktrees/. Work of yours not committed yet stays where it is: ask the owner with NEEDS USER before moving any of it.`,
+    ws.branch !== undefined
+      ? `2. ${goOnStep(ws)} Work of yours not committed yet stays where it is: ask the owner with NEEDS USER before moving any of it.`
+      : `2. If the work above already has a peer-coding branch, go on with it. Otherwise start one for this purpose: name it from the purpose by the settings' branch naming, never from the workspace's name, in its own worktree in ${ws.checkout ?? '<checkout>'}-worktrees/. Work of yours not committed yet stays where it is: ask the owner with NEEDS USER before moving any of it.`,
     '3. Make your alignment move for that branch, telling Codex where the work stands, and end your turn with the line the rules\' cue prints.',
   ].join('\n')
 }
@@ -595,7 +643,7 @@ export function joinPrompt(ws: Pick<Workspace, 'name' | 'purpose' | 'checkout' |
  * the purpose (going on with one already under way), says where things stand
  * and waits for the owner. One brought in keeps everything it knows.
  */
-export function soloPrompt(ws: Pick<Workspace, 'name' | 'purpose' | 'checkout' | 'threads'>, tool: 'claude' | 'codex'): string {
+export function soloPrompt(ws: Pick<Workspace, 'name' | 'purpose' | 'checkout' | 'threads' | 'branch' | 'dir'>, tool: 'claude' | 'codex'): string {
   const isBrought = ws.threads?.[tool] !== undefined
   return [
     `This is the workspace "${ws.name}". What it is for: ${ws.purpose ?? ''}`,
@@ -603,7 +651,9 @@ export function soloPrompt(ws: Pick<Workspace, 'name' | 'purpose' | 'checkout' |
     `${isBrought ? 'The owner moved this conversation into the workspace: everything above stays yours. ' : ''}You are ${tool === 'claude' ? 'Claude' : 'Codex'}, the only agent here: the owner chose to work with you alone, so there is no peer and no relay, and the owner gives you each next step.`,
     '',
     'Get ready for this purpose:',
-    isBrought
+    ws.branch !== undefined
+      ? `1. ${goOnStep(ws)}${isBrought ? ' Work of yours not committed yet stays where it is: ask the owner before moving any of it.' : ''}`
+      : isBrought
       ? `1. If the work above already has a branch, go on with it. Otherwise start one for this purpose: name it from the purpose, never from the workspace's name, in its own worktree in ${ws.checkout ?? '<checkout>'}-worktrees/. Work of yours not committed yet stays where it is: ask the owner before moving any of it.`
       : `1. If the purpose names a branch or worktree already under way, go on there. Otherwise start a branch for this purpose: name it from the purpose, never from the workspace's name, in its own worktree in ${ws.checkout ?? '<checkout>'}-worktrees/.`,
     '2. Say in a few lines where things stand and what you would do first, then wait for the owner.',
