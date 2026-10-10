@@ -919,7 +919,7 @@ except ChildProcessError: pass
   const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'live-sessions-cache-')))
   try {
     const t = s => `2026-10-10T20:${s}.000Z`
-    const reply = (id, at, creation, extra = {}) => JSON.stringify({ type: 'assistant', timestamp: t(at), ...extra, message: { id, usage: { input_tokens: 2, cache_read_input_tokens: 9000, ...(creation === undefined ? {} : { cache_creation: creation }) } } })
+    const reply = (id, at, creation, extra = {}) => JSON.stringify({ type: 'assistant', uuid: `u-${id}-${at}`, timestamp: t(at), ...extra, message: { id, usage: { input_tokens: 2, cache_read_input_tokens: 9000, ...(creation === undefined ? {} : { cache_creation: creation }) } } })
     const said = (at, extra = {}) => JSON.stringify({ type: 'user', timestamp: t(at), ...extra, message: { content: 'x' } })
     const read = (name, lines) => {
       const file = join(scratch, name)
@@ -944,7 +944,7 @@ except ChildProcessError: pass
     const missing = r.cacheOf(spawnSync('/bin/sh', ['-c', r.CACHE_SCRIPT, 'sh', join(scratch, 'gone.jsonl')], { encoding: 'utf8' }).stdout)
     // the final reply m3 began after the last record before it: m2 (01:40), the sidechain's skipped
     check('compaction: a prompt cache\'s life from the last reply that wrote to it, timed from the request of the last reply; nothing when none says or there is no transcript',
-      JSON.stringify([hour, five, none, missing]) === JSON.stringify([{ lifeMs: 3_600_000, sentAt: Date.parse(t('01:40')) }, { lifeMs: 300_000, sentAt: Date.parse(t('05:00')) }, {}, {}]),
+      JSON.stringify([hour, five, none, missing]) === JSON.stringify([{ lifeMs: 3_600_000, sentAt: Date.parse(t('01:40')), replyId: 'u-m3-03:30' }, { lifeMs: 300_000, sentAt: Date.parse(t('05:00')), replyId: 'u-b-05:20' }, { replyId: 'u-a-00:10' }, {}]),
       JSON.stringify([hour, five, none, missing]))
   } finally {
     rmSync(scratch, { recursive: true, force: true })

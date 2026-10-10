@@ -200,30 +200,32 @@ export const COMPACT_NOW_AT = 80
 /**
  * Claude's prompt cache, from its transcript "$1", two lines: how long it
  * lives, the lifetime of the last cache write its replies record (`1h` or
- * `5m`; empty if none says); and when its last reply's request was sent,
- * the time of the record just before that reply began (a prompt, a tool's
- * result, a reply before it), from which the cache's life counts. The last 400 lines; a line
+ * `5m`; empty if none says); when its last reply's request was sent, the
+ * time of the record just before that reply began (a prompt, a tool's
+ * result, a reply before it), from which the cache's life counts; and that
+ * reply's first record (its uuid, as the relay names a turn), so a time
+ * read before the reply was written is known for another's. The last 400 lines; a line
  * cut by `tail` and a subagent's records skipped.
  */
 export const CACHE_SCRIPT = [
   "tail -n 400 \"$1\" 2>/dev/null | /usr/bin/jq -R -n -r '",
-  '  reduce (inputs | fromjson? | select(type == "object" and .isSidechain != true)) as $o ({life: null, last: null, sent: null, mid: null};',
+  '  reduce (inputs | fromjson? | select(type == "object" and .isSidechain != true)) as $o ({life: null, last: null, sent: null, mid: null, first: null};',
   // a reply's first record: its request went out after the record before it, whatever that was
-  '    (if $o.type == "assistant" and ($o.message.id // "") != (.mid // "") then .sent = .last | .mid = ($o.message.id // "") else . end)',
+  '    (if $o.type == "assistant" and ($o.message.id // "") != (.mid // "") then .sent = .last | .mid = ($o.message.id // "") | .first = $o.uuid else . end)',
   '    | (if $o.type == "assistant" then ($o.message.usage.cache_creation // {}) as $c',
   '        | (if ($c.ephemeral_1h_input_tokens // 0) > 0 then .life = "1h" elif ($c.ephemeral_5m_input_tokens // 0) > 0 then .life = "5m" else . end)',
   '      else . end)',
   '    | (if ($o.timestamp | type) == "string" then .last = $o.timestamp else . end))',
-  '  | "\\(.life // "")\\n\\(.sent // "")"',
+  '  | "\\(.life // "")\\n\\(.sent // "")\\n\\(.first // "")"',
   "' 2>/dev/null",
 ].join('\n')
 
-/** CACHE_SCRIPT's answer: the cache's life in ms, and when the last reply's request was sent, each if its records say. */
-export function cacheOf(stdout: string): { lifeMs?: number; sentAt?: number } {
-  const [life = '', sent = ''] = stdout.split('\n').map(l => l.trim())
+/** CACHE_SCRIPT's answer: the cache's life in ms, when the last reply's request was sent, and that reply's id; each if its records say. */
+export function cacheOf(stdout: string): { lifeMs?: number; sentAt?: number; replyId?: string } {
+  const [life = '', sent = '', reply = ''] = stdout.split('\n').map(l => l.trim())
   const lifeMs = life === '1h' ? 3_600_000 : life === '5m' ? 300_000 : undefined
   const sentAt = /^\d{4}-\d\d-\d\dT/.test(sent) ? Date.parse(sent) : Number.NaN
-  return { ...(lifeMs === undefined ? {} : { lifeMs }), ...(Number.isNaN(sentAt) ? {} : { sentAt }) }
+  return { ...(lifeMs === undefined ? {} : { lifeMs }), ...(Number.isNaN(sentAt) ? {} : { sentAt }), ...(reply === '' ? {} : { replyId: reply }) }
 }
 
 /**

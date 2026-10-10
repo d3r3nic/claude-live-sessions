@@ -2649,8 +2649,8 @@ describe('the context guard', () => {
     expect(compactPlan(50, 49, 3_600_000)).toBeUndefined()
     expect(compactPlan(0, 99, 3_600_000)).toBeUndefined()
     // the cache's life and when the last reply's request was sent, from what Claude's records say
-    expect(cacheOf('1h\n2026-10-10T20:00:00.000Z\n')).toEqual({ lifeMs: 3_600_000, sentAt: Date.parse('2026-10-10T20:00:00.000Z') })
-    expect(cacheOf('5m\n\n')).toEqual({ lifeMs: 300_000 })
+    expect(cacheOf('1h\n2026-10-10T20:00:00.000Z\nturn-1\n')).toEqual({ lifeMs: 3_600_000, sentAt: Date.parse('2026-10-10T20:00:00.000Z'), replyId: 'turn-1' })
+    expect(cacheOf('5m\n\n\n')).toEqual({ lifeMs: 300_000 })
     expect([cacheOf(''), cacheOf('2h\nsoon\n')]).toEqual([{}, {}])
   })
 
@@ -2684,7 +2684,7 @@ describe('the context guard', () => {
     const iso = (ms: number) => new Date(ms).toISOString()
     // a hand-off whose reply took `took` to come (its request sent then), on a cache of `life`; passed at once unless said
     const handOff = async (id: string, o: { life?: string; took?: number; isPassed?: boolean } = {}) => {
-      world.cache = `${o.life ?? '1h'}\n${iso(at - (o.took ?? 60_000))}\n`
+      world.cache = `${o.life ?? '1h'}\n${iso(at - (o.took ?? 60_000))}\n${id}\n`
       world.turns = { 'session-104': `done\t${id}\t${iso(at)}\t${READY_CODEX}` }
       if (o.isPassed !== false) files.set(`${ledger}/pass-${id}`, '')
       await $.turn.complete({ answer: `Done.\n${READY_CODEX}`, durationMs: 1_000, isAborted: false, turnId: id, reason: 'answer' })
@@ -2742,6 +2742,61 @@ describe('the context guard', () => {
     await move(4_000)
     expect(compacted).toHaveLength(4)
     expect(world.events.at(-1)?.text).toMatch(/^Practice RBAC: Claude compacted \(after its prompt cache expired, idle 0m; its context was 61% full/)
+  })
+
+  test('the cache\'s facts are read once the reply is on record, and its time counts only if it is that reply\'s', { timeoutMs: 60_000 }, async ($, on) => {
+    const { files, clock } = engine(on, machine, { termProgram: 'Apple_Terminal', selfId: 'session-104' })
+    on('session.usage', async () => ({ value: { startedAt: NOW, context: { tokens: 610_000, window: 1_000_000, percent: 61 }, rateLimits: [] } }))
+    const compacted: (string | undefined)[] = []
+    on('session.compact', async ($, e) => {
+      compacted.push(e.instructions)
+      return { messages: [{ role: 'user' as const, text: 'summary', toolUses: [] }] }
+    })
+    on('turn.complete', async ($, e) => ({ text: e.answer }))
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, checkout: '/Users/u/dev/web-app', relay: relayOn() }] }))
+    world.tmuxPanes = 'ws-practice-rbac\tpeers\t/dev/ttys022\t%1\tclaude\nws-practice-rbac\tpeers\t/dev/ttys045\t%2\tcodex\n'
+    world.tmuxOwner = String(NOW)
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    await $.command.run(SESSIONS)
+    const ledger = '/Users/u/Library/Application Support/live-sessions/relayed'
+    let at = NOW
+    const move = async (ms: number) => {
+      await clock.advance(ms)
+      at += ms
+    }
+    const iso = (ms: number) => new Date(ms).toISOString()
+    const end = async (id: string) => {
+      world.turns = { 'session-104': `done\t${id}\t${iso(at)}\t${READY_CODEX}` }
+      await $.turn.complete({ answer: `Done.\n${READY_CODEX}`, durationMs: 1_000, isAborted: false, turnId: id, reason: 'answer' })
+    }
+    // at the turn's end its reply is not on record yet (the last cache write a 5-minute one, the time another reply's);
+    // by the pass it is: an hour's cache, its request a minute before. Compacted 55 minutes after that, not at once.
+    world.cache = `5m\n${iso(at - 5_400_000)}\nturn-old\n`
+    await end('turn-a1')
+    await move(4_000)
+    world.cache = `1h\n${iso(at - 64_000)}\nturn-a1\n`
+    files.set(`${ledger}/pass-turn-a1`, '')
+    await move(240_000)
+    expect(compacted).toEqual([])
+    for (let m = 0; m < 52; m++) await move(60_000)
+    expect(compacted).toHaveLength(1)
+    // a time that is another reply's (the reply's first record not in what was read): the turn's end stands in, so not
+    // at once, and never said to be after the cache expired
+    world.cache = `1h\n${iso(at - 5_400_000)}\nturn-old\n`
+    await end('turn-a2')
+    files.set(`${ledger}/pass-turn-a2`, '')
+    await move(10_000)
+    expect(compacted).toHaveLength(1)
+    for (let m = 0; m < 55; m++) await move(60_000)
+    expect(compacted).toHaveLength(2)
+    expect(world.events.at(-1)?.text).toMatch(/before its prompt cache expired/)
+    // a send time later than the turn's end (clocks that disagree): the turn's end, so no later than 3.5 minutes on 5
+    world.cache = `5m\n${iso(at + 600_000)}\nturn-a3\n`
+    await end('turn-a3')
+    files.set(`${ledger}/pass-turn-a3`, '')
+    await move(215_000)
+    expect(compacted).toHaveLength(3)
   })
 
   test('Claude compacts at, in a workspace\'s actions: 50, 60, 70, 80 percent, off', async ($, on) => {

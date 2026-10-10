@@ -1390,10 +1390,9 @@ async function compactAtHandOff($: EngineInterface, answer: string) {
   const at = ws.compactAt ?? COMPACT_AT
   const { context } = await $.session.usage()
   if (context.percent === undefined) return
+  // below the line, or the line off: nothing to wait for
+  if (compactPlan(at, context.percent, undefined) === undefined) return
   const file = transcriptPath(`${home}/.${self.profile}`, self.startCwd, id)
-  const cache = cacheOf((await $.process.run(['/bin/sh', '-c', CACHE_SCRIPT, 'sh', file], { timeoutMs: 20_000 }).catch(() => ({ stdout: '' }))).stdout)
-  const plan = compactPlan(at, context.percent, cache.lifeMs)
-  if (plan === undefined) return
   // its last turn, as the relay reads its records: that turn (once its reply is written), still its last, until the
   // relay has taken up its hand-off (its ledger step); not in two minutes (Codex at work, the relay waiting for you):
   // left for a later hand-off
@@ -1410,12 +1409,17 @@ async function compactAtHandOff($: EngineInterface, answer: string) {
     if (waited >= 120_000) return
     await $.clock.sleep(2_000)
   }
+  // its cache, read once its reply is on record (the relay has passed it): when that reply's request was sent counts
+  // only if the time is that reply's (else the turn's end stands in)
+  const cache = cacheOf((await $.process.run(['/bin/sh', '-c', CACHE_SCRIPT, 'sh', file], { timeoutMs: 20_000 }).catch(() => ({ stdout: '' }))).stdout)
+  const plan = compactPlan(at, context.percent, cache.lifeMs)
+  if (plan === undefined) return
   let said = `its context was ${Math.round(context.percent)}% full`
   if (plan.when === 'before-expiry') {
     // the cache's life counts from when its last request was sent (its reply took a while to come): from then,
     // idle until just before it expires; a hand-back, a prompt, a command typed to it or another conversation
     // since, and it is left
-    const sentAt = Math.min(cache.sentAt ?? endedAt, endedAt)
+    const sentAt = Math.min(cache.replyId === turnId ? cache.sentAt ?? endedAt : endedAt, endedAt)
     const wait = sentAt + plan.afterMs - (await $.clock.now())
     if (wait > 0) await $.clock.sleep(wait)
     const turn = await lastTurn()
