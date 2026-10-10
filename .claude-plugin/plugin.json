@@ -1,6 +1,6 @@
 {
   "name": "live-sessions",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "A pane and status line listing the live Claude Code and Codex sessions on this Mac",
   "author": { "name": "d3r3nic" },
   "types": "./types/index.d.ts"

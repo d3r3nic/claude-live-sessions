@@ -21,6 +21,7 @@ registerHooks({
 const c = await import('../hooks/collect.ts')
 const w = await import('../hooks/workspaces.ts')
 const r = await import('../hooks/relay.ts')
+const dr = await import('../hooks/drift.ts')
 const b = await import('../hooks/bring.ts')
 
 
@@ -1029,6 +1030,33 @@ except ChildProcessError: pass
   } finally {
     t('kill-server')
     rmSync(join(process.env.TMUX_TMPDIR ?? '/tmp', `tmux-${process.getuid()}`, socket), { force: true })
+    rmSync(scratch, { recursive: true, force: true })
+  }
+}
+
+// the drift check's records: the copy written last of a peer-coding folder, in the main checkout or a worktree beside
+// it, its parts cut; nothing for a folder that is not there
+{
+  const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'live-sessions-drift-')))
+  try {
+    const checkout = join(scratch, 'app')
+    const older = join(checkout, 'peer-coding', 'feat-x')
+    const newer = join(`${checkout}-worktrees`, 'feat-x', 'peer-coding', 'feat-x')
+    for (const d of [join(older, 'rounds', 'R1'), join(newer, 'rounds', 'R2'), join(newer, 'rounds', 'R10')]) mkdirSync(d, { recursive: true })
+    writeFileSync(join(older, 'CURRENT.md'), 'old copy')
+    spawnSync('/usr/bin/touch', ['-t', '202601010000', join(older, 'CURRENT.md')])
+    writeFileSync(join(newer, 'CURRENT.md'), `new copy ${'y'.repeat(9000)}`)
+    writeFileSync(join(newer, 'rounds', 'R2', 'claude.md'), 'round two')
+    writeFileSync(join(newer, 'rounds', 'R10', 'claude.md'), 'round ten from claude')
+    writeFileSync(join(newer, 'rounds', 'R10', 'codex.md'), 'round ten from codex')
+    writeFileSync(join(newer, 'ALIGNMENT.md'), 'aligned')
+    const read = folder => spawnSync('/bin/sh', ['-c', dr.RECORDS_SCRIPT, 'sh', checkout, folder], { encoding: 'utf8' }).stdout
+    const out = read('feat-x')
+    check('drift: the records written last, the latest round (R10 after R2), each part cut',
+      out.includes('==> CURRENT.md\nnew copy') && !out.includes('old copy') && out.includes('==> rounds/R10/claude.md\nround ten from claude') && out.includes('==> rounds/R10/codex.md') && !out.includes('round two') && out.includes('==> ALIGNMENT.md\naligned') && out.split('==> ALIGNMENT.md')[0].length < 7000,
+      out.split('\n').filter(l => l.startsWith('==> ')).join(' | '))
+    check('drift: no records for a folder not there, or one that would leave peer-coding/', read('feat-y') === '' && read('../app') === '' && read('a/b') === '')
+  } finally {
     rmSync(scratch, { recursive: true, force: true })
   }
 }

@@ -1,6 +1,7 @@
 // Pure parsing and matching: no `$`, so the tests drive it directly.
 import type { ClaudeSession, CodexSession, Place, Snapshot } from '../types'
 import { COMPACT_AT, RELAY_CAP } from './relay'
+import { DRIFT_EVERY } from './drift'
 import { tmuxName } from './workspaces'
 
 /** A Codex thread counts as active this long after its last write. */
@@ -925,6 +926,9 @@ export type WorkspaceView = {
   relay: { mode: 'auto' | 'notify' | 'off'; status: string; isWaiting: boolean }
   /** How full an agent's context may get, in percent, before it compacts at a hand-off; 0 is off. */
   compactAt: number
+  /** Hand-offs between drift checks (0: off), and the last check said for the owner ('' when none yet). */
+  checkEvery: number
+  check: { status: string; text: string; isOk: boolean } | undefined
 }
 export const WORKSPACES_SCOPE = 'workspaces'
 export type RepoView = { key: string; label: string; trees: TreeView[] }
@@ -1063,6 +1067,12 @@ export function viewOf(
       isWaiting: ws.relay !== undefined && ws.relay.mode === 'auto' && ws.relay.streak >= RELAY_CAP && ws.relay.status === 'waits for you',
     },
     compactAt: ws.compactAt ?? COMPACT_AT,
+    checkEvery: ws.checkEvery ?? DRIFT_EVERY,
+    check: ws.check === undefined ? undefined : {
+      status: ws.check.status,
+      text: `${ws.check.status.replace('-', ' ')} ${ago(o.now - ws.check.at)} ago: ${ws.check.brief}${ws.check.ask === undefined ? '' : ` Ask: ${ws.check.ask}`}`,
+      isOk: ws.check.status === 'on-track',
+    },
   }))
   const created = (w: WorkspaceView) => snap.workspaces.findIndex(ws => ws.id === w.key)
   return {

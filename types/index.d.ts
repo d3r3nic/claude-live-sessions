@@ -93,6 +93,10 @@ export type Workspace = {
    * 0 is off. Unset: COMPACT_AT (50).
    */
   compactAt?: number
+  /** How many hand-offs in a row between two drift checks: DRIFT_EVERY (4) unless set; 0 is off. */
+  checkEvery?: number
+  /** The last drift check: when, and its verdict for the owner. */
+  check?: { at: number; status: 'on-track' | 'drifting' | 'unclear-need' | 'needs-owner'; brief: string; ask?: string }
 }
 
 /**
@@ -113,6 +117,8 @@ export type Relay = {
   status?: string
   /** When it last did something. */
   at?: number
+  /** Hand-offs passed since the last drift check. */
+  sinceCheck?: number
 }
 
 export type Snapshot = {

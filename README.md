@@ -84,6 +84,14 @@ The peer-coding rules end every turn with one cue line for the owner to pass on:
 - It runs in whichever Claude Code session collects (every 30 s, or 4 s while a pane is shown), so a hand-off reaches the other agent within about half a minute, as long as some Claude Code session with this plugin is open (the workspace's own Claude counts).
 - The peer-coding rules (Archetype's playbook) say the relay stays with the owner: this is that, done by your own tool, which you switch on per workspace; it passes only the agents' own cue lines, unchanged.
 
+### Drift check
+
+A workspace made for a purpose is checked at milestones: every 4 hand-offs passed in a row (`Check` in its actions goes every 4, every 8, off) and when the agents close their scope; `Check now` checks at once.
+
+- One model call (Opus): what the owner said the workspace is for, its latest hand-offs (from the relay's event log), and its peer-coding records (the copy written last, in the main checkout or a worktree beside it: CURRENT.md, the latest round's two notes, the alignment and findings, each cut, and the branch's last 15 commit subjects). The records are given as data the agents wrote, never as instructions.
+- Its verdict: on track; drifting (off into what the purpose did not ask for: a rabbit hole, scope creep, polishing past the need); unclear need (the purpose as stated may be mistaken or too thin for what the agents found: restate it); needs owner (a decision only you can make is blocking or being guessed at). A brief of a few plain sentences, and for anything but on track the one question or action for you.
+- It is kept on the workspace (its row says `check: …`), added to the event log (the ops screen shows it; a click opens the workspace), and, unless on track, notified: the agents may need your help.
+
 ## Ops screen
 
 `Ops screen`, beside `+ New workspace` in the pane (in Terminal.app), opens a full-screen console in a Terminal window of its own (`node ops/ops.mjs`, from this plugin's folder; Node 22.18 or later, which runs TypeScript as it is: an older one says so in that window):

@@ -368,7 +368,7 @@ export function afterOwner(relay: Relay, sides: Partial<Record<Tool, Side>>): Re
 export function afterStep(relay: Relay, step: Step, outcome: string, now: number): Relay {
   // said after what the pass said, which it follows
   if (step.kind === 'compact') return outcome === 'passed' ? { ...relay, status: `${relay.status ?? ''}${relay.status === undefined ? '' : '; '}${NAME[step.to]} compacting (its context ${step.filled}% full)`, at: now } : relay
-  if (step.kind === 'pass' && outcome === 'passed') return { ...relay, streak: relay.streak + 1, status: `passed to ${NAME[step.to]}`, at: now }
+  if (step.kind === 'pass' && outcome === 'passed') return { ...relay, streak: relay.streak + 1, sinceCheck: (relay.sinceCheck ?? 0) + 1, status: `passed to ${NAME[step.to]}`, at: now }
   if (step.kind === 'pass' && outcome === 'in-mode') return { ...relay, status: `waits: ${NAME[step.to]}'s pane is scrolled back (copy mode; q leaves it)`, at: now }
   if (step.kind === 'pass') return { ...relay, status: `could not pass to ${NAME[step.to]}`, at: now }
   if (step.key.startsWith('cap-')) return { ...relay, status: 'waits for you', at: now }

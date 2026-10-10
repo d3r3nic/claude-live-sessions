@@ -5,6 +5,7 @@ import type { ClaudeSession, CodexSession, Place, Relay, Snapshot, Thread, Works
 import type { Screen } from './workspaces'
 import { AGENT_COMMANDS, afterOwner, afterStep, claudeKeep, compactStep, COMPACT_AT, cueOf, eventOf, EVENT_SCRIPT, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_SCRIPT } from './relay'
 import type { RelayEvent, Side, Step } from './relay'
+import { checkDue, DRIFT_EVERY, driftRequest, parseVerdict, recordFolderOf, RECORDS_SCRIPT } from './drift'
 import { bringable, codexDir, codexFlags, CODEX_MODE_SCRIPT, CODEX_TASK_SCRIPT, codexTaskState, JOB_COMMANDS, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, toggled, withThreads } from './bring'
 import {
   CHECKOUT_SCRIPT,
@@ -1065,6 +1066,83 @@ async function cycleCompactAt($: EngineInterface, id: string) {
   await refresh($, 0)
 }
 
+/** Hand-offs between drift checks, pressed round: every 4, every 8, off. */
+const CHECK_STEPS = [4, 8, 0]
+const nextCheckEvery = (now: number) => CHECK_STEPS[(CHECK_STEPS.indexOf(now) + 1) % CHECK_STEPS.length] ?? DRIFT_EVERY
+const everyLabel = (n: number) => (n === 0 ? 'off' : `every ${n}`)
+
+async function cycleCheckEvery($: EngineInterface, id: string) {
+  const home = (await $.env.get('HOME')) ?? ''
+  await changeWorkspaces($, home, list => list.map(ws => (ws.id === id ? { ...ws, checkEvery: nextCheckEvery(ws.checkEvery ?? DRIFT_EVERY) } : ws)))
+  await refresh($, 0)
+}
+
+async function checkNow($: EngineInterface, id: string) {
+  const home = (await $.env.get('HOME')) ?? ''
+  $.ui.toast(await checkDrift($, home, id), { timeoutMs: 15_000 })
+}
+
+/** The workspaces being checked in this session: one check of each at a time. */
+const checking = new Set<string>()
+
+/**
+ * A drift check: one model call (Opus) holds what a workspace's agents are
+ * doing (their latest hand-offs, from the event log, and their peer-coding
+ * records) against what the owner said it is for. The verdict is kept on
+ * the workspace, logged, and, unless on track, notified: the agents may need
+ * the owner's help. Says what it found.
+ */
+async function checkDrift($: EngineInterface, home: string, id: string): Promise<string> {
+  if (checking.has(id)) return 'A check of that workspace is under way.'
+  checking.add(id)
+  try {
+    const ws = (await readWorkspaces($, home)).list.find(w => w.id === id)
+    if (ws === undefined) return 'That workspace is gone.'
+    if (ws.purpose === undefined) return `${ws.name} has no purpose to check against: it was made without one.`
+    const cues = await recentCues($, home, id)
+    const folder = cues.map(recordFolderOf).filter(f => f !== undefined).at(-1)
+    const records = ws.checkout === undefined || folder === undefined
+      ? ''
+      : (await $.process.run(['/bin/sh', '-c', RECORDS_SCRIPT, 'sh', ws.checkout, folder], { timeoutMs: 20_000 }).catch(() => ({ stdout: '' }))).stdout
+    const ask = driftRequest(ws, cues, records)
+    const reply = await $.model
+      .complete({ model: 'opus', system: ask.system, prompt: ask.prompt, maxTokens: 600, effort: 'medium' })
+      .catch((error: unknown) => ({ isAnswered: false as const, why: message(error) }))
+    const verdict = reply.isAnswered ? parseVerdict(reply.text) : undefined
+    if (verdict === undefined) {
+      await logEvent($, home, { kind: 'check', text: `${ws.name}: the check could not be done (${reply.isAnswered ? 'no verdict in its reply' : 'the model did not answer'})`, workspace: id })
+      return `${ws.name}: the check could not be done.`
+    }
+    const now = await $.clock.now()
+    await changeWorkspaces($, home, list => list.map(w => (w.id !== id ? w : { ...w, check: { at: now, ...verdict }, ...(w.relay === undefined ? {} : { relay: { ...w.relay, sinceCheck: 0 } }) })))
+    const said = `${ws.name}: ${verdict.status.replace('-', ' ')}: ${verdict.brief}${verdict.ask === undefined ? '' : ` Ask: ${verdict.ask}`}`
+    await logEvent($, home, { kind: verdict.status === 'on-track' ? 'check' : 'drift', text: said, workspace: id })
+    if (verdict.status !== 'on-track') {
+      await $.process
+        .run(['/bin/sh', '-c', RELAY_SCRIPT, 'sh', 'tell', ledgerPath(home), `drift-${id}-${now}`, '', '', `The agents may need your help. ${said}`, '', 'Workspace check'], { timeoutMs: 20_000 })
+        .catch(() => undefined)
+    }
+    await refresh($, 0)
+    return said
+  } finally {
+    checking.delete(id)
+  }
+}
+
+/** A workspace's latest hand-off lines, oldest first, from the relay's event log (its last 8). */
+async function recentCues($: EngineInterface, home: string, id: string): Promise<string[]> {
+  const text = await $.fs.read(eventsPath(home)).catch(() => '')
+  return text.split('\n').flatMap(line => {
+    try {
+      const e = JSON.parse(line) as { kind?: unknown; text?: unknown; workspace?: unknown }
+      const cue = e.workspace === id && e.kind === 'relay' && typeof e.text === 'string' ? /(READY FOR (CLAUDE|CODEX)|NEEDS USER|SCOPE CLOSED) · .*/.exec(e.text)?.[0] : undefined
+      return cue === undefined ? [] : [cue]
+    } catch {
+      return []
+    }
+  }).slice(-8)
+}
+
 /** After RELAY_CAP hand-offs in a row the relay waits; the owner lets it go on. */
 async function continueRelay($: EngineInterface, id: string) {
   const home = (await $.env.get('HOME')) ?? ''
@@ -1137,6 +1215,8 @@ async function passCues(
       // a pass waiting on a scrolled-back pane says so once, not at every collection
       if (outcome === 'in-mode' && next?.status === ws.relay?.status) return
       await saveAfter(step, outcome)
+      // a milestone: what the agents are doing, held against what the workspace is for (one model call, unawaited)
+      if (checkDue(ws, step, outcome)) void checkDrift($, home, ws.id).catch(() => undefined)
       const why = step.kind === 'pass' ? passFailure(outcome) : undefined
       if (step.kind === 'pass' && why !== undefined) {
         await $.process
@@ -1677,6 +1757,8 @@ export const register: Register = on => {
                   ...(ws.isAttached ? [<Button key={`hide ${ws.key}`} label="Hide window" onPress={() => void hideWorkspaceById($, ws.key)} />] : []),
                   <Button key={`relay-bar ${ws.key}`} label={`Relay: ${ws.relay.mode} → ${RELAY_NEXT[ws.relay.mode]}`} onPress={() => void cycleRelay($, ws.key)} />,
                   <Button key={`compact ${ws.key}`} label={`Compact at: ${ws.compactAt === 0 ? 'off' : `${ws.compactAt}%`} → ${nextCompactAt(ws.compactAt) === 0 ? 'off' : `${nextCompactAt(ws.compactAt)}%`}`} onPress={() => void cycleCompactAt($, ws.key)} />,
+                  <Button key={`check ${ws.key}`} label="Check now" onPress={() => void checkNow($, ws.key)} />,
+                  <Button key={`check-every ${ws.key}`} label={`Check: ${everyLabel(ws.checkEvery)} → ${everyLabel(nextCheckEvery(ws.checkEvery))}`} onPress={() => void cycleCheckEvery($, ws.key)} />,
                   ...moves(WORKSPACES_SCOPE, view.workspaces.map(w => w.key), ws.key),
                   <Button
                     key={`remove ${ws.key}`}
@@ -1689,6 +1771,11 @@ export const register: Register = on => {
                 <Box flexDirection="row" width={width} columnGap={1} marginLeft={4}>
                   <Text dimColor wrap="truncate-end">{`relay: ${ws.relay.isWaiting ? `waits for you after ${RELAY_CAP} hand-offs` : ws.relay.status}`}</Text>
                   {ws.relay.isWaiting && <Button key={`relay-go ${ws.key}`} label="continue" onPress={() => void continueRelay($, ws.key)} />}
+                </Box>
+              )}
+              {ws.check !== undefined && (
+                <Box flexDirection="row" width={width} marginLeft={4}>
+                  <Text {...(ws.check.isOk ? { dimColor: true } : { color: 'warning' as const })} wrap="truncate-end">{`check: ${ws.check.text}`}</Text>
                 </Box>
               )}
               {ws.items.map(i => sessionRow(i, ws.items.map(x => x.key), itemsScope(`ws:${ws.key}`)))}
