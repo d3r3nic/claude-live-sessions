@@ -523,7 +523,7 @@ async function move($: EngineInterface, scope: string, shown: readonly string[],
  * each of its windows, with its status bar's Hide: hide.sh written, and the
  * click bound unless the person bound that click to something of their own.
  */
-async function prepareSession($: EngineInterface, home: string, name: string) {
+async function prepareSession($: EngineInterface, home: string, name: string, title: string) {
   const tmux = (args: string[]) =>
     $.process.run(['tmux', ...args], { timeoutMs: 10_000 }).catch((error: unknown) => ({ exitCode: -1, stdout: '', stderr: message(error) }))
   const path = hidePath(home)
@@ -532,7 +532,7 @@ async function prepareSession($: EngineInterface, home: string, name: string) {
   const listed = await tmux(['list-keys', '-T', 'root', 'MouseDown1Status'])
   const canHide = binding !== undefined && listed.exitCode === 0 && mayBindHide(listed.stdout) && (await tmux(binding)).exitCode === 0
   const windows = (await tmux(['list-windows', '-t', `=${name}`, '-F', '#{window_id}'])).stdout.split('\n').filter(id => /^@\d+$/.test(id.trim())).map(id => id.trim())
-  for (const args of sessionSetup(name, windows, canHide)) await tmux(args)
+  for (const args of sessionSetup(name, windows, canHide, title)) await tmux(args)
 }
 
 /** Hides a workspace's windows: each terminal attached to it detached and its Terminal window closed; the agents keep running. */
@@ -571,7 +571,7 @@ async function openWorkspace($: EngineInterface, ws: Workspace, at?: { window: s
       return { isOpen: false, text: `Not opened: tmux session ${name} was not started for this workspace; end it (tmux kill-session -t ${name}) or remove this workspace.` }
     }
     // one made before the mouse, the side labels and Hide were set up gets them now, in each of its windows
-    await prepareSession($, home, name)
+    await prepareSession($, home, name, ws.name)
     // its agent's pane (a workspace made before panes were marked has a window per agent)
     if (at?.pane !== undefined && /^%\d+$/.test(at.pane)) {
       await tmux(['select-window', '-t', at.pane])
@@ -793,7 +793,7 @@ async function makeWorkspace(
     for (let i = 0; i < 20; i++) {
       const has = await $.process.run(['tmux', 'has-session', '-t', `=${tmuxName(made)}`], { timeoutMs: 5_000 }).catch(() => ({ exitCode: -1 }))
       if (has.exitCode === 0) {
-        await prepareSession($, home, tmuxName(made))
+        await prepareSession($, home, tmuxName(made), made.name)
         break
       }
       await $.clock.sleep(250)

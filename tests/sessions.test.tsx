@@ -1362,9 +1362,12 @@ describe('workspaces', () => {
     const setUp = runs.filter(r => r[0] === 'tmux' && (r[1] === 'set-option' || r[1] === 'set-window-option'))
     // each of its windows, by id: the agents' windows whatever window is current
     expect(runs.find(r => r[0] === 'tmux' && r[1] === 'list-windows')).toEqual(['tmux', 'list-windows', '-t', '=ws-practice-rbac', '-F', '#{window_id}'])
-    expect(setUp.slice(0, 7)).toEqual(sessionSetup('ws-practice-rbac', ['@1', '@2'], true).map(a => ['tmux', ...a]))
-    expect(sessionSetup('ws-practice-rbac', ['@1', '@2'], true).map(a => `${a[0]} ${a[2]} ${a[3]}`)).toEqual([
-      'set-option ws-practice-rbac mouse', 'set-option ws-practice-rbac status-right-length', 'set-option ws-practice-rbac status-right',
+    expect(setUp.slice(0, 9)).toEqual(sessionSetup('ws-practice-rbac', ['@1', '@2'], true, 'Practice RBAC').map(a => ['tmux', ...a]))
+    // the bar's left end names the workspace (a # doubled, as tmux reads it)
+    expect(sessionSetup('x', [], false, 'A #1').find(a => a[3] === 'status-left')?.[4]).toBe(' A ##1 ')
+    expect(sessionSetup('ws-practice-rbac', ['@1', '@2'], true, 'Practice RBAC').map(a => `${a[0]} ${a[2]} ${a[3]}`)).toEqual([
+      'set-option ws-practice-rbac mouse', 'set-option ws-practice-rbac status-left-length', 'set-option ws-practice-rbac status-left',
+      'set-option ws-practice-rbac status-right-length', 'set-option ws-practice-rbac status-right',
       'set-window-option @1 pane-border-status', 'set-window-option @1 pane-border-format',
       'set-window-option @2 pane-border-status', 'set-window-option @2 pane-border-format',
     ])
@@ -2012,7 +2015,7 @@ describe('hiding a workspace window', () => {
     const right = runs.filter(r => r[0] === 'tmux' && r[1] === 'set-option' && r[4] === 'status-right').map(r => r[5])
     expect(right).toEqual([HIDE_LABEL])
     // the click on Hide runs hide.sh with the terminal; any other click on the bar is still tmux's own
-    expect(hideBinding('/h/hide.sh')).toEqual(['bind-key', '-T', 'root', 'MouseDown1Status', 'if-shell', '-F', '#{==:#{mouse_status_range},ls-hide}', `run-shell -b "/bin/sh '/h/hide.sh' '#{client_tty}'"`, 'switch-client -t ='])
+    expect(hideBinding('/h/hide.sh')).toEqual(['bind-key', '-T', 'root', 'MouseDown1Status', 'if-shell', '-F', '#{==:#{mouse_status_range},ls-hide}', `run-shell -b "/bin/sh '/h/hide.sh' '#{client_tty}' >/dev/null 2>&1"`, 'switch-client -t ='])
     expect(hideBinding("/it's/hide.sh")).toBeUndefined()
     expect(hideBinding('/a#b/hide.sh')).toBeUndefined()
   })

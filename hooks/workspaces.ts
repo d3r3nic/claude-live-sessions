@@ -131,15 +131,17 @@ export const BORDER_FORMAT =
 
 /**
  * A workspace's tmux session, set up to be used by hand, as tmux commands
- * (arguments) for the session `name` and each of its `windows` (targets): the
+ * (arguments) for the session `name` (titled `title` on its bar) and each of its `windows` (targets): the
  * mouse on in that session alone, so a click picks the side the keys go to
  * and the wheel scrolls the side under it (or reaches its agent, when the
  * agent takes the mouse); and each side's border naming its agent.
  * tmux.conf and other sessions are left as they are.
  */
-export function sessionSetup(name: string, windows: readonly string[], canHide = false): string[][] {
+export function sessionSetup(name: string, windows: readonly string[], canHide = false, title = ''): string[][] {
   return [
     ['set-option', '-t', name, 'mouse', 'on'],
+    // the bar's left end: the workspace's own name (tmux reads `#` in it as a format: doubled)
+    ...(title === '' ? [] : [['set-option', '-t', name, 'status-left-length', '50'], ['set-option', '-t', name, 'status-left', ` ${title.replace(/#/g, '##')} `]]),
     ['set-option', '-t', name, 'status-right-length', '60'],
     ['set-option', '-t', name, 'status-right', canHide ? HIDE_LABEL : KEEPS_LABEL],
     ...windows.flatMap(window => [
@@ -206,8 +208,9 @@ export const HIDE_SCRIPT = [
  */
 export function hideBinding(path: string): string[] | undefined {
   if (/['"#\\]/.test(path)) return undefined
+  // run-shell shows what a command prints in the pane, over the agent, in a view the relay waits on: none is shown
   return ['bind-key', '-T', 'root', 'MouseDown1Status', 'if-shell', '-F', `#{==:#{mouse_status_range},${HIDE_RANGE}}`,
-    `run-shell -b "/bin/sh '${path}' '#{client_tty}'"`, STATUS_CLICK]
+    `run-shell -b "/bin/sh '${path}' '#{client_tty}' >/dev/null 2>&1"`, STATUS_CLICK]
 }
 /** tmux's own answer to a click on the status bar. */
 export const STATUS_CLICK = 'switch-client -t ='
@@ -235,7 +238,7 @@ export const OWNER_OPTION = '@live-sessions-workspace'
  * only creates.
  */
 export function openCommand(
-  ws: Pick<Workspace, 'id' | 'env' | 'dir' | 'createdAt' | 'checkout'>,
+  ws: Pick<Workspace, 'id' | 'env' | 'dir' | 'createdAt' | 'checkout'> & { name?: string },
   home: string,
   o: { socket?: string; bins?: { claude: string; codex: string }; attach?: boolean } = {},
 ): string {
@@ -254,7 +257,7 @@ export function openCommand(
     `\\; set-option -p ${AGENT_OPTION} codex`,
     // set-option takes no `=` exact-match target; the session was just made under this exact name
     `\\; set-option -t ${shellWord(name)} ${OWNER_OPTION} ${shellWord(String(ws.createdAt))}`,
-    ...sessionSetup(name, [`${name}:peers`]).map(args => `\\; ${args.map((a, i) => (i === 0 ? a : shellWord(a))).join(' ')}`),
+    ...sessionSetup(name, [`${name}:peers`], false, ws.name ?? '').map(args => `\\; ${args.map((a, i) => (i === 0 ? a : shellWord(a))).join(' ')}`),
   ].join(' ')
   return o.attach === false ? create : `${create}; ${tmux} attach -t ${shellWord(`=${name}`)}`
 }

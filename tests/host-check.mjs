@@ -311,7 +311,8 @@ if (process.argv.includes('--slow')) {
   // Hide on the status bar, bound as the mod binds it over tmux's own, with a stand-in for hide.sh that
   // records the terminal and detaches it: a click there detaches that terminal; the session keeps running
   const standIn = join(scratch, 'hide-stand-in.sh')
-  writeFileSync(standIn, `#!/bin/sh\necho "$1" > "${scratch}/hidden"\ntmux detach-client -t "$1"\n`)
+  // it prints, as hide.sh does ("closed"): nothing of it may show in a pane
+  writeFileSync(standIn, `#!/bin/sh\necho "$1" > "${scratch}/hidden"\ntmux detach-client -t "$1"\necho closed\n`)
   check('hide: the click is tmux\'s own before the mod binds it', w.mayBindHide(t6('list-keys', '-T', 'root', 'MouseDown1Status')))
   t6(...w.hideBinding(standIn))
   for (const args of w.sessionSetup('ws-check', [], true)) t6(...args)
@@ -344,6 +345,7 @@ except ChildProcessError: pass
   check('hide: a click on the bar\'s Hide detaches that terminal; the session keeps running', hid[0].startsWith('/dev/') && hid[1] === '-' && hiddenTty === hid[0] &&
     spawnSync('tmux', ['-L', socket, '-f', '/dev/null', 'has-session', '-t', '=ws-check']).status === 0, `${hid.join(' → ')} (${hiddenTty})`)
   check('hide: other clicks on the bar stay tmux\'s own', t6('list-keys', '-T', 'root', 'MouseDown1Status').includes(w.STATUS_CLICK))
+  check('hide: what the hide prints never shows in a pane (over the agent, in a view the relay waits on)', t6('list-panes', '-s', '-t', '=ws-check', '-F', '#{pane_in_mode}').split('\n').every(m => m === '0'), t6('list-panes', '-s', '-t', '=ws-check', '-F', '#{pane_id}=#{pane_in_mode}').replace(/\n/g, ' '))
   // hide.sh itself, on a terminal that is no Terminal.app tab: detached; no window touched
   const hideFile = join(scratch, 'hide.sh')
   writeFileSync(hideFile, w.HIDE_SCRIPT)
