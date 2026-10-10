@@ -1096,16 +1096,18 @@ export function viewOf(
 
 /**
  * Whether a workspace's relay waits on the owner now: holding a hand-off at
- * the cap; a cue for them, or a pass it could not make (theirs to paste),
- * with nothing typed by them since; a pane left scrolled back. Never with
- * the relay off.
+ * the cap; a cue for them, a pass it could not make (theirs to paste), or a
+ * pane left scrolled back, with nothing typed by them since. Never with the
+ * relay off.
  */
 export function needsOwner(relay: Workspace['relay']): boolean {
   if (relay === undefined || relay.mode === 'off') return false
   const status = relay.status ?? ''
   const isAnswered = relay.typedAt !== undefined && relay.at !== undefined && relay.typedAt > relay.at
-  if (status === 'waits for you' || status.startsWith('waits: ')) return true
-  return (status === 'needs you' || status.startsWith('could not pass')) && !isAnswered
+  if (status === 'waits for you') return true
+  // what else waits on them is theirs until they type: a cue for them, a pass to paste, a pane scrolled back (a turn
+  // they start meanwhile takes the place of the hand-off it held)
+  return (status === 'needs you' || status.startsWith('could not pass') || status.startsWith('waits: ')) && !isAnswered
 }
 
 /** `1m`, `3h`: how long ago, compactly. */

@@ -1609,6 +1609,7 @@ describe('workspaces, from the pane', () => {
       ws('off', { relay: relayOn({ mode: 'off', status: 'needs you', at: NOW }) }),
       ws('unpassed', { relay: relayOn({ status: 'could not pass to Claude', at: NOW }) }),
       ws('scrolled', { relay: relayOn({ status: 'waits: Codex\'s pane is scrolled back (copy mode; q leaves it)', at: NOW }) }),
+      ws('moved-on', { relay: relayOn({ status: 'waits: Codex\'s pane is scrolled back (copy mode; q leaves it)', at: NOW - 60_000, typedAt: NOW }) }),
       ws('drift', { check: { at: NOW, status: 'drifting', brief: 'off course' } }),
     ] }))
     // WEB CONSOLE (ttys004), its name long, runs in the first one's tmux session
@@ -1622,8 +1623,8 @@ describe('workspaces, from the pane', () => {
       const p = await props(`ws-${id}`)
       return [p?.borderStyle, p?.borderColor ?? (p?.borderDimColor === true ? 'dim' : undefined), p?.marginTop, p?.paddingX, p?.width]
     }
-    const marks = await Promise.all(['practice-rbac', 'quiet', 'asks', 'answered', 'off', 'unpassed', 'scrolled', 'drift'].map(async id => [id, (await looks(id))[1]]))
-    expect(Object.fromEntries(marks)).toEqual({ 'practice-rbac': 'warning', quiet: 'dim', asks: 'warning', answered: 'dim', off: 'dim', unpassed: 'warning', scrolled: 'warning', drift: 'warning' })
+    const marks = await Promise.all(['practice-rbac', 'quiet', 'asks', 'answered', 'off', 'unpassed', 'scrolled', 'moved-on', 'drift'].map(async id => [id, (await looks(id))[1]]))
+    expect(Object.fromEntries(marks)).toEqual({ 'practice-rbac': 'warning', quiet: 'dim', asks: 'warning', answered: 'dim', off: 'dim', unpassed: 'warning', scrolled: 'warning', 'moved-on': 'dim', drift: 'warning' })
     expect(await looks('quiet')).toEqual(['round', 'dim', 1, 1, 110])
     // what is inside lays out within the border and its padding: the header, the folder, relay and check lines, its
     // sessions (a long title cut to the row), each one's actions, its own actions
