@@ -226,8 +226,21 @@ export type RelayEvent = { kind: string; text: string; workspace: string; agent?
  */
 export function eventOf(ws: Pick<Workspace, 'id' | 'name'>, step: Step, outcome: string): RelayEvent | undefined {
   const event = eventFor(ws, step, outcome)
-  // one line of a few hundred characters at most: an append that size is never split
-  return event === undefined ? undefined : { ...event, text: event.text.slice(0, 500) }
+  // its line well under 1 KB (any script): an append that size is one write, never split or mixed with another's
+  return event === undefined ? undefined : { ...event, text: cutBytes(event.text, 600) }
+}
+
+/** Text cut to at most `max` bytes of UTF-8, whole characters kept. */
+export function cutBytes(text: string, max: number): string {
+  let bytes = 0
+  let out = ''
+  for (const ch of text) {
+    const n = ch.codePointAt(0)!
+    bytes += n < 0x80 ? 1 : n < 0x800 ? 2 : n < 0x10000 ? 3 : 4
+    if (bytes > max) break
+    out += ch
+  }
+  return out
 }
 
 function eventFor(ws: Pick<Workspace, 'id' | 'name'>, step: Step, outcome: string): RelayEvent | undefined {

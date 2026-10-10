@@ -3,7 +3,7 @@
 // a node, an agent or an event opens what it is about: the workspace's window at that agent, or a session's tab.
 //   node ops/ops.mjs                       live, full screen (t theme, q quit)
 //   node ops/ops.mjs --frame [--plain]     one frame, printed (COLS, ROWS, TICK); --targets prints what each row opens
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync, writeSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import * as nodeModule from 'node:module'
 
@@ -258,16 +258,17 @@ function frame(snap, now, cols, rows, tick, note = '') {
   out.push(rgb(G.lo, '╚' + '═'.repeat(Math.max(0, inner - width(keys) - 2))) + rgb(note === '' ? G.mid : G.amber, keys) + rgb(G.lo, '══╝'))
   targets.push(undefined)
   // the theme's background under every cell, to the line's end
-  // and erased to the line's end, so nothing of an earlier frame stays where a row came out short
-  return { lines: out.map(l => bgOn() + clip(l, cols) + ' '.repeat(Math.max(0, cols - width(l))) + `${ESC}K${ESC}49m`), targets }
+  return { lines: out.map(l => bgOn() + clip(l, cols) + ' '.repeat(Math.max(0, cols - width(l))) + `${ESC}49m`), targets }
 }
 
 const run = (argv) => {
   const r = spawnSync(argv[0], argv.slice(1), { encoding: 'utf8', timeout: 10_000 })
   return { status: r.status, stdout: r.stdout ?? '' }
 }
-// tests: a private tmux server that reads no tmux.conf, never the person's own
+// tests: a private tmux server that reads no tmux.conf, never the person's own; and a stand-in for osascript that
+// records what it is asked, so no test opens or brings up a Terminal window
 const SOCKET = process.env.LIVE_SESSIONS_TMUX_SOCKET
+const OSASCRIPT = process.env.LIVE_SESSIONS_OSASCRIPT ?? '/usr/bin/osascript'
 const tmux = (...args) => run(['tmux', ...(SOCKET === undefined ? [] : ['-L', SOCKET, '-f', '/dev/null']), ...args])
 /**
  * Opens what a row is about: a session's own Terminal tab; or a running workspace's window (its tmux session, marked
@@ -278,7 +279,7 @@ const tmux = (...args) => run(['tmux', ...(SOCKET === undefined ? [] : ['-L', SO
 function open(target, snap) {
   if (target.kind === 'tty') {
     if (!/^ttys\d+$/.test(target.tty)) return 'not a terminal tab'
-    return run(['/usr/bin/osascript', '-l', 'JavaScript', '-e', c.FOCUS_SCRIPT, target.tty]).stdout.trim() === 'shown' ? `brought up ${target.tty}` : `${target.tty} is not a Terminal tab`
+    return run([OSASCRIPT, '-l', 'JavaScript', '-e', c.FOCUS_SCRIPT, target.tty]).stdout.trim() === 'shown' ? `brought up ${target.tty}` : `${target.tty} is not a Terminal tab`
   }
   if (!WORKSPACE_ID.test(target.id)) return 'not a workspace'
   const ws = snap.workspaces.find(x => x.id === target.id)
@@ -293,14 +294,11 @@ function open(target, snap) {
   }
   const attached = tmux('list-clients', '-t', `=${name}`, '-F', '#{client_tty}').stdout.split('\n').filter(t => /^\/dev\/ttys\d+$/.test(t))
   for (const tty of attached) {
-    if (run(['/usr/bin/osascript', '-l', 'JavaScript', '-e', c.FOCUS_SCRIPT, tty.slice(5)]).stdout.trim() === 'shown') return `brought up ${clean(ws.name)}`
+    if (run([OSASCRIPT, '-l', 'JavaScript', '-e', c.FOCUS_SCRIPT, tty.slice(5)]).stdout.trim() === 'shown') return `brought up ${clean(ws.name)}`
   }
-  let place
-  try {
-    place = w.placementFrom(JSON.parse(readFileSync(w.placementPath(HOME, name), 'utf8')))
-  } catch {}
+  // a new window at Terminal's own place and size (where it last was may be on a screen no longer there)
   const attach = `tmux ${SOCKET === undefined ? '' : `-L ${w.shellQuote(SOCKET)} -f /dev/null `}attach -t ${w.shellQuote(`=${name}`)}`
-  const opened = run(['/usr/bin/osascript', '-l', 'JavaScript', '-e', c.OPEN_SCRIPT, attach, ...(place === undefined ? [] : [JSON.stringify(place)])])
+  const opened = run([OSASCRIPT, '-l', 'JavaScript', '-e', c.OPEN_SCRIPT, attach])
   return opened.stdout.trim() === 'opened' ? `opened ${clean(ws.name)}` : `${clean(ws.name)} did not open`
 }
 
@@ -327,7 +325,9 @@ if (process.argv.includes('--frame')) {
   const restore = () => {
     if (isRestored) return
     isRestored = true
-    process.stdout.write('\x1b[0m\x1b[?1000l\x1b[?1006l\x1b[?7h\x1b[?25h\x1b[?1049l')
+    try {
+      writeSync(1, '\x1b[0m\x1b[?1000l\x1b[?1006l\x1b[?7h\x1b[?25h\x1b[?1049l')
+    } catch {}
   }
   process.on('exit', restore)
   const quit = () => {
@@ -335,10 +335,18 @@ if (process.argv.includes('--frame')) {
     process.exit(0)
   }
   for (const signal of ['SIGHUP', 'SIGTERM', 'SIGINT']) process.on(signal, quit)
+  // its terminal gone (the window closed): nothing to give back or say, it just ends
+  const isGone = error => ['EIO', 'EPIPE', 'ENXIO', 'EBADF'].includes(error?.code)
+  process.stdout.on('error', () => process.exit(0))
+  process.stdin.on('error', () => process.exit(0))
   for (const event of ['uncaughtException', 'unhandledRejection']) {
     process.on(event, error => {
-      restore()
-      process.stderr.write(`The ops screen stopped: ${String(error?.stack ?? error)}\n`)
+      if (isGone(error)) process.exit(0)
+      try {
+        restore()
+        // written straight to the descriptor: a stream opened now on a terminal that hung up would never return
+        writeSync(2, `The ops screen stopped: ${String(error?.stack ?? error)}\n`)
+      } catch {}
       process.exit(1)
     })
   }
@@ -366,12 +374,16 @@ if (process.argv.includes('--frame')) {
       process.stdout.write(bgOn() + '\x1b[2J')
     }
   })
-  diff(loaded.snap, Date.now())
+  try {
+    diff(loaded.snap, Date.now())
+  } catch {}
   setInterval(() => {
     const again = load()
     if (again !== undefined && again.mtime !== loaded.mtime) {
       loaded = again
-      diff(loaded.snap, Date.now())
+      try {
+        diff(loaded.snap, Date.now())
+      } catch {}
     }
     tick++
     if (Date.now() > noteUntil) note = ''
@@ -380,12 +392,13 @@ if (process.argv.includes('--frame')) {
     try {
       // too small a window: said, nothing else drawn
       shown = cols < 40 || rows < 8
-        ? { lines: [...Array(rows)].map((_, r) => bgOn() + clip(r === 0 ? rgb(G.mid, ' window too small for ops') : '', cols) + `${ESC}K${ESC}49m`), targets: [] }
+        ? { lines: [...Array(rows)].map((_, r) => bgOn() + clip(r === 0 ? rgb(G.mid, ' window too small for ops') : '', cols) + `${ESC}49m`), targets: [] }
         : frame(loaded.snap, Date.now(), cols, rows, tick, note)
     } catch (error) {
-      shown = { lines: [bgOn() + clip(rgb(G.red, ` cannot draw: ${clean(String(error).split('\n')[0])}`), cols) + `${ESC}K${ESC}49m`], targets: [] }
+      shown = { lines: [bgOn() + clip(rgb(G.red, ` cannot draw: ${clean(String(error).split('\n')[0])}`), cols) + `${ESC}49m`], targets: [] }
     }
-    // each row at its place: no newline, so the screen never scrolls
-    process.stdout.write(shown.lines.map((l, r) => `\x1b[${r + 1};1H${l}`).join(''))
+    // each row at its place, erased first (nothing of an earlier frame stays where a row came out short); no
+    // newline, so the screen never scrolls
+    process.stdout.write(shown.lines.map((l, r) => `\x1b[${r + 1};1H${bgOn()}\x1b[2K${l}`).join(''))
   }, 150)
 }

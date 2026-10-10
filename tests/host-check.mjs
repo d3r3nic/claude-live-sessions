@@ -895,7 +895,12 @@ except ChildProcessError: pass
       JSON.stringify({ at: now - 20_000, kind: 'relay', text: '\u0301\u0301 marks first', workspace: 'opsx' }),
       JSON.stringify({ at: 'later', kind: 'x', text: 'no time' }),
     ].join('\n') + '\n')
-    const env = { ...process.env, LIVE_SESSIONS_SNAPSHOT: snapFile, LIVE_SESSIONS_EVENTS: events, LIVE_SESSIONS_TMUX_SOCKET: socket, HOME: scratch }
+    // osascript stood in for: what it is asked is recorded, and no Terminal window is opened or brought up
+    const asked = join(scratch, 'osascript.log')
+    const stub = join(scratch, 'osascript')
+    writeFileSync(stub, `#!/bin/sh\nscript=$4\nshift 4\ncase $script in *doScript*) printf 'OPEN %s\\n' "$1" >> '${asked}'; echo opened;; *) printf 'FOCUS %s\\n' "$1" >> '${asked}';; esac\n`)
+    execFileSync('/bin/chmod', ['+x', stub])
+    const env = { ...process.env, LIVE_SESSIONS_SNAPSHOT: snapFile, LIVE_SESSIONS_EVENTS: events, LIVE_SESSIONS_TMUX_SOCKET: socket, LIVE_SESSIONS_OSASCRIPT: stub, HOME: scratch }
     const draw = (cols, rows, extra = []) => spawnSync(process.execPath, ['--no-warnings', opsFile, '--frame', ...extra], { encoding: 'utf8', env: { ...env, COLS: String(cols), ROWS: String(rows) } }).stdout
     // widths as Python's own Unicode data gives them: wide (W, F) two, combining marks and format characters none
     const widths = spawnSync('python3', ['-c', [
@@ -951,14 +956,62 @@ except ChildProcessError: pass
     const outB = live(`os.write(fd, b"\\x1b[<0;100;${agentRow}M\\x1b[<0;100;${agentRow}m")`)
     const activeB = t('display-message', '-p', '-t', '=ws-opsx:peers', '#{pane_id}').stdout.trim()
     const outC = live(`os.write(fd, b"\\x1b[<0;10;${rowOf('Stopped one')}M")`)
-    check('ops: a click on either side of an agent row gives that agent\'s pane the keys; a stopped workspace is left to /sessions',
-      activeA === left && activeB === right && outC.includes('Stopped one is not running: open it from /sessions'), `${activeA}/${left} ${activeB}/${right}`)
+    const opens = existsSync(asked) ? readFileSync(asked, 'utf8').trim().split('\n') : []
+    check('ops: a click on either side of an agent row gives that agent\'s pane the keys and opens a window attached to it; a stopped workspace is left to /sessions',
+      activeA === left && activeB === right && outC.includes('Stopped one is not running: open it from /sessions') &&
+      opens.length === 2 && opens.every(l => l === `OPEN tmux -L '${socket}' -f /dev/null attach -t '=ws-opsx'`),
+      `${activeA}/${left} ${activeB}/${right} ${JSON.stringify(opens)}`)
     void outA; void outB
     // however it ends, the terminal is given back: q (typed twice too), Ctrl-C, a signal
     const restored = out => out.includes('\x1b[?1049l') && out.includes('\x1b[?1000l') && out.includes('\x1b[?25h') && out.includes('\x1b[?7h')
     const byKeys = live('os.write(fd, b"qq")')
     const bySignal = live('os.kill(pid, signal.SIGINT)')
     check('ops: the terminal is given back as it was, by q, qq or a signal', restored(byKeys) && restored(bySignal))
+    // its terminal closed under it (the window shut): it ends, never left running
+    const closedArgs = ['-c', [
+      'import os, pty, sys, time',
+      'pid, fd = pty.fork()',
+      'if pid == 0:',
+      '    os.execvpe(sys.argv[1], sys.argv[1:], os.environ)',
+      'time.sleep(1.5)',
+      'os.close(fd)',
+      'end = time.time() + 5',
+      'while time.time() < end:',
+      '    done, _ = os.waitpid(pid, os.WNOHANG)',
+      '    if done: print("ended"); sys.exit(0)',
+      '    time.sleep(0.1)',
+      'os.kill(pid, 9)',
+      'print("left running")',
+    ].join('\n'), process.execPath, '--no-warnings', opsFile]
+    const runs = []
+    for (let k = 0; k < 8; k++) runs.push(spawnSync('python3', closedArgs, { encoding: 'utf8', timeout: 20_000, env }).stdout.trim())
+    // ...and with no hang-up signal at all (a terminal that is not its controlling one): its writes fail, and it ends
+    const noSignalArgs = ['-c', [
+      'import os, pty, sys, time, subprocess, fcntl, termios, struct',
+      'master, slave = os.openpty()',
+      'fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 120, 0, 0))',
+      'p = subprocess.Popen(sys.argv[1:], stdin=slave, stdout=slave, stderr=slave, start_new_session=True)',
+      'end = time.time() + 1.5',
+      'while time.time() < end:',
+      '    try: os.read(master, 65536)',
+      '    except OSError: break',
+      'os.close(master)',
+      'os.close(slave)',
+      'try:',
+      '    p.wait(timeout=5)',
+      '    print("ended")',
+      'except subprocess.TimeoutExpired:',
+      '    p.kill()',
+      '    print("left running")',
+    ].join('\n'), process.execPath, '--no-warnings', opsFile]
+    for (let k = 0; k < 8; k++) runs.push(spawnSync('python3', noSignalArgs, { encoding: 'utf8', timeout: 30_000, env }).stdout.trim())
+    check('ops: its terminal closed under it, it ends, with a hang-up or without (sixteen times over)', runs.every(x => x === 'ended'), JSON.stringify(runs))
+    // drawn live in a terminal (a private tmux pane): every row keeps its right border
+    t('new-session', '-d', '-s', 'drawn', '-x', '100', '-y', '24', `env LIVE_SESSIONS_SNAPSHOT='${snapFile}' LIVE_SESSIONS_EVENTS='${events}' LIVE_SESSIONS_OSASCRIPT='${stub}' HOME='${scratch}' '${process.execPath}' --no-warnings '${opsFile}'`)
+    await new Promise(res => setTimeout(res, 2_000))
+    const screen = t('capture-pane', '-p', '-t', '=drawn:').stdout.replace(/\n$/, '').split('\n')
+    t('send-keys', '-t', '=drawn:', 'q')
+    check('ops: drawn live, every row keeps its right border', screen.length === 24 && screen.every(l => /[║╗╣╝]$/.test(l.trimEnd())), `${screen.filter(l => /[║╗╣╝]$/.test(l.trimEnd())).length}/${screen.length}`)
     // a snapshot another version wrote (an older plugin): waited on, said, never drawn
     writeFileSync(snapFile, JSON.stringify({ version: 6, snapshot: { claude: [], codex: [] } }))
     const old = live('os.write(fd, b"\\r")')

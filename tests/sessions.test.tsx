@@ -51,7 +51,7 @@ import {
 } from '../hooks/collect'
 import type { CodexProc, ThreadRow } from '../hooks/collect'
 import type { ClaudeSession, CodexSession, Snapshot, Workspace } from '../types'
-import { afterOwner, afterStep, claudeKeep, compactStep, COMPACT_AT, cueOf, eventOf, EVENT_SCRIPT, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_MAX_AGE_MS, TURN_SCRIPT } from '../hooks/relay'
+import { afterOwner, afterStep, claudeKeep, compactStep, COMPACT_AT, cueOf, cutBytes, eventOf, EVENT_SCRIPT, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_MAX_AGE_MS, TURN_SCRIPT } from '../hooks/relay'
 import type { Side } from '../hooks/relay'
 import { bringable, codexDir, codexFlags, CODEX_MODE_SCRIPT, CODEX_TASK_SCRIPT, codexTaskState, envOfProfile, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, threadFrom, toggled, withThreads } from '../hooks/bring'
 import {
@@ -2653,7 +2653,13 @@ describe('the ops screen', () => {
     expect(eventOf(ws, { kind: 'compact', key: 'compact-x1', to: 'codex', pane: '%2', line: '/compact', filled: 62 }, 'unsent')).toBeUndefined()
     // a tell that did not happen is no event; an event's text is cut to 500 characters
     expect(eventOf(ws, { kind: 'tell', key: 'tell-c2', from: 'claude', text: 'x', isForOwner: true }, 'failed')).toBeUndefined()
-    expect(eventOf(ws, { ...pass, line: `READY FOR CLAUDE · ${'x'.repeat(2000)}` }, 'passed')?.text).toHaveLength(500)
+    // cut by bytes, whole characters kept: well under 1 KB a line whatever the script
+    expect(cutBytes('要'.repeat(400), 600)).toBe('要'.repeat(200))
+    expect(cutBytes('a要', 3)).toBe('a')
+    expect(cutBytes('ok', 600)).toBe('ok')
+    const cut = eventOf(ws, { ...pass, line: `READY FOR CLAUDE · ${'要'.repeat(2000)}` }, 'passed')!.text
+    expect([...cut].reduce((n, ch) => n + (ch.codePointAt(0)! < 0x80 ? 1 : ch.codePointAt(0)! < 0x800 ? 2 : 3), 0)).toBeLessThanOrEqual(600)
+    expect(cut.endsWith('要')).toBe(true)
   })
 
   test('the collecting session writes what the relay did to the event log', async ($, on) => {
