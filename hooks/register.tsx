@@ -3,7 +3,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { ClaudeSession, CodexSession, Place, Relay, Snapshot, Thread, Workspace } from '../types'
 import type { Screen } from './workspaces'
-import { AGENT_COMMANDS, afterOwner, afterStep, claudeKeep, compactStep, COMPACT_AT, cueOf, cutBytes, eventOf, EVENT_SCRIPT, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_SCRIPT } from './relay'
+import { AGENT_COMMANDS, afterOwner, afterStep, claudeKeep, COMPACT_AT, cueOf, cutBytes, eventOf, EVENT_SCRIPT, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_SCRIPT } from './relay'
 import type { RelayEvent, Side, Step } from './relay'
 import { branchOf, checkDue, DRIFT_EVERY, driftRequest, parseVerdict, recordFolderOf, RECORDS_SCRIPT } from './drift'
 import { bringable, codexDir, envOfProfile, codexFlags, CODEX_MODE_SCRIPT, CODEX_TASK_SCRIPT, codexTaskState, JOB_COMMANDS, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, toggled, withThreads } from './bring'
@@ -1308,9 +1308,7 @@ async function passCues(
       const tool = p.window as 'claude' | 'codex'
       const known = fileFor(tool, tty)
       const turn = known?.file === undefined ? undefined : turns.get(known.file)
-      // how full Codex's context is, by its own records (Claude compacts itself: compactAtHandOff)
-      const filled = tool === 'codex' ? turn?.filled : undefined
-      sides[tool] = { tool, pane: p.pane!, isBusy: (known?.isBusy ?? false) || turn?.state === 'busy', ...(turn === undefined ? {} : { turn }), ...(filled === undefined ? {} : { filled }) }
+      sides[tool] = { tool, pane: p.pane!, isBusy: (known?.isBusy ?? false) || turn?.state === 'busy', ...(turn === undefined ? {} : { turn }) }
     }
     if (ws.relay !== undefined && afterOwner(ws.relay, sides) !== undefined) {
       // the owner typed to an agent: the count starts again, on the relay as the file has it now
@@ -1350,27 +1348,8 @@ async function passCues(
           .catch(() => undefined)
       }
     }
-    // the panes typed into this collection: an agent given a line may be starting a turn, so nothing more goes there
-    const typedInto = new Set<string>()
-    for (const step of relaySteps(ws, sides, now)) {
-      const outcome = await run(step)
-      // a pass that failed may have typed before it failed: counted as typed into
-      if (step.kind === 'pass' && (outcome === 'passed' || outcome === 'unsent' || outcome === 'failed')) typedInto.add(step.pane)
-      await settle(step, outcome)
-      // Codex's hand-off passed: if its context is full enough, it compacts now, once for that turn
-      const compact = compactStep(ws, sides, step, outcome, typedInto)
-      if (compact?.kind === 'compact') {
-        const compacted = await run(compact)
-        typedInto.add(compact.pane)
-        await settle(compact, compacted)
-        // scrolled back as it was typed: `/compact` waits in Codex's input, where the next hand-off would be added to it
-        if (compacted === 'unsent') {
-          await $.process
-            .run(['/bin/sh', '-c', RELAY_SCRIPT, 'sh', 'tell', ledgerPath(home), `unsent-${compact.key}`, '', '', `${ws.name}: /compact waits in Codex's input (its pane was scrolled back): leave copy mode (q) and press Enter there, or clear it.`, '', 'Workspace relay'], { timeoutMs: 20_000 })
-            .catch(() => undefined)
-        }
-      }
-    }
+    // Codex compacts itself, by its own measure: nothing is typed into it but hand-offs
+    for (const step of relaySteps(ws, sides, now)) await settle(step, await run(step))
   }
 }
 
@@ -1924,7 +1903,7 @@ export const register: Register = on => {
                     ? []
                     : [
                         <Button key={`relay-bar ${ws.key}`} label={`Relay: ${ws.relay.mode} → ${RELAY_NEXT[ws.relay.mode]}`} onPress={() => void cycleRelay($, ws.key)} />,
-                        <Button key={`compact ${ws.key}`} label={`Compact at: ${ws.compactAt === 0 ? 'off' : `${ws.compactAt}%`} → ${nextCompactAt(ws.compactAt) === 0 ? 'off' : `${nextCompactAt(ws.compactAt)}%`}`} onPress={() => void cycleCompactAt($, ws.key)} />,
+                        <Button key={`compact ${ws.key}`} label={`Claude compacts at: ${ws.compactAt === 0 ? 'off' : `${ws.compactAt}%`} → ${nextCompactAt(ws.compactAt) === 0 ? 'off' : `${nextCompactAt(ws.compactAt)}%`}`} onPress={() => void cycleCompactAt($, ws.key)} />,
                         <Button key={`check ${ws.key}`} label="Check now" onPress={() => void checkNow($, ws.key)} />,
                         <Button key={`check-every ${ws.key}`} label={`Check: ${everyLabel(ws.checkEvery)} → ${everyLabel(nextCheckEvery(ws.checkEvery))}`} onPress={() => void cycleCheckEvery($, ws.key)} />,
                       ]),

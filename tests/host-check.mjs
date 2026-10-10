@@ -742,7 +742,7 @@ except ChildProcessError: pass
     { type: 'response_item', timestamp: '2026-10-09T11:06:00Z', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '<environment_context>…</environment_context>' }] } },
     { type: 'event_msg', timestamp: '2026-10-09T11:07:00Z', payload: { type: 'item_completed', item: { type: 'UserMessage', content: [{ type: 'text', text: 'READY FOR CODEX · peer-coding/feat-x R1 · feat/x@abc1234' }] } } },
     { type: 'event_msg', timestamp: '2026-10-09T11:07:01Z', payload: { type: 'task_started', turn_id: 't-2' } },
-    // a compaction, should Codex log it as a message: not the owner's typing (the relay sends it)
+    // a compaction, should Codex log it as a message: never counted as the owner's typing
     { type: 'event_msg', timestamp: '2026-10-09T11:08:00Z', payload: { type: 'item_completed', item: { type: 'UserMessage', content: [{ type: 'text', text: '/compact' }] } } },
   ])
   // an earlier Codex writes the prompt as a user_message event

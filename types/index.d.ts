@@ -93,7 +93,7 @@ export type Workspace = {
    */
   threads?: { claude?: Thread; codex?: Thread }
   /**
-   * How full an agent's context may get, in percent, before it compacts once its cue is handed on;
+   * How full Claude's context may get, in percent, before it compacts itself once its hand-off is passed (Codex compacts itself);
    * 0 is off. Unset: COMPACT_AT (50).
    */
   compactAt?: number

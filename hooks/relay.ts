@@ -48,8 +48,8 @@ export function cueOf(line: string): Cue | undefined {
  * from its last token count. A fifth field is when the owner last typed into the agent: a prompt (one
  * typed while it works too), a command (`/model`, `/peer-coding …`, `!ls`)
  * or a paste; not a line that starts with a cue and is all there is (the
- * relay's, pasted or not), a compaction (`/compact`, which the relay may
- * send), a background task's notice or an interrupt.
+ * relay's, pasted or not), a compaction (`/compact`), a background task's
+ * notice or an interrupt.
  * A subagent's records, and a line cut by `tail`, are skipped.
  */
 export const TURN_SCRIPT = [
@@ -131,7 +131,7 @@ export function parseTurns(stdout: string): Map<string, Turn> {
 }
 
 /** One agent of a workspace: its tmux pane, its last turn as its own records say, and whether it is at work. */
-export type Side = { tool: Tool; pane: string; turn?: Turn; isBusy: boolean; filled?: number }
+export type Side = { tool: Tool; pane: string; turn?: Turn; isBusy: boolean }
 
 /**
  * What the relay does now. `key` is the step's own: done once, whichever
@@ -142,7 +142,6 @@ export type Side = { tool: Tool; pane: string; turn?: Turn; isBusy: boolean; fil
 export type Step =
   | { kind: 'pass'; key: string; from?: Tool; to: Tool; pane: string; line: string }
   | { kind: 'tell'; key: string; from?: Tool; text: string; isForOwner: boolean; cue?: Cue['kind'] }
-  | { kind: 'compact'; key: string; to: Tool; pane: string; line: string; filled: number }
 
 /**
  * The relay's steps for one workspace. An agent whose turn ended (since the
@@ -188,27 +187,11 @@ export function relaySteps(ws: Pick<Workspace, 'name' | 'relay'> & Partial<Pick<
   return steps
 }
 
-/** How full an agent's context may get, in percent, before it is compacted once its cue is handed on. */
-export const COMPACT_AT = 50
-
 /**
- * Compacting Codex at a point that suits it: right after this session passed
- * its hand-off to Claude (typed and entered, so its cue is delivered and a
- * compaction, which Codex runs as a turn of its own, cannot lose it), when its
- * context is at least the workspace's `compactAt` percent full (COMPACT_AT
- * unless set; 0 is off): `/compact` typed into its pane, once for that turn.
- * Never into a pane typed into during this collection (it may be starting a
- * turn), never after a cue for the owner (it waits for the owner's answer).
- * Claude compacts itself, in its own session (compactAtHandOff).
+ * How full Claude's context may get, in percent, before it compacts itself once its hand-off is passed
+ * (compactAtHandOff). Codex compacts itself, by its own measure: the relay never types /compact into it.
  */
-export function compactStep(ws: Pick<Workspace, 'compactAt'>, sides: Partial<Record<Tool, Side>>, handed: Step, outcome: string, typedInto: ReadonlySet<string>): Step | undefined {
-  if (handed.kind !== 'pass' || handed.from !== 'codex' || outcome !== 'passed') return undefined
-  const side = sides.codex
-  const at = ws.compactAt ?? COMPACT_AT
-  const turn = side?.turn
-  if (side === undefined || at <= 0 || typedInto.has(side.pane) || turn?.state !== 'done' || turn.cue?.kind !== 'ready' || side.filled === undefined || side.filled < at) return undefined
-  return { kind: 'compact', key: `compact-${turn.id}`, to: 'codex', pane: side.pane, line: '/compact', filled: side.filled }
-}
+export const COMPACT_AT = 50
 
 /** What Claude is told to keep when it compacts in a workspace: the rest is in the peer-coding records. */
 export function claudeKeep(name: string): string {
@@ -235,12 +218,11 @@ export function cutBytes(text: string, max: number): string {
 /**
  * What a step that was carried out is, for the event log (none for one taken
  * already, or waiting on a scrolled-back pane): a hand-off passed, one that
- * could not be, what is the owner's, a hold, a compaction.
+ * could not be, what is the owner's, a hold.
  */
 export function eventOf(ws: Pick<Workspace, 'id' | 'name'>, step: Step, outcome: string): RelayEvent | undefined {
   if (outcome === 'taken' || outcome === 'in-mode') return undefined
   const at = { workspace: ws.id }
-  if (step.kind === 'compact') return outcome === 'passed' ? { ...at, kind: 'compact', text: `${ws.name}: ${NAME[step.to]} compacting (its context ${step.filled}% full)`, agent: step.to } : undefined
   if (step.kind === 'pass') {
     const why = passFailure(outcome)
     return why === undefined
@@ -361,7 +343,6 @@ export function afterOwner(relay: Relay, sides: Partial<Record<Tool, Side>>): Re
 /** The relay's state after a step: a pass counts toward the cap; a cue for the owner starts the count again. */
 export function afterStep(relay: Relay, step: Step, outcome: string, now: number): Relay {
   // said after what the pass said, which it follows
-  if (step.kind === 'compact') return outcome === 'passed' ? { ...relay, status: `${relay.status ?? ''}${relay.status === undefined ? '' : '; '}${NAME[step.to]} compacting (its context ${step.filled}% full)`, at: now } : relay
   if (step.kind === 'pass' && outcome === 'passed') return { ...relay, streak: relay.streak + 1, sinceCheck: (relay.sinceCheck ?? 0) + 1, status: `passed to ${NAME[step.to]}`, at: now }
   if (step.kind === 'pass' && outcome === 'in-mode') return { ...relay, status: `waits: ${NAME[step.to]}'s pane is scrolled back (copy mode; q leaves it)`, at: now }
   if (step.kind === 'pass') return { ...relay, status: `could not pass to ${NAME[step.to]}`, at: now }

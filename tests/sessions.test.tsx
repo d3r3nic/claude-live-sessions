@@ -51,7 +51,7 @@ import {
 } from '../hooks/collect'
 import type { CodexProc, ThreadRow } from '../hooks/collect'
 import type { ClaudeSession, CodexSession, Snapshot, Workspace } from '../types'
-import { afterOwner, afterStep, claudeKeep, compactStep, COMPACT_AT, cueOf, cutBytes, eventOf, EVENT_SCRIPT, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_MAX_AGE_MS, TURN_SCRIPT } from '../hooks/relay'
+import { afterOwner, afterStep, claudeKeep, COMPACT_AT, cueOf, cutBytes, eventOf, EVENT_SCRIPT, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_MAX_AGE_MS, TURN_SCRIPT } from '../hooks/relay'
 import type { Side } from '../hooks/relay'
 import { branchOf, checkDue, checkFrom, driftRequest, parseVerdict, recordFolderOf, RECORDS_SCRIPT } from '../hooks/drift'
 import { bringable, codexDir, codexFlags, CODEX_MODE_SCRIPT, CODEX_TASK_SCRIPT, codexTaskState, envOfProfile, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, threadFrom, toggled, withThreads } from '../hooks/bring'
@@ -2495,33 +2495,8 @@ describe('bringing running sessions into a workspace', () => {
 })
 
 describe('the context guard', () => {
-  test('Codex compacts right after this session passed its hand-off, when its context is full enough; never otherwise', async () => {
-    const ws = { compactAt: undefined as number | undefined }
-    const codex = (filled: number | undefined, turn: Side['turn'] = done('x1', READY_CLAUDE)): Side => ({ tool: 'codex', pane: '%2', isBusy: false, turn, ...(filled === undefined ? {} : { filled }) })
-    const claude: Side = { tool: 'claude', pane: '%1', isBusy: false, turn: done('c1', READY_CODEX) }
-    const passed = { kind: 'pass' as const, key: 'pass-x1', from: 'codex' as const, to: 'claude' as const, pane: '%1', line: READY_CLAUDE }
-    const none = new Set<string>()
-    // its cue typed into Claude's pane and entered, its context 62% full: /compact, once for that turn
-    expect(compactStep(ws, { claude, codex: codex(62) }, passed, 'passed', none)).toEqual({ kind: 'compact', key: 'compact-x1', to: 'codex', pane: '%2', line: '/compact', filled: 62 })
-    // a pass not made by this session now (taken: another may still be at it), or not made at all: never
-    for (const outcome of ['taken', 'in-mode', 'unsent', 'not-agent zsh', 'gone', 'failed']) expect(compactStep(ws, { claude, codex: codex(90) }, passed, outcome, none)).toBeUndefined()
-    // Claude's hand-off: Claude compacts itself; a cue for the owner, or any told step: never
-    expect(compactStep(ws, { claude, codex: codex(90) }, { ...passed, key: 'pass-c1', from: 'claude', to: 'codex', pane: '%2' }, 'passed', none)).toBeUndefined()
-    expect(compactStep(ws, { claude, codex: codex(90) }, { kind: 'tell', key: 'tell-x1', from: 'codex', text: '', isForOwner: true }, 'told', none)).toBeUndefined()
-    // its pane typed into in this collection (it may be starting a turn): not now
-    expect(compactStep(ws, { claude, codex: codex(90) }, passed, 'passed', new Set(['%2']))).toBeUndefined()
-    // below the line, unknown, off, its turn under way or not a hand-off: nothing
-    expect(compactStep(ws, { claude, codex: codex(49) }, passed, 'passed', none)).toBeUndefined()
-    expect(compactStep(ws, { claude, codex: codex(undefined) }, passed, 'passed', none)).toBeUndefined()
-    expect(compactStep({ compactAt: 0 }, { claude, codex: codex(99) }, passed, 'passed', none)).toBeUndefined()
-    expect(compactStep({ compactAt: 70 }, { claude, codex: codex(65) }, passed, 'passed', none)).toBeUndefined()
-    expect(compactStep(ws, { claude, codex: codex(90, { state: 'busy', id: 'x2', at: NOW }) }, passed, 'passed', none)).toBeUndefined()
-    expect(compactStep(ws, { claude, codex: codex(90, done('x1', 'NEEDS USER · peer-coding/feat-rbac · feat/rbac@abc1234')) }, passed, 'passed', none)).toBeUndefined()
+  test('Claude compacts at 50% unless set; what it keeps; a setting this does not read', async () => {
     expect(COMPACT_AT).toBe(50)
-    // said after what the pass said
-    const compacting = compactStep(ws, { claude, codex: codex(62) }, passed, 'passed', none)!
-    expect(afterStep(relayOn({ streak: 3, status: 'passed to Claude' }), compacting, 'passed', NOW)).toEqual(relayOn({ streak: 3, status: 'passed to Claude; Codex compacting (its context 62% full)', at: NOW }))
-    expect(afterStep(relayOn({ streak: 3, status: 'passed to Claude' }), compacting, 'in-mode', NOW)).toEqual(relayOn({ streak: 3, status: 'passed to Claude' }))
     // what Claude keeps: one line, whatever the workspace is called
     expect(claudeKeep('RBAC')).toBe('Peer-coding workspace "RBAC": keep what it is for, the peer-coding branch and its worktree, the round, where the peer-coding records are (CURRENT.md), what the owner decided, and the cue you last sent; the details stay in those records.')
     expect(claudeKeep('A\nB\u0007')).toMatch(/^Peer-coding workspace "A B ": keep/)
@@ -2534,7 +2509,7 @@ describe('the context guard', () => {
     expect([turns.get('/x.jsonl')?.filled, turns.get('/y.jsonl')?.filled, turns.get('/z.jsonl')?.filled]).toEqual([62, undefined, undefined])
   })
 
-  test('the relay passes Codex\'s hand-off, then has Codex compact; never Claude, never a pane it just typed into, never in notify mode', async ($, on) => {
+  test('the relay passes Codex\'s hand-off and types nothing more into Codex, however full its context: Codex compacts itself', async ($, on) => {
     const { files, runs, clock } = engine(on, machine, { termProgram: 'Apple_Terminal' })
     files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, checkout: '/Users/u/dev/web-app', relay: relayOn() }] }))
     world.tmuxPanes = 'ws-practice-rbac\tpeers\t/dev/ttys022\t%1\tclaude\nws-practice-rbac\tpeers\t/dev/ttys045\t%2\tcodex\n'
@@ -2548,28 +2523,19 @@ describe('the context guard', () => {
       await clock.advance(4_000)
       await $.command.run(SESSIONS)
     }
-    // Codex hands back with its context 62% full
-    world.turns = { 'session-104': `done\tturn-c0\t${at(300_000)}\tReady.`, '/rollouts/a.jsonl': `done\tturn-x1\t${at(60_000)}\t${READY_CLAUDE}\t\t62` }
+    // Codex hands back with its context 90% full: only its hand-off is typed, into Claude's pane
+    world.turns = { 'session-104': `done\tturn-c0\t${at(300_000)}\tReady.`, '/rollouts/a.jsonl': `done\tturn-x1\t${at(60_000)}\t${READY_CLAUDE}\t\t90` }
     await $.session.start(START)
     await $.command.run(SESSIONS)
-    expect(typed()).toEqual([['pass-turn-x1', '%1', READY_CLAUDE], ['compact-turn-x1', '%2', '/compact']])
-    expect(kept().relay.status).toBe('passed to Claude; Codex compacting (its context 62% full)')
-    // the next collection: the pass is taken, so nothing more
+    expect(typed()).toEqual([['pass-turn-x1', '%1', READY_CLAUDE]])
+    expect(kept().relay.status).toBe('passed to Claude')
+    // Claude hands over: its line typed into Codex's pane, and nothing else, then or at the next collection
+    world.turns = { 'session-104': `done\tturn-c1\t${at(30_000)}\t${READY_CODEX}`, '/rollouts/a.jsonl': `done\tturn-x1\t${at(60_000)}\t${READY_CLAUDE}\t\t99` }
     await collect()
-    expect(typed()).toHaveLength(2)
-    // Claude hands over: passed; the relay never types /compact into Claude
-    world.turns = { 'session-104': `done\tturn-c1\t${at(30_000)}\t${READY_CODEX}`, '/rollouts/a.jsonl': `done\tturn-x2\t${at(120_000)}\t\t\t90` }
     await collect()
-    expect(typed().slice(2)).toEqual([['pass-turn-c1', '%2', READY_CODEX]])
-    // both hand over in one collection: Claude's cue goes into Codex's pane first, so Codex is not compacted then
-    world.turns = { 'session-104': `done\tturn-c2\t${at(20_000)}\t${READY_CODEX}`, '/rollouts/a.jsonl': `done\tturn-x3\t${at(10_000)}\t${READY_CLAUDE}\t\t90` }
-    await collect()
-    expect(typed().slice(3).map(t => t[0])).toEqual(['pass-turn-c2', 'pass-turn-x3'])
-    // notify mode: nothing is typed, compaction neither
-    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...kept(), relay: { ...kept().relay, mode: 'notify' } }] }))
-    world.turns = { 'session-104': `done\tturn-c4\t${at(9_000)}\tReady.`, '/rollouts/a.jsonl': `done\tturn-x4\t${at(5_000)}\t${READY_CLAUDE}\t\t90` }
-    await collect()
-    expect(typed()).toHaveLength(5)
+    expect(typed()).toEqual([['pass-turn-x1', '%1', READY_CLAUDE], ['pass-turn-c1', '%2', READY_CODEX]])
+    expect(runs.filter(r => r[2] === RELAY_SCRIPT && r.includes('/compact'))).toEqual([])
+    expect(world.events.filter(e => e.kind === 'compact')).toEqual([])
   })
 
   test('a workspace\'s Claude compacts itself after its hand-off to Codex is passed, when its context is full enough', async ($, on) => {
@@ -2663,7 +2629,7 @@ describe('the context guard', () => {
     expect(compacted).toHaveLength(3)
   })
 
-  test('Compact at, in a workspace\'s actions: 50, 60, 70, 80 percent, off', async ($, on) => {
+  test('Claude compacts at, in a workspace\'s actions: 50, 60, 70, 80 percent, off', async ($, on) => {
     const { files } = engine(on, machine, { termProgram: 'Apple_Terminal' })
     files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, relay: relayOn() }] }))
     await $.session.start(START)
@@ -2676,13 +2642,13 @@ describe('the context guard', () => {
       await ui.press({ key: 'compact practice-rbac' })
       seen.push(JSON.parse(files.get(WORKSPACES)!).workspaces[0].compactAt)
     }
-    expect(seen).toEqual(['Compact at: 50% → 60%', 60, 70, 80, 0, 50])
+    expect(seen).toEqual(['Claude compacts at: 50% → 60%', 60, 70, 80, 0, 50])
     await ui.unmount()
   })
 })
 
 describe('the ops screen', () => {
-  test('the relay\'s event log: a hand-off passed or not, what is the owner\'s, a hold, a compaction; nothing for a step taken already', async () => {
+  test('the relay\'s event log: a hand-off passed or not, what is the owner\'s, a hold; nothing for a step taken already', async () => {
     const ws = { id: 'rbac', name: 'RBAC' }
     const pass = { kind: 'pass' as const, key: 'pass-x1', from: 'codex' as const, to: 'claude' as const, pane: '%1', line: READY_CLAUDE }
     expect(eventOf(ws, pass, 'passed')).toEqual({ kind: 'relay', text: `RBAC: Codex → Claude: ${READY_CLAUDE}`, workspace: 'rbac', agent: 'claude' })
@@ -2691,8 +2657,6 @@ describe('the ops screen', () => {
     expect(eventOf(ws, { kind: 'tell', key: 'tell-c2', from: 'claude', text: 'RBAC: Claude needs you. NEEDS USER · x', isForOwner: true }, 'told')).toEqual({ kind: 'needs', text: 'RBAC: Claude needs you. NEEDS USER · x', workspace: 'rbac', agent: 'claude' })
     expect(eventOf(ws, { kind: 'tell', key: 'tell-c3', from: 'claude', text: 'paste it', isForOwner: false }, 'told')?.kind).toBe('notify')
     expect(eventOf(ws, { kind: 'tell', key: 'cap-c4', text: 'held', isForOwner: true }, 'told')).toEqual({ kind: 'waits', text: 'held', workspace: 'rbac' })
-    expect(eventOf(ws, { kind: 'compact', key: 'compact-x1', to: 'codex', pane: '%2', line: '/compact', filled: 62 }, 'passed')).toEqual({ kind: 'compact', text: 'RBAC: Codex compacting (its context 62% full)', workspace: 'rbac', agent: 'codex' })
-    expect(eventOf(ws, { kind: 'compact', key: 'compact-x1', to: 'codex', pane: '%2', line: '/compact', filled: 62 }, 'unsent')).toBeUndefined()
     // a tell that did not happen is no event
     expect(eventOf(ws, { kind: 'tell', key: 'tell-c2', from: 'claude', text: 'x', isForOwner: true }, 'failed')).toBeUndefined()
     // cut by bytes, whole characters kept: well under 1 KB a line whatever the script
@@ -2713,7 +2677,8 @@ describe('the ops screen', () => {
     world.turns = { 'session-104': `done\tturn-c0\t${new Date(NOW - 300_000).toISOString()}\tReady.`, '/rollouts/a.jsonl': `done\tturn-x1\t${new Date(NOW - 60_000).toISOString()}\t${READY_CLAUDE}\t\t62` }
     await $.session.start(START)
     await $.command.run(SESSIONS)
-    expect(world.events.map(e => [e.kind, e.workspace, e.agent])).toEqual([['relay', 'practice-rbac', 'claude'], ['compact', 'practice-rbac', 'codex']])
+    // Codex's hand-off passed, its context 62% full: that is all (Codex compacts itself)
+    expect(world.events.map(e => [e.kind, e.workspace, e.agent])).toEqual([['relay', 'practice-rbac', 'claude']])
     expect(world.events.every(e => typeof e.at === 'number')).toBe(true)
   })
 

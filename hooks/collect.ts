@@ -928,7 +928,7 @@ export type WorkspaceView = {
   items: Item[]
   /** The relay: its mode, and what it last did, said for the owner ('' when nothing yet). */
   relay: { mode: 'auto' | 'notify' | 'off'; status: string; isWaiting: boolean }
-  /** How full an agent's context may get, in percent, before it compacts at a hand-off; 0 is off. */
+  /** How full Claude's context may get, in percent, before it compacts itself at a hand-off; 0 is off. */
   compactAt: number
   /** Hand-offs between drift checks (0: off), and the last check said for the owner ('' when none yet). */
   checkEvery: number
