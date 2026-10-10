@@ -56,7 +56,7 @@ export const TURN_SCRIPT = [
   `  printf '==> %s\\n' "$f"`,
   "  tail -n 600 \"$f\" 2>/dev/null | /usr/bin/jq -R -n -r '",
   '    def cue: split("\\n") | map(select(test("^\\\\s*(?:[0-9]+\\\\.|[-*>])?\\\\s*[`*_]*(READY FOR (CLAUDE|CODEX)|NEEDS USER|SCOPE CLOSED) · "))) | (last // "") | gsub("[\\t\\r]"; " ");',
-  '    def compacting: test("^\\\\s*/compact(\\\\s|$)|<command-name>/compact</command-name>");',
+  '    def compacting: test("^\\\\s*/compact(\\\\s|$)|^\\\\s*(<command-message>compact</command-message>\\\\s*)?<command-name>/compact</command-name>");',
   // a compaction (`/compact`, which Claude Code also records as a prompt of that line) is never a turn, and never
   // the owner's presence: the relay sends it too
   '    def said: if (.message.content | type) == "string" then .message.content else ([.message.content[]? | select(.type == "text") | .text] | join("\\n")) end;',
