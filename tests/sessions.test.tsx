@@ -2534,7 +2534,8 @@ describe('the context guard', () => {
     await collect()
     await collect()
     expect(typed()).toEqual([['pass-turn-x1', '%1', READY_CLAUDE], ['pass-turn-c1', '%2', READY_CODEX]])
-    expect(runs.filter(r => r[2] === RELAY_SCRIPT && r.includes('/compact'))).toEqual([])
+    // nothing run anywhere carries a /compact: not the relay's script, not tmux, not anything else
+    expect(runs.filter(r => r.includes('/compact'))).toEqual([])
     expect(world.events.filter(e => e.kind === 'compact')).toEqual([])
   })
 

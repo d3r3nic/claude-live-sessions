@@ -1136,11 +1136,11 @@ async function cycleRelay($: EngineInterface, id: string) {
   await refresh($, 0)
 }
 
-/** The context fills a workspace's agents may be compacted at, pressed round; 0 is off. */
+/** The context fills a workspace's Claude may compact itself at, pressed round; 0 is off. */
 const COMPACT_STEPS = [50, 60, 70, 80, 0]
 const nextCompactAt = (now: number) => COMPACT_STEPS[(COMPACT_STEPS.indexOf(now) + 1) % COMPACT_STEPS.length] ?? COMPACT_AT
 
-/** How full an agent's context may get before it compacts at a hand-off: 50, 60, 70, 80 percent, off. */
+/** How full Claude's context may get before it compacts itself at a hand-off: 50, 60, 70, 80 percent, off. */
 async function cycleCompactAt($: EngineInterface, id: string) {
   const home = (await $.env.get('HOME')) ?? ''
   await changeWorkspaces($, home, list => list.map(ws => (ws.id === id ? { ...ws, compactAt: nextCompactAt(ws.compactAt ?? COMPACT_AT) } : ws)))

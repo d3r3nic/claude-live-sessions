@@ -48,8 +48,9 @@ export function cueOf(line: string): Cue | undefined {
  * from its last token count. A fifth field is when the owner last typed into the agent: a prompt (one
  * typed while it works too), a command (`/model`, `/peer-coding …`, `!ls`)
  * or a paste; not a line that starts with a cue and is all there is (the
- * relay's, pasted or not), a compaction (`/compact`), a background task's
- * notice or an interrupt.
+ * relay's, pasted or not), a compaction (`/compact`: Claude's own at a
+ * hand-off, or one the owner types to lighten an agent, asks nothing of the
+ * agents), a background task's notice or an interrupt.
  * A subagent's records, and a line cut by `tail`, are skipped.
  */
 export const TURN_SCRIPT = [
