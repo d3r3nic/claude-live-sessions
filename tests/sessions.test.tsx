@@ -2657,6 +2657,9 @@ describe('the ops screen', () => {
     expect(cutBytes('要'.repeat(400), 600)).toBe('要'.repeat(200))
     expect(cutBytes('a要', 3)).toBe('a')
     expect(cutBytes('ok', 600)).toBe('ok')
+    // as written in a JSON line: a quote or a backslash takes two
+    expect(cutBytes('"\\"\\', 5)).toBe('"\\')
+    expect(JSON.stringify(cutBytes('"'.repeat(900), 600)).length).toBeLessThanOrEqual(602)
     const cut = eventOf(ws, { ...pass, line: `READY FOR CLAUDE · ${'要'.repeat(2000)}` }, 'passed')!.text
     expect([...cut].reduce((n, ch) => n + (ch.codePointAt(0)! < 0x80 ? 1 : ch.codePointAt(0)! < 0x800 ? 2 : 3), 0)).toBeLessThanOrEqual(600)
     expect(cut.endsWith('要')).toBe(true)

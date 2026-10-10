@@ -230,13 +230,13 @@ export function eventOf(ws: Pick<Workspace, 'id' | 'name'>, step: Step, outcome:
   return event === undefined ? undefined : { ...event, text: cutBytes(event.text, 600) }
 }
 
-/** Text cut to at most `max` bytes of UTF-8, whole characters kept. */
+/** Text cut to at most `max` bytes as it is written in a JSON line (UTF-8, escapes counted), whole characters kept. */
 export function cutBytes(text: string, max: number): string {
   let bytes = 0
   let out = ''
   for (const ch of text) {
     const n = ch.codePointAt(0)!
-    bytes += n < 0x80 ? 1 : n < 0x800 ? 2 : n < 0x10000 ? 3 : 4
+    bytes += ch === '"' || ch === '\\' ? 2 : n < 0x20 ? 6 : n < 0x80 ? 1 : n < 0x800 ? 2 : n < 0x10000 ? 3 : 4
     if (bytes > max) break
     out += ch
   }

@@ -181,7 +181,8 @@ function frame(snap, now, cols, rows, tick, note = '') {
   const out = []
   const targets = []
   const line = (s = '', target) => {
-    out.push(rgb(G.lo, '║') + pad(s, inner) + rgb(G.lo, '║'))
+    // cut inside the border, so a long row never takes the border off the window's edge
+    out.push(rgb(G.lo, '║') + pad(clip(s, inner), inner) + rgb(G.lo, '║'))
     targets.push(target)
   }
   const rule = (title, left = '╠', right = '╣') => {
