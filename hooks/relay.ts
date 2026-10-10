@@ -47,7 +47,8 @@ export function cueOf(line: string): Cue | undefined {
  * A fifth field is when the owner last typed into the agent: a prompt (one
  * typed while it works too), a command (`/model`, `/peer-coding …`, `!ls`)
  * or a paste; not a line that starts with a cue and is all there is (the
- * relay's, pasted or not), a background task's notice or an interrupt.
+ * relay's, pasted or not), a compaction (`/compact`, which the relay may
+ * send), a background task's notice or an interrupt.
  * A subagent's records, and a line cut by `tail`, are skipped.
  */
 export const TURN_SCRIPT = [
@@ -55,6 +56,9 @@ export const TURN_SCRIPT = [
   `  printf '==> %s\\n' "$f"`,
   "  tail -n 600 \"$f\" 2>/dev/null | /usr/bin/jq -R -n -r '",
   '    def cue: split("\\n") | map(select(test("^\\\\s*(?:[0-9]+\\\\.|[-*>])?\\\\s*[`*_]*(READY FOR (CLAUDE|CODEX)|NEEDS USER|SCOPE CLOSED) · "))) | (last // "") | gsub("[\\t\\r]"; " ");',
+  '    def compacting: test("^\\\\s*/compact(\\\\s|$)|<command-name>/compact</command-name>");',
+  // a compaction (`/compact`, which Claude Code also records as a prompt of that line) is never a turn, and never
+  // the owner's presence: the relay sends it too
   '    def said: if (.message.content | type) == "string" then .message.content else ([.message.content[]? | select(.type == "text") | .text] | join("\\n")) end;',
   '    def step($o):',
   '      if $o.type == "assistant" and (($o.message.stop_reason // "") as $r | $r == "tool_use" or $r == "pause_turn" or $r == "") then',
@@ -65,7 +69,7 @@ export const TURN_SCRIPT = [
   '      elif $o.type == "user" and $o.isMeta != true and $o.isCompactSummary != true and ([$o.message.content[]?.type] | index("tool_result") | not) then',
   '        ($o | said) as $s',
   '        | if ($s | test("^\\\\[Request interrupted")) then {state: "done", id: $o.uuid, at: $o.timestamp, text: ""}',
-  '          elif ($s | test("^\\\\s*<(command-name|command-message|local-command-|bash-input|bash-stdout|bash-stderr)")) then .',
+  '          elif ($s | test("^\\\\s*<(command-name|command-message|local-command-|bash-input|bash-stdout|bash-stderr)") or ($s | compacting)) then .',
   '          else {state: "busy", id: $o.uuid, at: $o.timestamp, text: ""} end',
   '      elif $o.type == "event_msg" and $o.payload.type == "task_complete" then {state: "done", id: $o.payload.turn_id, at: $o.timestamp, text: ($o.payload.last_agent_message // "")}',
   '      elif $o.type == "event_msg" and $o.payload.type == "turn_aborted" then {state: "done", id: $o.payload.turn_id, at: $o.timestamp, text: ""}',
@@ -83,9 +87,9 @@ export const TURN_SCRIPT = [
   '    def keyed: test("^\\\\s*($|\\\\[Request interrupted|<(?!command-name>|command-message>|bash-input>|pasted_content))") | not;',
   '    def owner:',
   '      if .type == "user" then .isMeta != true and .isCompactSummary != true and ([.message.content[]?.type] | index("tool_result") | not)',
-  '        and ((.origin | kindOf) as $k | if $k != null then $k == "human" else (said | keyed) end) and (said | typed)',
+  '        and ((.origin | kindOf) as $k | if $k != null then $k == "human" else (said | keyed) end) and (said | typed) and (said | compacting | not)',
   '      elif .type == "attachment" and .attachment.type == "queued_command" then (.attachment.commandMode // "prompt") == "prompt"',
-  '        and ((.attachment.origin | kindOf) // "human") == "human" and (.attachment.prompt | textOf | keyed and typed)',
+  '        and ((.attachment.origin | kindOf) // "human") == "human" and (.attachment.prompt | textOf | keyed and typed and (compacting | not))',
   '      elif .type == "event_msg" and .payload.type == "user_message" then .payload.message // "" | typed',
   '      elif .type == "event_msg" and .payload.type == "item_completed" and .payload.item.type == "UserMessage" then .payload.item | text | typed',
   '      else false end;',

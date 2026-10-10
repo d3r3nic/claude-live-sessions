@@ -641,6 +641,19 @@ except ChildProcessError: pass
     { type: 'attachment', uuid: 'o2', timestamp: '2026-10-09T13:10:00Z', attachment: { type: 'queued_command', commandMode: 'prompt', origin: human, prompt: [{ type: 'image' }, { type: 'text', text: 'and this screen' }] } },
     { type: 'user', uuid: 'o3', origin: human, timestamp: '2026-10-09T13:20:00Z', message: { content: `READY FOR CLAUDE · x ·${' '.repeat(80_000)}y@1` } },
   ])
+  // a compaction, as Claude Code records `/compact <instructions>` (a prompt of that line, then its command):
+  // no turn, and not the owner's presence (the relay sends it too); one queued neither
+  const compacted = jsonl('c-compacted.jsonl', [
+    { type: 'user', uuid: 'k1', origin: human, timestamp: '2026-10-09T14:00:00Z', message: { content: 'build it' } },
+    { ...ended, uuid: 'k2', timestamp: '2026-10-09T14:05:00Z' },
+    { type: 'user', uuid: 'k3', timestamp: '2026-10-09T14:06:00Z', message: { content: '/compact keep the peer-coding state' } },
+    { type: 'system', subtype: 'compact_boundary', timestamp: '2026-10-09T14:06:30Z' },
+    { type: 'user', uuid: 'k4', isCompactSummary: true, timestamp: '2026-10-09T14:06:30Z', message: { content: 'This session is being continued…' } },
+    { type: 'user', uuid: 'k5', isMeta: true, timestamp: '2026-10-09T14:06:30Z', message: { content: '<local-command-caveat>…</local-command-caveat>' } },
+    { type: 'user', uuid: 'k6', timestamp: '2026-10-09T14:06:31Z', message: { content: '<command-name>/compact</command-name>\n<command-message>compact</command-message>\n<command-args>keep the peer-coding state</command-args>' } },
+    { type: 'user', uuid: 'k7', timestamp: '2026-10-09T14:06:31Z', message: { content: '<local-command-stdout>Compacted</local-command-stdout>' } },
+    { type: 'attachment', uuid: 'k8', timestamp: '2026-10-09T14:07:00Z', attachment: { type: 'queued_command', commandMode: 'prompt', origin: human, prompt: '/compact' } },
+  ])
   const typedPaste = jsonl('c-typed-paste.jsonl', [ended, { type: 'user', uuid: 'r1', origin: human, timestamp: '2026-10-09T12:00:00Z', message: { content: '<pasted_content id="p2">\nREADY FOR CLAUDE · peer-coding/feat-x R3 · feat/x@abc1234\n</pasted_content>\nand mind the login' } }])
   const typedCodex = jsonl('x-typed.jsonl', [
     { type: 'event_msg', timestamp: '2026-10-09T11:00:00Z', payload: { type: 'item_completed', item: { type: 'UserMessage', content: [{ type: 'text', text: 'fix the bug' }] } } },
@@ -656,7 +669,7 @@ except ChildProcessError: pass
     { type: 'event_msg', timestamp: '2026-10-09T12:00:01Z', payload: { type: 'task_started', turn_id: 't-3' } },
     { type: 'event_msg', timestamp: '2026-10-09T12:01:00Z', payload: { type: 'user_message', message: 'NEEDS USER · peer-coding/feat-x · feat/x@abc1234' } },
   ])
-  const out = spawnSync('/bin/sh', ['-c', r.TURN_SCRIPT, 'sh', claudeDone, claudeBusy, codexDone, codexBusy, join(scratch, 'none.jsonl'), afterCommands, interrupted, midTurn, split, codexAborted, skillBusy, skillDone, apiError, typedClaude, typedCommand, typedBash, typedCue, typedCodex, typedCodexOld, typedMarked, typedPaste, typedOdd], { encoding: 'utf8', timeout: 15_000 })
+  const out = spawnSync('/bin/sh', ['-c', r.TURN_SCRIPT, 'sh', claudeDone, claudeBusy, codexDone, codexBusy, join(scratch, 'none.jsonl'), afterCommands, interrupted, midTurn, split, codexAborted, skillBusy, skillDone, apiError, typedClaude, typedCommand, typedBash, typedCue, typedCodex, typedCodexOld, typedMarked, typedPaste, typedOdd, compacted], { encoding: 'utf8', timeout: 15_000 })
   const turns = r.parseTurns(out.stdout)
   check('turns: a command run in the session, its output, a compaction or a meta record starts no turn', turns.get(afterCommands)?.state === 'done' && turns.get(afterCommands)?.id === 'e1' && turns.get(afterCommands)?.cue?.line === cue, JSON.stringify(turns.get(afterCommands)))
   check('turns: an interrupt ends a turn, with no cue', turns.get(interrupted)?.state === 'done' && turns.get(interrupted)?.id === 'i1' && turns.get(interrupted)?.cue === undefined)
@@ -674,6 +687,7 @@ except ChildProcessError: pass
   check('typed: the owner\'s prompt or skill command, not the relay\'s cue, a task notice, an interrupt, a skill\'s text, output, meta, summary, tool result, subagent or image alone', typedAt(typedClaude) === Date.parse('2026-10-09T09:30:00Z'), new Date(typedAt(typedClaude)).toISOString())
   check('typed: marked records: the owner\'s prompt queued while the agent worked; no notice, queued notice, cue (pasted or not) or subagent\'s', typedAt(typedMarked) === Date.parse('2026-10-09T11:10:00Z'), new Date(typedAt(typedMarked)).toISOString())
   check('typed: a pasted cue with words of the owner\'s own is theirs', typedAt(typedPaste) === Date.parse('2026-10-09T12:00:00Z'))
+  check('turns: a compaction (/compact, as Claude Code records it) starts no turn and is not the owner\'s typing; the cue before it stands', turns.get(compacted)?.state === 'done' && turns.get(compacted)?.id === 'k2' && turns.get(compacted)?.cue?.line === cue && typedAt(compacted) === Date.parse('2026-10-09T14:00:00Z'), JSON.stringify(turns.get(compacted)))
   check('typed: a prompt queued with an image counts by its text; a cue with a long run of spaces stays the relay\'s, read at once; an odd origin breaks nothing', typedAt(typedOdd) === Date.parse('2026-10-09T13:10:00Z') && turns.get(typedOdd)?.state === 'busy', `${typedAt(typedOdd)} ${out.error ?? ''}`)
   check('typed: a command and a shell command typed in the session are the owner\'s', typedAt(typedCommand) === Date.parse('2026-10-09T10:06:00Z') && typedAt(typedBash) === Date.parse('2026-10-09T10:07:00Z'))
   check('typed: a cue pasted with words of the owner\'s own is theirs', typedAt(typedCue) === Date.parse('2026-10-09T10:08:00Z'))
