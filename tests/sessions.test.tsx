@@ -51,7 +51,7 @@ import {
 } from '../hooks/collect'
 import type { CodexProc, ThreadRow } from '../hooks/collect'
 import type { ClaudeSession, CodexSession, Snapshot, Workspace } from '../types'
-import { afterOwner, afterStep, cueOf, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_MAX_AGE_MS, TURN_SCRIPT } from '../hooks/relay'
+import { afterOwner, afterStep, compactStep, COMPACT_AT, cueOf, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_MAX_AGE_MS, TURN_SCRIPT } from '../hooks/relay'
 import type { Side } from '../hooks/relay'
 import { bringable, codexDir, codexFlags, CODEX_MODE_SCRIPT, CODEX_TASK_SCRIPT, codexTaskState, envOfProfile, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, threadFrom, toggled, withThreads } from '../hooks/bring'
 import {
@@ -1870,8 +1870,8 @@ describe('relay', () => {
     // null: no turn finished yet
     const claude = (turn: ReturnType<typeof done> | null = done('c0', 'Ready.'), isBusy = false): Side => ({ tool: 'claude', pane: '%1', isBusy, ...(turn === null ? {} : { turn }) })
     const codex = (turn: ReturnType<typeof done> | null = done('x0', 'Ready.'), isBusy = false): Side => ({ tool: 'codex', pane: '%2', isBusy, ...(turn === null ? {} : { turn }) })
-    expect(relaySteps(ws, { claude: claude(done('c1', READY_CODEX)), codex: codex() }, NOW)).toEqual([{ kind: 'pass', key: 'pass-c1', to: 'codex', pane: '%2', line: READY_CODEX }])
-    expect(relaySteps(ws, { claude: claude(), codex: codex(done('x1', READY_CLAUDE)) }, NOW)).toEqual([{ kind: 'pass', key: 'pass-x1', to: 'claude', pane: '%1', line: READY_CLAUDE }])
+    expect(relaySteps(ws, { claude: claude(done('c1', READY_CODEX)), codex: codex() }, NOW)).toEqual([{ kind: 'pass', key: 'pass-c1', from: 'claude', to: 'codex', pane: '%2', line: READY_CODEX }])
+    expect(relaySteps(ws, { claude: claude(), codex: codex(done('x1', READY_CLAUDE)) }, NOW)).toEqual([{ kind: 'pass', key: 'pass-x1', from: 'codex', to: 'claude', pane: '%1', line: READY_CLAUDE }])
     // the other is at work: it waits; the sender still at work, or its turn under way: nothing yet
     expect(relaySteps(ws, { claude: claude(done('c1', READY_CODEX)), codex: codex(done('x0', 'Ready.'), true) }, NOW)).toEqual([])
     // the other has not finished a turn: it may be at a question of its own (trust, an update) that Enter
@@ -1888,13 +1888,13 @@ describe('relay', () => {
     expect(relaySteps({ ...ws, relay: relayOn({ mode: 'off' }) }, { claude: claude(done('c1', READY_CODEX)), codex: codex() }, NOW)).toEqual([])
     expect(relaySteps({ name: 'RBAC' }, { claude: claude(done('c1', READY_CODEX)), codex: codex() }, NOW)).toEqual([])
     expect(relaySteps({ ...ws, relay: relayOn({ mode: 'notify' }) }, { claude: claude(done('c1', READY_CODEX)), codex: codex() }, NOW))
-      .toEqual([{ kind: 'tell', key: 'tell-c1', text: `RBAC: Claude handed over to Codex. Paste: ${READY_CODEX}`, isForOwner: false }])
+      .toEqual([{ kind: 'tell', key: 'tell-c1', from: 'claude', text: `RBAC: Claude handed over to Codex. Paste: ${READY_CODEX}`, isForOwner: false }])
     // NEEDS USER and SCOPE CLOSED are the owner's, in either mode
     const needs = 'NEEDS USER · peer-coding/feat-rbac · feat/rbac@abc1234'
-    expect(relaySteps(ws, { claude: claude(done('c2', needs)), codex: codex() }, NOW)).toEqual([{ kind: 'tell', key: 'tell-c2', text: `RBAC: Claude needs you. ${needs}`, isForOwner: true }])
+    expect(relaySteps(ws, { claude: claude(done('c2', needs)), codex: codex() }, NOW)).toEqual([{ kind: 'tell', key: 'tell-c2', from: 'claude', text: `RBAC: Claude needs you. ${needs}`, isForOwner: true }])
     // the other agent is not running in the workspace: the owner is told
     expect(relaySteps(ws, { claude: claude(done('c1', READY_CODEX)) }, NOW)).toEqual([
-      { kind: 'tell', key: 'tell-c1', text: `RBAC: Claude handed over, but Codex is not running in the workspace. Paste: ${READY_CODEX}`, isForOwner: true },
+      { kind: 'tell', key: 'tell-c1', from: 'claude', text: `RBAC: Claude handed over, but Codex is not running in the workspace. Paste: ${READY_CODEX}`, isForOwner: true },
     ])
     // after RELAY_CAP passes in a row it waits for the owner, holding a cue only where it would pass it:
     // not while the other is at work (as on the cue it has just passed), nor before its first turn
@@ -2439,6 +2439,129 @@ describe('bringing running sessions into a workspace', () => {
     // resumed anew: the relay types into it only after a turn from now
     expect(JSON.parse(files.get(WORKSPACES)!).workspaces[0].threads.codex.since).toBeGreaterThan(NOW)
     expect(runs.filter(r => r[0] === '/usr/bin/osascript' && r[4] === OPEN_SCRIPT)).toHaveLength(1)
+describe('the context guard', () => {
+  test('an agent compacts once its cue is handed on, when its context is full enough; Claude is told what to keep', async () => {
+    const ws = { name: 'RBAC', compactAt: undefined as number | undefined }
+    const side = (tool: 'claude' | 'codex', filled: number | undefined, turn: Side['turn'] = done(`${tool}-1`, tool === 'claude' ? READY_CODEX : READY_CLAUDE)): Side =>
+      ({ tool, pane: tool === 'claude' ? '%1' : '%2', isBusy: false, turn, ...(filled === undefined ? {} : { filled }) })
+    const lineOf = (step: ReturnType<typeof compactStep>) => (step?.kind === 'compact' ? step.line : undefined)
+    const passed = (from: 'claude' | 'codex') => ({ kind: 'pass' as const, key: `pass-${from}-1`, from, to: from === 'claude' ? 'codex' as const : 'claude' as const, pane: '%9', line: 'x' })
+    // Codex's cue passed, its context 62% full: /compact, once for that turn
+    expect(compactStep(ws, { codex: side('codex', 62) }, passed('codex'), 'passed')).toEqual({ kind: 'compact', key: 'compact-codex-1', to: 'codex', pane: '%2', line: '/compact', filled: 62 })
+    // passed earlier, by this or another session: still its time
+    expect(compactStep(ws, { codex: side('codex', 62) }, passed('codex'), 'taken')?.key).toBe('compact-codex-1')
+    // told to the owner (NEEDS USER, or notify mode): handed on too
+    expect(lineOf(compactStep(ws, { claude: side('claude', 55) }, { kind: 'tell', key: 'tell-claude-1', from: 'claude', text: '', isForOwner: true }, 'told')))
+      .toBe('/compact Peer-coding workspace "RBAC": keep what it is for, the peer-coding branch and its worktree, the round, where the peer-coding records are (CURRENT.md), what the owner decided, and the cue you last sent; the details stay in those records.')
+    // not handed on: not passed (a pane scrolled back, not the agent), waiting for the other's first turn, held at the cap
+    for (const outcome of ['in-mode', 'not-agent zsh', 'gone', 'failed', 'unsent']) expect(compactStep(ws, { codex: side('codex', 90) }, passed('codex'), outcome)).toBeUndefined()
+    for (const key of ['wait-codex-1', 'cap-codex-1', 'failed-pass-codex-1']) {
+      expect(compactStep(ws, { codex: side('codex', 90) }, { kind: 'tell', key, from: 'codex', text: '', isForOwner: true }, 'told')).toBeUndefined()
+    }
+    // below the line, unknown, off, or a turn under way: nothing
+    expect(compactStep(ws, { codex: side('codex', 49) }, passed('codex'), 'passed')).toBeUndefined()
+    expect(compactStep(ws, { codex: side('codex', undefined) }, passed('codex'), 'passed')).toBeUndefined()
+    expect(compactStep({ ...ws, compactAt: 0 }, { codex: side('codex', 99) }, passed('codex'), 'passed')).toBeUndefined()
+    expect(compactStep({ ...ws, compactAt: 70 }, { codex: side('codex', 65) }, passed('codex'), 'passed')).toBeUndefined()
+    expect(compactStep(ws, { codex: side('codex', 90, { state: 'busy', id: 'x2', at: NOW }) }, passed('codex'), 'passed')).toBeUndefined()
+    expect(COMPACT_AT).toBe(50)
+    // one line, whatever the workspace is called
+    expect(lineOf(compactStep({ name: 'A\nB\u0007' }, { claude: side('claude', 80) }, passed('claude'), 'passed'))).toMatch(/^\/compact Peer-coding workspace "A B ": keep/)
+    // said on the workspace's row once typed
+    const compacting = compactStep(ws, { codex: side('codex', 62) }, passed('codex'), 'passed')!
+    expect(afterStep(relayOn({ streak: 3 }), compacting, 'passed', NOW)).toEqual(relayOn({ streak: 3, status: 'compacting Codex (its context 62% full)', at: NOW }))
+    expect(afterStep(relayOn({ streak: 3, status: 'passed to Claude' }), compacting, 'in-mode', NOW)).toEqual(relayOn({ streak: 3, status: 'passed to Claude' }))
+    // a saved setting this does not read: the default stands
+    expect(workspacesFrom({ workspaces: [{ ...practice, compactAt: 70 }, { ...practice, id: 'b', compactAt: 'half' }, { ...practice, id: 'c', compactAt: 150 }] }).map(w => w.compactAt)).toEqual([70, undefined, undefined])
+  })
+
+  test('turns: how full Codex\'s context is, from its last count', async () => {
+    const turns = parseTurns(['==> /x.jsonl', `done\tturn-1\t2026-10-09T10:05:00Z\t${READY_CLAUDE}\t\t62`, '==> /y.jsonl', 'done\tturn-2\t2026-10-09T10:05:00Z\t\t\t1000', '==> /z.jsonl', 'busy\tturn-3\t2026-10-09T10:05:00Z\t\t\tx'].join('\n'))
+    expect([turns.get('/x.jsonl')?.filled, turns.get('/y.jsonl')?.filled, turns.get('/z.jsonl')?.filled]).toEqual([62, undefined, undefined])
+  })
+
+  test('the relay passes Codex\'s hand-off, then has Codex compact; Claude compacts by what its session wrote', async ($, on) => {
+    const { files, runs, clock } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, checkout: '/Users/u/dev/web-app', relay: relayOn() }] }))
+    world.tmuxPanes = 'ws-practice-rbac\tpeers\t/dev/ttys022\t%1\tclaude\nws-practice-rbac\tpeers\t/dev/ttys045\t%2\tcodex\n'
+    world.tmuxOwner = String(NOW)
+    world.paneCommands = { '%1': 'claude', '%2': 'codex' }
+    const at = (ms: number) => new Date(NOW - ms).toISOString()
+    // each line typed, once: a step tried again is taken (the ledger), never typed again
+    const typed = () => runs.filter(r => r[2] === RELAY_SCRIPT && r[4] === 'pass').map(r => [r[6], r[7], r[9]]).filter((r, i, all) => all.findIndex(o => o[0] === r[0]) === i)
+    const kept = () => JSON.parse(files.get(WORKSPACES)!).workspaces[0]
+    const collect = async () => {
+      await clock.advance(4_000)
+      await $.command.run(SESSIONS)
+    }
+    // Codex hands back with its context 62% full
+    world.turns = { 'session-104': `done\tturn-c0\t${at(300_000)}\tReady.`, '/rollouts/a.jsonl': `done\tturn-x1\t${at(60_000)}\t${READY_CLAUDE}\t\t62` }
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    expect(typed()).toEqual([['pass-turn-x1', '%1', READY_CLAUDE], ['compact-turn-x1', '%2', '/compact']])
+    expect(kept().relay.status).toBe('compacting Codex (its context 62% full)')
+    // the next collection: both taken, nothing typed again
+    await collect()
+    expect(typed()).toHaveLength(2)
+    // Claude hands over; what its session last wrote says 40%: no compaction
+    const contextFile = '/Users/u/Library/Caches/live-sessions/context/session-104.json'
+    files.set(contextFile, JSON.stringify({ percent: 40, at: NOW }))
+    world.turns = { 'session-104': `done\tturn-c1\t${at(30_000)}\t${READY_CODEX}`, '/rollouts/a.jsonl': `done\tturn-x2\t${at(120_000)}\t\t\t5` }
+    await collect()
+    expect(typed().slice(2)).toEqual([['pass-turn-c1', '%2', READY_CODEX]])
+    // at 75% the next time: Claude compacts, told what to keep
+    files.set(contextFile, JSON.stringify({ percent: 75, at: NOW }))
+    world.turns = { 'session-104': `done\tturn-c2\t${at(10_000)}\t${READY_CODEX}`, '/rollouts/a.jsonl': `done\tturn-x3\t${at(20_000)}\t\t\t5` }
+    await collect()
+    expect(typed().slice(3).map(t => [t[0], t[1], t[2]!.slice(0, 40)])).toEqual([['pass-turn-c2', '%2', READY_CODEX.slice(0, 40)], ['compact-turn-c2', '%1', '/compact Peer-coding workspace "Practice RBAC": keep'.slice(0, 40)]])
+    // off for this workspace: never
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...kept(), compactAt: 0 }] }))
+    world.turns = { 'session-104': `done\tturn-c3\t${at(5_000)}\t${READY_CODEX}`, '/rollouts/a.jsonl': `done\tturn-x4\t${at(8_000)}\t\t\t5` }
+    await collect()
+    expect(typed().slice(5)).toEqual([['pass-turn-c3', '%2', READY_CODEX]])
+  })
+
+  test('a workspace\'s Claude writes how full its context is at each turn\'s end; other sessions write nothing', async ($, on) => {
+    const { files, clock } = engine(on, machine, { termProgram: 'Apple_Terminal', selfId: 'session-104' })
+    on('session.usage', async () => ({ value: { startedAt: NOW, context: { tokens: 612_400, window: 1_000_000, percent: 61.24 }, rateLimits: [] } }))
+    // the engine's own end of a turn
+    on('turn.complete', async ($, e) => ({ text: e.answer }))
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, checkout: '/Users/u/dev/web-app', relay: relayOn() }] }))
+    world.tmuxPanes = 'ws-practice-rbac\tpeers\t/dev/ttys022\t%1\tclaude\nws-practice-rbac\tpeers\t/dev/ttys045\t%2\tcodex\n'
+    world.tmuxOwner = String(NOW)
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const turn = { answer: 'done', durationMs: 1_000, isAborted: false, turnId: 't-1', reason: 'answer' as const }
+    // a subagent's turn: nothing
+    await $.turn.complete({ ...turn, agentId: 'a-1' })
+    const contextFile = '/Users/u/Library/Caches/live-sessions/context/session-104.json'
+    expect(files.get(contextFile)).toBeUndefined()
+    await $.turn.complete(turn)
+    expect(JSON.parse(files.get(contextFile)!)).toEqual({ percent: 61, at: expect.any(Number) })
+    // out of the workspace's panes: nothing more is written
+    world.tmuxPanes = ''
+    files.delete(contextFile)
+    await clock.advance(4_000)
+    await $.command.run(SESSIONS)
+    await $.turn.complete(turn)
+    expect(files.get(contextFile)).toBeUndefined()
+  })
+
+  test('Compact at, in a workspace\'s actions: 50, 60, 70, 80 percent, off', async ($, on) => {
+    const { files } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, relay: relayOn() }] }))
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    await reveal(ui, 'ws:practice-rbac')
+    const label = async () => (await ui.find({ key: 'compact practice-rbac' }))?.props.label
+    const seen: unknown[] = [await label()]
+    for (let i = 0; i < 5; i++) {
+      await ui.press({ key: 'compact practice-rbac' })
+      seen.push(JSON.parse(files.get(WORKSPACES)!).workspaces[0].compactAt)
+    }
+    expect(seen).toEqual(['Compact at: 50% → 60%', 60, 70, 80, 0, 50])
+    await ui.unmount()
   })
 })
 

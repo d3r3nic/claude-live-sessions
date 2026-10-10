@@ -438,11 +438,14 @@ export function workspacesFrom(raw: unknown): Workspace[] {
     // a conversation to resume is run: one this does not read is dropped, and that agent starts new
     const claude = threadFrom('claude', (ws.threads as Record<string, unknown> | undefined)?.claude)
     const codex = threadFrom('codex', (ws.threads as Record<string, unknown> | undefined)?.codex)
-    const { members: _, threads: __, ...rest } = ws
+    // a compaction setting this does not read is left out: the default stands
+    const compactAt = Number.isInteger(ws.compactAt) && ws.compactAt! >= 0 && ws.compactAt! <= 100 ? ws.compactAt : undefined
+    const { members: _, threads: __, compactAt: ___, ...rest } = ws
     return {
       ...rest,
       ...(members !== undefined && members.length > 0 ? { members } : {}),
       ...(claude === undefined && codex === undefined ? {} : { threads: { ...(claude === undefined ? {} : { claude }), ...(codex === undefined ? {} : { codex }) } }),
+      ...(compactAt === undefined ? {} : { compactAt }),
     }
   })
 }

@@ -1,6 +1,6 @@
 // Pure parsing and matching: no `$`, so the tests drive it directly.
 import type { ClaudeSession, CodexSession, Place, Snapshot } from '../types'
-import { RELAY_CAP } from './relay'
+import { COMPACT_AT, RELAY_CAP } from './relay'
 import { tmuxName } from './workspaces'
 
 /** A Codex thread counts as active this long after its last write. */
@@ -909,6 +909,8 @@ export type WorkspaceView = {
   items: Item[]
   /** The relay: its mode, and what it last did, said for the owner ('' when nothing yet). */
   relay: { mode: 'auto' | 'notify' | 'off'; status: string; isWaiting: boolean }
+  /** How full an agent's context may get, in percent, before it compacts at a hand-off; 0 is off. */
+  compactAt: number
 }
 export const WORKSPACES_SCOPE = 'workspaces'
 export type RepoView = { key: string; label: string; trees: TreeView[] }
@@ -1046,6 +1048,7 @@ export function viewOf(
       // it waits once it holds a cue at the cap, not as soon as the count reaches it
       isWaiting: ws.relay !== undefined && ws.relay.mode === 'auto' && ws.relay.streak >= RELAY_CAP && ws.relay.status === 'waits for you',
     },
+    compactAt: ws.compactAt ?? COMPACT_AT,
   }))
   const created = (w: WorkspaceView) => snap.workspaces.findIndex(ws => ws.id === w.key)
   return {

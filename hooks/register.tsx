@@ -3,8 +3,8 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { ClaudeSession, CodexSession, Place, Relay, Snapshot, Thread, Workspace } from '../types'
 import type { Screen } from './workspaces'
-import { AGENT_COMMANDS, afterOwner, afterStep, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_SCRIPT } from './relay'
-import type { Side } from './relay'
+import { AGENT_COMMANDS, afterOwner, afterStep, compactStep, COMPACT_AT, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_SCRIPT } from './relay'
+import type { Side, Step } from './relay'
 import { bringable, codexDir, codexFlags, CODEX_MODE_SCRIPT, CODEX_TASK_SCRIPT, codexTaskState, JOB_COMMANDS, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, toggled, withThreads } from './bring'
 import {
   CHECKOUT_SCRIPT,
@@ -1045,6 +1045,17 @@ async function cycleRelay($: EngineInterface, id: string) {
   await refresh($, 0)
 }
 
+/** The context fills a workspace's agents may be compacted at, pressed round; 0 is off. */
+const COMPACT_STEPS = [50, 60, 70, 80, 0]
+const nextCompactAt = (now: number) => COMPACT_STEPS[(COMPACT_STEPS.indexOf(now) + 1) % COMPACT_STEPS.length] ?? COMPACT_AT
+
+/** How full an agent's context may get before it compacts at a hand-off: 50, 60, 70, 80 percent, off. */
+async function cycleCompactAt($: EngineInterface, id: string) {
+  const home = (await $.env.get('HOME')) ?? ''
+  await changeWorkspaces($, home, list => list.map(ws => (ws.id === id ? { ...ws, compactAt: nextCompactAt(ws.compactAt ?? COMPACT_AT) } : ws)))
+  await refresh($, 0)
+}
+
 /** After RELAY_CAP hand-offs in a row the relay waits; the owner lets it go on. */
 async function continueRelay($: EngineInterface, id: string) {
   const home = (await $.env.get('HOME')) ?? ''
@@ -1084,7 +1095,9 @@ async function passCues(
       const tool = p.window as 'claude' | 'codex'
       const known = fileFor(tool, tty)
       const turn = known?.file === undefined ? undefined : turns.get(known.file)
-      sides[tool] = { tool, pane: p.pane!, isBusy: (known?.isBusy ?? false) || turn?.state === 'busy', ...(turn === undefined ? {} : { turn }) }
+      // how full its context is: Codex's own records say; Claude's session says, where this plugin runs in it
+      const filled = tool === 'codex' ? turn?.filled : await claudeFilled($, home, o.claude.find(c => c.tty === tty)?.sessionId)
+      sides[tool] = { tool, pane: p.pane!, isBusy: (known?.isBusy ?? false) || turn?.state === 'busy', ...(turn === undefined ? {} : { turn }), ...(filled === undefined ? {} : { filled }) }
     }
     if (ws.relay !== undefined && afterOwner(ws.relay, sides) !== undefined) {
       // the owner typed to an agent: the count starts again, on the relay as the file has it now
@@ -1097,17 +1110,22 @@ async function passCues(
       if (!isSaved || fresh === undefined) continue
       ws = fresh
     }
-    for (const step of relaySteps(ws, sides, now)) {
-      const args = step.kind === 'pass' ? ['pass', step.pane, AGENT_COMMANDS[step.to], step.line] : ['tell', '', '', step.text]
+    const run = async (step: Step) => {
+      const args = step.kind === 'tell' ? ['tell', '', '', step.text] : ['pass', step.pane, AGENT_COMMANDS[step.to], step.line]
       const out = await $.process
         .run(['/bin/sh', '-c', RELAY_SCRIPT, 'sh', args[0]!, ledgerPath(home), step.key, args[1]!, args[2]!, args[3]!, '', 'Workspace relay'], { timeoutMs: 20_000 })
         .catch(() => ({ stdout: 'failed' }))
-      const outcome = out.stdout.trim()
-      if (outcome === 'taken') continue
+      return out.stdout.trim()
+    }
+    const saveAfter = (step: Step, outcome: string) =>
+      changeWorkspaces($, home, list => list.map(w => (w.id === ws.id && w.relay !== undefined ? { ...w, relay: afterStep(w.relay, step, outcome, now) } : w)))
+    // a step's outcome, kept on the workspace (a step taken already, by this or another session, changes nothing)
+    const settle = async (step: Step, outcome: string) => {
+      if (outcome === 'taken') return
       const next = ws.relay === undefined ? undefined : afterStep(ws.relay, step, outcome, now)
       // a pass waiting on a scrolled-back pane says so once, not at every collection
-      if (outcome === 'in-mode' && next?.status === ws.relay?.status) continue
-      await changeWorkspaces($, home, list => list.map(w => (w.id === ws.id && w.relay !== undefined ? { ...w, relay: afterStep(w.relay, step, outcome, now) } : w)))
+      if (outcome === 'in-mode' && next?.status === ws.relay?.status) return
+      await saveAfter(step, outcome)
       const why = step.kind === 'pass' ? passFailure(outcome) : undefined
       if (step.kind === 'pass' && why !== undefined) {
         await $.process
@@ -1115,7 +1133,42 @@ async function passCues(
           .catch(() => undefined)
       }
     }
+    for (const step of relaySteps(ws, sides, now)) {
+      const outcome = await run(step)
+      await settle(step, outcome)
+      // its cue handed on, an agent whose context is full enough compacts now, once for that turn
+      const compact = compactStep(ws, sides, step, outcome)
+      if (compact !== undefined) await settle(compact, await run(compact))
+    }
   }
+}
+
+/** Where a Claude session in a workspace keeps how full its context is, for the relay: written at each turn's end. */
+const contextPath = (home: string, sessionId: string) => `${home}/Library/Caches/live-sessions/context/${sessionId}.json`
+
+/** How full a Claude session's context is, in percent, as it last wrote it; undefined when it wrote none. */
+async function claudeFilled($: EngineInterface, home: string, sessionId: string | undefined): Promise<number | undefined> {
+  if (sessionId === undefined || !/^[A-Za-z0-9-]{1,64}$/.test(sessionId)) return undefined
+  const kept = await $.fs.read(contextPath(home, sessionId)).then(text => JSON.parse(text) as { percent?: unknown }).catch(() => undefined)
+  const percent = kept?.percent
+  return typeof percent === 'number' && Number.isInteger(percent) && percent >= 0 && percent <= 100 ? percent : undefined
+}
+
+/**
+ * In a Claude session that is a workspace's agent: how full its context is,
+ * written at each of its turns' ends, so the relay (in whichever session
+ * collects) knows when to have it compact.
+ */
+async function recordFilled($: EngineInterface) {
+  const home = (await $.env.get('HOME')) ?? ''
+  const id = await $.session.id()
+  const snap = await read($, snapshot)
+  const self = snap.claude.find(s => s.sessionId === id)
+  const pane = self === undefined ? undefined : snap.tmux.panes[self.tty]
+  if (pane === undefined || !snap.workspaces.some(ws => tmuxName(ws) === pane.session) || pane.window !== 'claude') return
+  const { context } = await $.session.usage()
+  if (context.percent === undefined) return
+  await $.fs.write(contextPath(home, id), JSON.stringify({ percent: Math.round(context.percent), at: await $.clock.now() }))
 }
 
 /** Forgets a workspace (the command's `rm` and the pane's Remove): its tmux session keeps running. */
@@ -1166,6 +1219,13 @@ async function tick($: EngineInterface, hasStatusLine: boolean) {
 }
 
 export const register: Register = on => {
+  // a workspace's Claude says how full its context is at each of its turns' ends: the relay has it compact at a hand-off
+  on('turn.complete', async ($, e, next) => {
+    const result = await next(e)
+    if (e.agentId === undefined) await recordFilled($).catch(() => undefined)
+    return result
+  })
+
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     // a create cut off by a reload of the plugin never holds the next one back
@@ -1562,6 +1622,7 @@ export const register: Register = on => {
                   // by a click only: turned on, the relay types into the agents
                   ...(ws.isAttached ? [<Button key={`hide ${ws.key}`} label="Hide window" onPress={() => void hideWorkspaceById($, ws.key)} />] : []),
                   <Button key={`relay-bar ${ws.key}`} label={`Relay: ${ws.relay.mode} → ${RELAY_NEXT[ws.relay.mode]}`} onPress={() => void cycleRelay($, ws.key)} />,
+                  <Button key={`compact ${ws.key}`} label={`Compact at: ${ws.compactAt === 0 ? 'off' : `${ws.compactAt}%`} → ${nextCompactAt(ws.compactAt) === 0 ? 'off' : `${nextCompactAt(ws.compactAt)}%`}`} onPress={() => void cycleCompactAt($, ws.key)} />,
                   ...moves(WORKSPACES_SCOPE, view.workspaces.map(w => w.key), ws.key),
                   <Button
                     key={`remove ${ws.key}`}

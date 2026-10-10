@@ -672,6 +672,14 @@ except ChildProcessError: pass
   ])
   // a prompt that only quotes such a record is the owner's, and a turn
   const quotesCompact = jsonl('c-quotes-compact.jsonl', [ended, { type: 'user', uuid: 'q1', origin: human, timestamp: '2026-10-09T14:10:00Z', message: { content: 'Audit this: a <command-name>/compact</command-name> record and /compactness' } }])
+  // how full Codex's context is: its last count against its window; a count with no figures leaves it
+  const codexFilled = jsonl('x-filled.jsonl', [
+    { type: 'event_msg', timestamp: '2026-10-09T15:00:00Z', payload: { type: 'task_started', turn_id: 't-9' } },
+    { type: 'event_msg', timestamp: '2026-10-09T15:00:05Z', payload: { type: 'token_count', info: { last_token_usage: { total_tokens: 64_600 }, model_context_window: 258_400 } } },
+    { type: 'event_msg', timestamp: '2026-10-09T15:01:00Z', payload: { type: 'token_count', info: { last_token_usage: { total_tokens: 163_563 }, model_context_window: 258_400 } } },
+    { type: 'event_msg', timestamp: '2026-10-09T15:01:01Z', payload: { type: 'token_count', info: null } },
+    { type: 'event_msg', timestamp: '2026-10-09T15:01:02Z', payload: { type: 'task_complete', turn_id: 't-9', last_agent_message: 'READY FOR CLAUDE · x · y@1' } },
+  ])
   const typedPaste = jsonl('c-typed-paste.jsonl', [ended, { type: 'user', uuid: 'r1', origin: human, timestamp: '2026-10-09T12:00:00Z', message: { content: '<pasted_content id="p2">\nREADY FOR CLAUDE · peer-coding/feat-x R3 · feat/x@abc1234\n</pasted_content>\nand mind the login' } }])
   const typedCodex = jsonl('x-typed.jsonl', [
     { type: 'event_msg', timestamp: '2026-10-09T11:00:00Z', payload: { type: 'item_completed', item: { type: 'UserMessage', content: [{ type: 'text', text: 'fix the bug' }] } } },
@@ -687,7 +695,7 @@ except ChildProcessError: pass
     { type: 'event_msg', timestamp: '2026-10-09T12:00:01Z', payload: { type: 'task_started', turn_id: 't-3' } },
     { type: 'event_msg', timestamp: '2026-10-09T12:01:00Z', payload: { type: 'user_message', message: 'NEEDS USER · peer-coding/feat-x · feat/x@abc1234' } },
   ])
-  const out = spawnSync('/bin/sh', ['-c', r.TURN_SCRIPT, 'sh', claudeDone, claudeBusy, codexDone, codexBusy, join(scratch, 'none.jsonl'), afterCommands, interrupted, midTurn, split, codexAborted, skillBusy, skillDone, apiError, typedClaude, typedCommand, typedBash, typedCue, typedCodex, typedCodexOld, typedMarked, typedPaste, typedOdd, compacted, quotesCompact], { encoding: 'utf8', timeout: 15_000 })
+  const out = spawnSync('/bin/sh', ['-c', r.TURN_SCRIPT, 'sh', claudeDone, claudeBusy, codexDone, codexBusy, join(scratch, 'none.jsonl'), afterCommands, interrupted, midTurn, split, codexAborted, skillBusy, skillDone, apiError, typedClaude, typedCommand, typedBash, typedCue, typedCodex, typedCodexOld, typedMarked, typedPaste, typedOdd, compacted, quotesCompact, codexFilled], { encoding: 'utf8', timeout: 15_000 })
   const turns = r.parseTurns(out.stdout)
   check('turns: a command run in the session, its output, a compaction or a meta record starts no turn', turns.get(afterCommands)?.state === 'done' && turns.get(afterCommands)?.id === 'e1' && turns.get(afterCommands)?.cue?.line === cue, JSON.stringify(turns.get(afterCommands)))
   check('turns: an interrupt ends a turn, with no cue', turns.get(interrupted)?.state === 'done' && turns.get(interrupted)?.id === 'i1' && turns.get(interrupted)?.cue === undefined)
@@ -706,6 +714,7 @@ except ChildProcessError: pass
   check('typed: marked records: the owner\'s prompt queued while the agent worked; no notice, queued notice, cue (pasted or not) or subagent\'s', typedAt(typedMarked) === Date.parse('2026-10-09T11:10:00Z'), new Date(typedAt(typedMarked)).toISOString())
   check('typed: a pasted cue with words of the owner\'s own is theirs', typedAt(typedPaste) === Date.parse('2026-10-09T12:00:00Z'))
   check('turns: a prompt quoting a /compact record is the owner\'s, and starts a turn', turns.get(quotesCompact)?.state === 'busy' && typedAt(quotesCompact) === Date.parse('2026-10-09T14:10:00Z'), JSON.stringify(turns.get(quotesCompact)))
+  check('turns: how full Codex\'s context is, from its last count; none for Claude\'s records', turns.get(codexFilled)?.filled === 63 && turns.get(codexFilled)?.cue?.to === 'claude' && turns.get(claudeDone)?.filled === undefined, String(turns.get(codexFilled)?.filled))
   check('turns: a compaction (/compact, as Claude Code records it) starts no turn and is not the owner\'s typing; the cue before it stands', turns.get(compacted)?.state === 'done' && turns.get(compacted)?.id === 'k2' && turns.get(compacted)?.cue?.line === cue && typedAt(compacted) === Date.parse('2026-10-09T14:00:00Z'), JSON.stringify(turns.get(compacted)))
   check('typed: a prompt queued with an image counts by its text; a cue with a long run of spaces stays the relay\'s, read at once; an odd origin breaks nothing', typedAt(typedOdd) === Date.parse('2026-10-09T13:10:00Z') && turns.get(typedOdd)?.state === 'busy', `${typedAt(typedOdd)} ${out.error ?? ''}`)
   check('typed: a command and a shell command typed in the session are the owner\'s', typedAt(typedCommand) === Date.parse('2026-10-09T10:06:00Z') && typedAt(typedBash) === Date.parse('2026-10-09T10:07:00Z'))
@@ -716,7 +725,7 @@ except ChildProcessError: pass
   const real = readdirSync(join(home, '.claude', 'projects'), { withFileTypes: true }).filter(d => d.isDirectory()).slice(0, 3)
     .flatMap(d => readdirSync(join(home, '.claude', 'projects', d.name)).filter(f => f.endsWith('.jsonl')).slice(0, 2).map(f => join(home, '.claude', 'projects', d.name, f)))
   const realOut = spawnSync('/bin/sh', ['-c', r.TURN_SCRIPT, 'sh', ...real], { encoding: 'utf8' }).stdout
-  check('turns: this Mac\'s own transcripts read in that form', realOut.split('\n').filter(l => l !== '').every(l => l.startsWith('==> ') || /^(done|busy)\t[A-Za-z0-9-]+\t\S+\t[^\t]*\t(\S+)?$/.test(l)), `${real.length} files`)
+  check('turns: this Mac\'s own transcripts read in that form', realOut.split('\n').filter(l => l !== '').every(l => l.startsWith('==> ') || /^(done|busy)\t[A-Za-z0-9-]+\t\S+\t[^\t]*\t\S*\t(\d{1,3})?$/.test(l)), `${real.length} files`)
 
   const socket = `live-sessions-relay-${process.pid}`
   // a private server that reads no tmux.conf: the person's plugins (a session restore) never run in it

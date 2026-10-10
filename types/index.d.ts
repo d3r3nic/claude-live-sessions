@@ -88,6 +88,11 @@ export type Workspace = {
    * in from where it ran, or the one last seen in its pane. None: it starts new.
    */
   threads?: { claude?: Thread; codex?: Thread }
+  /**
+   * How full an agent's context may get, in percent, before it compacts once its cue is handed on;
+   * 0 is off. Unset: COMPACT_AT (50).
+   */
+  compactAt?: number
 }
 
 /**

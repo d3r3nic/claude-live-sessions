@@ -44,7 +44,8 @@ export function cueOf(line: string): Cue | undefined {
  *   start nothing.
  * - A Codex rollout: `task_complete` or `turn_aborted` ends a turn,
  *   `task_started` starts one.
- * A fifth field is when the owner last typed into the agent: a prompt (one
+ * A sixth field is how full a Codex conversation's context is, in percent,
+ * from its last token count. A fifth field is when the owner last typed into the agent: a prompt (one
  * typed while it works too), a command (`/model`, `/peer-coding …`, `!ls`)
  * or a paste; not a line that starts with a cue and is all there is (the
  * relay's, pasted or not), a compaction (`/compact`, which the relay may
@@ -93,15 +94,21 @@ export const TURN_SCRIPT = [
   '      elif .type == "event_msg" and .payload.type == "user_message" then .payload.message // "" | typed',
   '      elif .type == "event_msg" and .payload.type == "item_completed" and .payload.item.type == "UserMessage" then .payload.item | text | typed',
   '      else false end;',
-  '    reduce (inputs | fromjson? | select(type == "object" and .isSidechain != true)) as $o ({t: null, o: null};',
-  '      {t: (.t | step($o)), o: (if ($o | owner) then $o.timestamp else .o end)})',
-  '    | .o as $typed | .t | select(. != null) | [.state, .id, .at, ((.text // "") | cue), $typed] | map(. // "" | tostring) | join("\\t")',
+  // how full Codex's context is: its last count of tokens against its model's window, as a whole percentage
+  '    def filled: .payload.info | if type == "object" and (.model_context_window // 0) > 0 then ((.last_token_usage.total_tokens // 0) * 100 / .model_context_window | floor) else null end;',
+  '    reduce (inputs | fromjson? | select(type == "object" and .isSidechain != true)) as $o ({t: null, o: null, c: null};',
+  '      {t: (.t | step($o)), o: (if ($o | owner) then $o.timestamp else .o end),',
+  '       c: (if $o.type == "event_msg" and $o.payload.type == "token_count" then ($o | filled) // .c else .c end)})',
+  '    | .o as $typed | .c as $filled | .t | select(. != null) | [.state, .id, .at, ((.text // "") | cue), $typed, $filled] | map(. // "" | tostring) | join("\\t")',
   "  ' 2>/dev/null",
   'done',
 ].join('\n')
 
-/** An agent's last turn; `typedAt`, when the owner last typed into the agent (as far back as the pipeline reads). */
-export type Turn = { state: 'done' | 'busy'; id: string; at: number; cue?: Cue; typedAt?: number }
+/**
+ * An agent's last turn; `typedAt`, when the owner last typed into the agent (as far back as the pipeline
+ * reads); `filled`, how full a Codex conversation's context is, in percent.
+ */
+export type Turn = { state: 'done' | 'busy'; id: string; at: number; cue?: Cue; typedAt?: number; filled?: number }
 
 /** TURN_SCRIPT's answer: each file's last turn. */
 export function parseTurns(stdout: string): Map<string, Turn> {
@@ -112,18 +119,19 @@ export function parseTurns(stdout: string): Map<string, Turn> {
       file = line.slice(4)
       continue
     }
-    const [state, id = '', iso = '', cueLine = '', typedIso = ''] = line.split('\t')
+    const [state, id = '', iso = '', cueLine = '', typedIso = '', filledText = ''] = line.split('\t')
     const at = Date.parse(iso)
     if (file === '' || (state !== 'done' && state !== 'busy') || !/^[A-Za-z0-9-]{1,80}$/.test(id) || Number.isNaN(at)) continue
     const cue = state === 'done' ? cueOf(cueLine) : undefined
     const typedAt = Date.parse(typedIso)
-    turns.set(file, { state, id, at, ...(cue === undefined ? {} : { cue }), ...(Number.isNaN(typedAt) ? {} : { typedAt }) })
+    const filled = /^\d{1,3}$/.test(filledText) ? Number(filledText) : undefined
+    turns.set(file, { state, id, at, ...(cue === undefined ? {} : { cue }), ...(Number.isNaN(typedAt) ? {} : { typedAt }), ...(filled === undefined ? {} : { filled }) })
   }
   return turns
 }
 
 /** One agent of a workspace: its tmux pane, its last turn as its own records say, and whether it is at work. */
-export type Side = { tool: Tool; pane: string; turn?: Turn; isBusy: boolean }
+export type Side = { tool: Tool; pane: string; turn?: Turn; isBusy: boolean; filled?: number }
 
 /**
  * What the relay does now. `key` is the step's own: done once, whichever
@@ -132,8 +140,9 @@ export type Side = { tool: Tool; pane: string; turn?: Turn; isBusy: boolean }
  * - `tell`: tell the owner.
  */
 export type Step =
-  | { kind: 'pass'; key: string; to: Tool; pane: string; line: string }
-  | { kind: 'tell'; key: string; text: string; isForOwner: boolean }
+  | { kind: 'pass'; key: string; from?: Tool; to: Tool; pane: string; line: string }
+  | { kind: 'tell'; key: string; from?: Tool; text: string; isForOwner: boolean }
+  | { kind: 'compact'; key: string; to: Tool; pane: string; line: string; filled: number }
 
 /**
  * The relay's steps for one workspace. An agent whose turn ended (since the
@@ -154,15 +163,15 @@ export function relaySteps(ws: Pick<Workspace, 'name' | 'relay'> & Partial<Pick<
     const cue = turn.cue
     if (cue.kind !== 'ready') {
       const what = cue.kind === 'needs-user' ? 'needs you' : 'closed its scope and waits for you'
-      steps.push({ kind: 'tell', key: `tell-${turn.id}`, text: `${ws.name}: ${NAME[tool]} ${what}. ${cue.line}`, isForOwner: true })
+      steps.push({ kind: 'tell', key: `tell-${turn.id}`, from: tool, text: `${ws.name}: ${NAME[tool]} ${what}. ${cue.line}`, isForOwner: true })
       continue
     }
     if (cue.to === tool) continue
     const other = sides[cue.to]
     if (relay.mode === 'notify') {
-      steps.push({ kind: 'tell', key: `tell-${turn.id}`, text: `${ws.name}: ${NAME[tool]} handed over to ${NAME[cue.to]}. Paste: ${cue.line}`, isForOwner: false })
+      steps.push({ kind: 'tell', key: `tell-${turn.id}`, from: tool, text: `${ws.name}: ${NAME[tool]} handed over to ${NAME[cue.to]}. Paste: ${cue.line}`, isForOwner: false })
     } else if (other === undefined) {
-      steps.push({ kind: 'tell', key: `tell-${turn.id}`, text: `${ws.name}: ${NAME[tool]} handed over, but ${NAME[cue.to]} is not running in the workspace. Paste: ${cue.line}`, isForOwner: true })
+      steps.push({ kind: 'tell', key: `tell-${turn.id}`, from: tool, text: `${ws.name}: ${NAME[tool]} handed over, but ${NAME[cue.to]} is not running in the workspace. Paste: ${cue.line}`, isForOwner: true })
     } else if (other.turn === undefined || other.turn.at < (ws.threads?.[cue.to]?.since ?? -Infinity)) {
       // an agent that has not finished a turn (one resuming its conversation: a turn in this workspace) may be at a
       // question of its own (trust, an update), which Enter would answer
@@ -173,10 +182,36 @@ export function relaySteps(ws: Pick<Workspace, 'name' | 'relay'> & Partial<Pick<
       // a cue already passed is never held: the ledger takes this step when it has its pass (RELAY_SCRIPT)
       steps.push({ kind: 'tell', key: `cap-${turn.id}`, text: `${ws.name}: the relay passed ${relay.streak} hand-offs in a row and waits for you; type to either agent, or press continue in /sessions, to pass the next.`, isForOwner: true })
     } else {
-      steps.push({ kind: 'pass', key: `pass-${turn.id}`, to: cue.to, pane: other.pane, line: cue.line })
+      steps.push({ kind: 'pass', key: `pass-${turn.id}`, from: tool, to: cue.to, pane: other.pane, line: cue.line })
     }
   }
   return steps
+}
+
+/** How full an agent's context may get, in percent, before it is compacted once its cue is handed on. */
+export const COMPACT_AT = 50
+
+/**
+ * Compacting an agent at a point that suits it: once its turn's cue is
+ * handed on (passed to the other agent, or told to the owner), its records
+ * are written and it waits, so when its context is at least the workspace's
+ * `compactAt` percent full (COMPACT_AT unless set; 0 is off), `/compact` is
+ * typed into its pane, once for that turn. Claude is told what to keep; the
+ * rest is in the peer-coding records. `handed` is the step that handed the
+ * cue on and how it went.
+ */
+export function compactStep(ws: Pick<Workspace, 'name' | 'compactAt'>, sides: Partial<Record<Tool, Side>>, handed: Step, outcome: string): Step | undefined {
+  if (handed.kind === 'compact' || handed.from === undefined || !/^(pass|tell)-/.test(handed.key) || !['passed', 'told', 'taken'].includes(outcome)) return undefined
+  const side = sides[handed.from]
+  const at = ws.compactAt ?? COMPACT_AT
+  const turn = side?.turn
+  if (side === undefined || at <= 0 || turn?.state !== 'done' || turn.cue === undefined || side.filled === undefined || side.filled < at) return undefined
+  // one line, as typed: no control character from the workspace's name
+  const name = ws.name.replace(/[\u0000-\u001f\u007f]/g, ' ')
+  const line = side.tool === 'codex'
+    ? '/compact'
+    : `/compact Peer-coding workspace "${name}": keep what it is for, the peer-coding branch and its worktree, the round, where the peer-coding records are (CURRENT.md), what the owner decided, and the cue you last sent; the details stay in those records.`
+  return { kind: 'compact', key: `compact-${turn.id}`, to: side.tool, pane: side.pane, line, filled: side.filled }
 }
 
 /** The agent a pane must have in its foreground for the relay to type into it: never only a shell. */
@@ -259,6 +294,7 @@ export function afterOwner(relay: Relay, sides: Partial<Record<Tool, Side>>): Re
 
 /** The relay's state after a step: a pass counts toward the cap; a cue for the owner starts the count again. */
 export function afterStep(relay: Relay, step: Step, outcome: string, now: number): Relay {
+  if (step.kind === 'compact') return outcome === 'passed' ? { ...relay, status: `compacting ${NAME[step.to]} (its context ${step.filled}% full)`, at: now } : relay
   if (step.kind === 'pass' && outcome === 'passed') return { ...relay, streak: relay.streak + 1, status: `passed to ${NAME[step.to]}`, at: now }
   if (step.kind === 'pass' && outcome === 'in-mode') return { ...relay, status: `waits: ${NAME[step.to]}'s pane is scrolled back (copy mode; q leaves it)`, at: now }
   if (step.kind === 'pass') return { ...relay, status: `could not pass to ${NAME[step.to]}`, at: now }
