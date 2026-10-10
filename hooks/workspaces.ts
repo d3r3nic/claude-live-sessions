@@ -478,11 +478,13 @@ export function workspacesFrom(raw: unknown): Workspace[] {
 /**
  * A branch's name, if git's rules for one allow it (git check-ref-format:
  * no `..`, `@{`, `//`, part starting with `.`, ending `/`, `.` or `.lock`,
- * nor `@` alone) and it shows as it is (no space, control, invisible or
- * direction character); at most 200 characters, not starting with a dash.
+ * nor `@` alone) and it shows as it is: no space, no control or format
+ * character (Unicode Cc, Cf: direction marks, zero widths, tag characters)
+ * and none Unicode says to ignore in display; at most 200 characters, not
+ * starting with a dash.
  */
 export function branchFrom(raw: unknown): string | undefined {
-  if (typeof raw !== 'string' || !/^[^\s\x00-\x1f\x7f-\x9f\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff~^:?*[\\]{1,200}$/.test(raw)) return undefined
+  if (typeof raw !== 'string' || !/^[^\s\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}~^:?*[\\]{1,200}$/u.test(raw)) return undefined
   const isGits = !raw.startsWith('-') && raw !== '@' && !raw.includes('..') && !raw.includes('@{') && !raw.includes('//') &&
     !raw.endsWith('/') && !raw.endsWith('.') && !raw.split('/').some(part => part.startsWith('.') || part.endsWith('.lock'))
   return isGits ? raw : undefined
@@ -560,25 +562,31 @@ export function parseWorktrees(stdout: string): { path: string; branch: string }
 }
 
 /**
- * Where the folder "$1" is in its repository, `main` (the main checkout, or
- * in it) or `linked` (a linked worktree), then the branch checked out there
- * by its short name (none for a detached HEAD); nothing outside git.
+ * Where the folder "$1" is in its repository, one line each: `main` (the
+ * main checkout, or in it) or `linked` (a linked worktree); the branch
+ * checked out there by its short name (empty for a detached HEAD); and the
+ * repository's default branch as its origin names it (empty if unknown).
+ * Nothing outside git.
  */
 export const BRANCH_SCRIPT = [
   'g() { git -c core.hooksPath=/dev/null -c core.fsmonitor= "$@"; }',
   'own=$(g -C "$1" rev-parse --path-format=absolute --git-dir) || exit 1',
   'common=$(g -C "$1" rev-parse --path-format=absolute --git-common-dir) || exit 1',
   'if [ "$own" = "$common" ]; then echo main; else echo linked; fi',
-  'g -C "$1" symbolic-ref --short -q HEAD',
-  'exit 0',
+  'b=$(g -C "$1" symbolic-ref --short -q HEAD); echo "$b"',
+  'd=$(g -C "$1" symbolic-ref --short -q refs/remotes/origin/HEAD); echo "${d#origin/}"',
 ].join('\n')
 
-/** BRANCH_SCRIPT's answer: whether the folder is the main checkout, and its branch; undefined outside git. */
-export function headOf(stdout: string): { isMain: boolean; branch?: string } | undefined {
-  const [where, name = ''] = stdout.split('\n')
+/**
+ * BRANCH_SCRIPT's answer, undefined outside git: whether the folder is the
+ * main checkout, its branch, and whether that branch is the repository's
+ * default one.
+ */
+export function headOf(stdout: string): { isMain: boolean; branch?: string; isDefault: boolean } | undefined {
+  const [where, name = '', byOrigin = ''] = stdout.split('\n')
   if (where !== 'main' && where !== 'linked') return undefined
   const branch = branchFrom(name)
-  return { isMain: where === 'main', ...(branch === undefined ? {} : { branch }) }
+  return { isMain: where === 'main', ...(branch === undefined ? {} : { branch }), isDefault: branch !== undefined && branch === branchFrom(byOrigin) }
 }
 
 /** Step 2 of a first prompt when the owner chose the branch: go on with it there, and start no other. */

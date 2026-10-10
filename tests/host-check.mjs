@@ -565,11 +565,16 @@ except ChildProcessError: pass
   const head = dir => w.headOf(spawnSync('/bin/sh', ['-c', w.BRANCH_SCRIPT, 'sh', dir], { encoding: 'utf8', env }).stdout)
   const seen = [head(`${repo}-worktrees/feat-a`), head(`${repo}-worktrees/probe`), head(repo), head(join(repo, 'sub')), head(scratch)]
   check('go on: the branch checked out where the folder is; none for a detached HEAD; the main checkout (or a folder in it) known as such; nothing outside git',
-    JSON.stringify(seen) === JSON.stringify([{ isMain: false, branch: 'feat/a' }, { isMain: false }, { isMain: true, branch: 'main' }, { isMain: true, branch: 'main' }, undefined]), JSON.stringify(seen))
+    JSON.stringify(seen) === JSON.stringify([{ isMain: false, branch: 'feat/a', isDefault: false }, { isMain: false, isDefault: false }, { isMain: true, branch: 'main', isDefault: false }, { isMain: true, branch: 'main', isDefault: false }, undefined]), JSON.stringify(seen))
+  // the repository's default branch, as its origin names it, checked out in a linked worktree
+  git('-C', repo, 'symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main')
+  git('-C', repo, 'worktree', 'add', '-q', '-f', `${repo}-worktrees/on-main`, 'main')
+  const onDefault = [head(`${repo}-worktrees/on-main`), head(`${repo}-worktrees/feat-a`)]
+  check('go on: a linked worktree on the default branch known as such', JSON.stringify(onDefault) === JSON.stringify([{ isMain: false, branch: 'main', isDefault: true }, { isMain: false, branch: 'feat/a', isDefault: false }]), JSON.stringify(onDefault))
   // a folder named with a newline and a field: offered only as the folder it is (the list is read NUL-separated)
   git('-C', repo, 'worktree', 'add', '-q', '--detach', `${repo}-worktrees/x\nbranch refs/heads/evil`)
   const forged = w.parseWorktrees(spawnSync('/bin/sh', ['-c', w.WORKTREES_SCRIPT, 'sh', repo], { encoding: 'utf8', env }).stdout)
-  check('go on: a folder whose name forges a branch line is not offered', JSON.stringify(forged.map(x => x.branch)) === '["feat/a"]', JSON.stringify(forged))
+  check('go on: a folder whose name forges a branch line is not offered', JSON.stringify(forged.map(x => x.branch)) === '["feat/a","main"]' && !forged.some(x => x.path.includes('\n')), JSON.stringify(forged))
   // the projects the form offers: main checkouts only; never what is inside a .git, a hidden folder or a worktrees folder
   const fakeHome = join(scratch, 'projects-home')
   for (const d of ['dev/a/.git/inner/.git', 'dev/b/.git', 'dev/b-worktrees/feat/.git', '.hidden/c/.git', 'Library/d/.git']) mkdirSync(join(fakeHome, d), { recursive: true })

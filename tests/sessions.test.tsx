@@ -3272,9 +3272,14 @@ describe('going on with a branch', () => {
     expect(['feat/a', 'fix/ü-1', 'release-2.0', 'a.b/c'].map(branchFrom)).toEqual(['feat/a', 'fix/ü-1', 'release-2.0', 'a.b/c'])
     for (const bad of ['', 'a b', 'a\tb', 'x\u001b[31m', 'x\u009b', 'x\u202ey', 'x\u2066', 'x\u200by', 'x\u061cy', '-rf', 'a:b', 'a~b', 'a^b', 'a?b', 'a*b', 'a[b', 'a\\b',
       'a..b', 'x.lock', 'a/x.lock/b', '@', 'a@{b', 'a//b', '.x', 'a/.x', 'x/', 'x.', 'x'.repeat(201), 7, undefined]) expect(branchFrom(bad)).toBeUndefined()
+    // every character Unicode calls a format one, or says to ignore in display: a tag character (text hidden from a
+    // reader), a soft hyphen, a combining grapheme joiner, a deprecated format, an annotation, a Hangul filler, a
+    // Mongolian vowel separator
+    for (const code of [0xe0041, 0xad, 0x34f, 0x206a, 0xfff9, 0x3164, 0x180e]) expect(branchFrom(`a${String.fromCodePoint(code)}b`)).toBeUndefined()
     // where a folder is: the main checkout, or a linked worktree, and its branch
-    expect([headOf('main\nmain\n'), headOf('linked\nfix/build\n'), headOf('linked\n'), headOf('linked\n-x\n'), headOf('')])
-      .toEqual([{ isMain: true, branch: 'main' }, { isMain: false, branch: 'fix/build' }, { isMain: false }, { isMain: false }, undefined])
+    expect([headOf('main\nmain\n\n'), headOf('linked\nfix/build\n\n'), headOf('linked\n\n\n'), headOf('linked\n-x\n\n'), headOf(''), headOf('linked\nmain\nmain\n'), headOf('linked\nfix/build\nmain\n')])
+      .toEqual([{ isMain: true, branch: 'main', isDefault: false }, { isMain: false, branch: 'fix/build', isDefault: false }, { isMain: false, isDefault: false }, { isMain: false, isDefault: false }, undefined,
+        { isMain: false, branch: 'main', isDefault: true }, { isMain: false, branch: 'fix/build', isDefault: false }])
     expect(workspacesFrom({ workspaces: [{ ...practice, branch: 'feat/rbac' }, { ...practice, id: 'b', branch: 'a b' }] })).toEqual([{ ...practice, branch: 'feat/rbac' }, { ...practice, id: 'b' }])
   })
 
@@ -3316,12 +3321,16 @@ describe('going on with a branch', () => {
       expect((await $.command.run({ ...SESSIONS, command: 'workspace', args: `new ${folder} work Main --go-on --for more` })).text)
         .toBe(`Not done: ${folder!.replace('~', HOME)} is the repository's main checkout: go on with a branch in its own worktree (in ${checkout}-worktrees/).`)
     }
+    // a worktree with the repository's default branch checked out: never gone on with
+    world.heads['/Users/u/dev/build'] = 'linked\nmain\nmain\n'
+    expect((await $.command.run({ ...SESSIONS, command: 'workspace', args: 'new ~/dev/build work Main --go-on --for more' })).text)
+      .toBe('Not done: main, checked out in /Users/u/dev/build, is the repository\'s default branch: go on with a branch of its own.')
     expect(JSON.parse(files.get(WORKSPACES)!).workspaces).toHaveLength(1)
     expect(opened()).toBe(1)
     // without --go-on no branch is read, and the agents start one
     await $.command.run({ ...SESSIONS, command: 'workspace', args: 'new ~/dev/web-app work Fresh --for something new' })
-    // (one read for each --go-on above: 1 made, 2 refused for their branch, 2 for the main checkout; none here)
-    expect(runs.filter(r => r[2] === BRANCH_SCRIPT)).toHaveLength(5)
+    // (one read for each --go-on above: 1 made, 2 refused for their branch, 2 for the main checkout, 1 for the default branch; none here)
+    expect(runs.filter(r => r[2] === BRANCH_SCRIPT)).toHaveLength(6)
     expect(JSON.parse(files.get(WORKSPACES)!).workspaces[1].branch).toBeUndefined()
   })
 

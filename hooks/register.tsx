@@ -896,6 +896,7 @@ async function makeWorkspace($: EngineInterface, w: NewWorkspace): Promise<{ isC
     if (head?.isMain === true) return fail(`${typed} is the repository's main checkout: go on with a branch in its own worktree (in ${checkout ?? '<checkout>'}-worktrees/)`)
     branch = head?.branch
     if (branch === undefined) return fail(`${typed} has no branch checked out to go on with`)
+    if (head?.isDefault === true) return fail(`${branch}, checked out in ${typed}, is the repository's default branch: go on with a branch of its own`)
     if (w.goOnBranch !== undefined && w.goOnBranch !== branch) return fail(`the branch checked out in ${typed} is now ${branch}, not ${w.goOnBranch}; choose again`)
   }
   await refresh($, VISIBLE_MAX_AGE_MS)
