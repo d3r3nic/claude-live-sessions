@@ -66,6 +66,7 @@ import {
   rankProjects,
   sessionSetup,
   defaultPlacement,
+  isOnScreen,
   hideBinding,
   hidePath,
   placementFrom,
@@ -289,7 +290,7 @@ function machine(argv: readonly string[], env: unknown): Run {
         if (id !== undefined && made !== null) world.started.set(made[1]!, made[2]!)
         return ok('opened\n')
       }
-      if (argv[4] === SCREEN_SCRIPT) return ok(JSON.stringify({ screen: { x: 0, y: 30, width: 2560, height: 1410 }, fontSize: argv[5] === 'ttys022' ? 12 : 0 }))
+      if (argv[4] === SCREEN_SCRIPT) return ok(JSON.stringify({ screens: [{ x: 0, y: 30, width: 2560, height: 1410 }, { x: 2560, y: 0, width: 1920, height: 1080 }], fontSize: argv[5] === 'ttys022' ? 12 : 0 }))
       if (argv[4] === HAS_TAB_SCRIPT) return ok(TABS.has(argv[5] ?? '') && !world.noTab.has(argv[5] ?? '') ? 'yes\n' : '\n')
       if (argv[4] !== BACKGROUND_SCRIPT) return { exitCode: 1, stdout: '', stderr: 'unexpected script' }
       // Terminal.app's tab on ttys022 has the Novel profile's background; the others another
@@ -1398,8 +1399,8 @@ describe('workspaces', () => {
     expect(files.get(openScriptPath(HOME, 'practice-rbac'))).toBe(`${openCommand(practice, HOME)}\n`)
     await $.command.run({ ...SESSIONS, command: 'workspace', args: 'rm practice-rbac' })
     expect(JSON.parse(files.get(WORKSPACES)!).workspaces).toEqual([])
-    // its first prompts go with it: a later workspace of the same name never starts on them
-    expect(world.removed).toEqual([promptPath(HOME, 'practice-rbac', 'claude'), promptPath(HOME, 'practice-rbac', 'codex')])
+    // its first prompts, window place and open file go with it: a later workspace of the same name never starts on them
+    expect(world.removed).toEqual([promptPath(HOME, 'practice-rbac', 'claude'), promptPath(HOME, 'practice-rbac', 'codex'), placementPath(HOME, 'ws-practice-rbac'), openScriptPath(HOME, 'practice-rbac')])
   })
 
   test('/workspace refuses what it cannot make', async ($, on) => {
@@ -1585,7 +1586,7 @@ describe('workspaces, from the pane', () => {
     await ui.press({ key: 'remove practice-rbac' })
     expect(JSON.parse(files.get(WORKSPACES)!).workspaces.map((w: Workspace) => w.id)).toEqual(['other'])
     expect(toasts.at(-1)).toMatch(/^Removed Practice RBAC \(work, \/Users\/u\/dev\/web-app\)\. Its agents keep running in tmux session ws-practice-rbac/)
-    expect(world.removed).toEqual([promptPath(HOME, 'practice-rbac', 'claude'), promptPath(HOME, 'practice-rbac', 'codex')])
+    expect(world.removed).toEqual([promptPath(HOME, 'practice-rbac', 'claude'), promptPath(HOME, 'practice-rbac', 'codex'), placementPath(HOME, 'ws-practice-rbac'), openScriptPath(HOME, 'practice-rbac')])
     await ui.unmount()
   })
 
@@ -2094,6 +2095,10 @@ describe('workspace windows open where they were', () => {
     for (const bad of [null, 'x', { x: 0, y: 0, width: 100, height: 800 }, { x: 'a', y: 0, width: 1200, height: 800 }, { y: 0, width: 1200, height: 800 }]) expect(placementFrom(bad)).toBeUndefined()
     expect(defaultPlacement({ x: 0, y: 30, width: 2560, height: 1410 }, 14)).toEqual({ x: 192, y: 136, width: 2176, height: 1199, fontSize: 14 })
     expect(defaultPlacement({ x: 0, y: 30, width: 2560, height: 1410 }, 0).fontSize).toBe(0)
+    // still showing: at least a quarter of it on a screen there is now
+    const screens = [{ x: 0, y: 30, width: 2560, height: 1410 }]
+    expect([isOnScreen({ x: 100, y: 100, width: 1000, height: 800, fontSize: 0 }, screens), isOnScreen({ x: 2300, y: 100, width: 1000, height: 800, fontSize: 0 }, screens), isOnScreen({ x: 5200, y: -2000, width: 1000, height: 800, fontSize: 0 }, screens)]).toEqual([true, true, false])
+    expect(isOnScreen({ x: 2500, y: 100, width: 1000, height: 800, fontSize: 0 }, screens)).toBe(false)
   })
 
   test('a new window opens where the workspace\'s was when hidden; else most of the screen, in this tab\'s font', async ($, on) => {
@@ -2111,6 +2116,16 @@ describe('workspace windows open where they were', () => {
     files.set(placementPath(HOME, 'ws-practice-rbac'), JSON.stringify({ x: 40, y: 60, width: 1500, height: 900, fontSize: 13 }))
     await $.command.run({ ...SESSIONS, command: 'workspace', args: 'open practice-rbac' })
     expect(opens().at(-1)).toEqual({ x: 40, y: 60, width: 1500, height: 900, fontSize: 13 })
+    // kept where no screen is now (a display unplugged): most of the screen in use instead
+    world.started.clear()
+    files.set(placementPath(HOME, 'ws-practice-rbac'), JSON.stringify({ x: 5200, y: -2000, width: 1500, height: 900, fontSize: 13 }))
+    await $.command.run({ ...SESSIONS, command: 'workspace', args: 'open practice-rbac' })
+    expect(opens().at(-1)).toEqual({ x: 192, y: 136, width: 2176, height: 1199, fontSize: 12 })
+    // on the second screen: kept
+    world.started.clear()
+    files.set(placementPath(HOME, 'ws-practice-rbac'), JSON.stringify({ x: 2700, y: 100, width: 1500, height: 900, fontSize: 13 }))
+    await $.command.run({ ...SESSIONS, command: 'workspace', args: 'open practice-rbac' })
+    expect(opens().at(-1)).toEqual({ x: 2700, y: 100, width: 1500, height: 900, fontSize: 13 })
     // a kept file that is not a placement is not used
     world.started.clear()
     files.set(placementPath(HOME, 'ws-practice-rbac'), '{"x": "far"}')

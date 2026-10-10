@@ -42,7 +42,9 @@ try {
   // shell starts would be cut at 1024 bytes); the file holds the command line
   const openFile = join(WORK, 'open.sh')
   writeFileSync(openFile, `${w.openCommand(ws, HOME, { socket })}\n`)
-  // placed as the mod places it
+  // placed as the mod places it; the default profile's own font is read first, to see it is left as it was
+  const profileFont = () => spawnSync('/usr/bin/osascript', ['-l', 'JavaScript', '-e', "Application('Terminal').defaultSettings().fontSize()"], { encoding: 'utf8' }).stdout.trim()
+  const fontBefore = profileFont()
   const place = { x: 60, y: 80, width: 1100, height: 700, fontSize: 11 }
   execFileSync('/usr/bin/osascript', ['-l', 'JavaScript', '-e', c.OPEN_SCRIPT, `/bin/sh '${openFile}'`, JSON.stringify(place)])
   let running = {}
@@ -57,6 +59,7 @@ try {
   check('its tmux session is marked as this workspace\'s', tmux('show-options', '-t', session, '-qv', w.OWNER_OPTION).stdout.trim() === String(ws.createdAt))
   const seen = spawnSync('/usr/bin/osascript', ['-l', 'JavaScript', '-e', `function run(a) { const t = Application('Terminal'); for (const x of t.windows()) for (const y of x.tabs()) if (y.tty() === '/dev/' + a[0]) { const b = x.bounds(); return JSON.stringify({ x: b.x, y: b.y, width: b.width, height: b.height, fontSize: y.fontSize() }) } return '' }`, clients[0] ?? 'none'], { encoding: 'utf8' }).stdout.trim()
   check('placed: where it was asked, in the font it was asked', seen === JSON.stringify(place), seen)
+  check('placed: the Terminal profile\'s own font is left as it was', profileFont() === fontBefore && fontBefore !== '', `${fontBefore} → ${profileFont()}`)
   // Hide: the mod's own hide.sh, as a click on the bar runs it inside this tmux server (TMUX names the server)
   const hideFile = join(WORK, 'hide.sh')
   writeFileSync(hideFile, w.HIDE_SCRIPT)

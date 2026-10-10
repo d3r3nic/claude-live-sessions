@@ -2,6 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { ClaudeSession, CodexSession, Place, Relay, Snapshot, Workspace } from '../types'
+import type { Screen } from './workspaces'
 import { AGENT_COMMANDS, afterStep, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_SCRIPT } from './relay'
 import type { Side } from './relay'
 import {
@@ -30,6 +31,7 @@ import {
   sessionSetup,
   setupPrompt,
   defaultPlacement,
+  isOnScreen,
   hideBinding,
   hidePath,
   placementFrom,
@@ -638,9 +640,11 @@ async function openWorkspace($: EngineInterface, ws: Workspace, at?: { window: s
   for (const tty of attached) {
     if ((await osascript(FOCUS_SCRIPT, tty)).stdout.trim() === 'shown') return { isOpen: true, text: `Brought ${name} to the front.` }
   }
-  // where it was when last hidden; else most of the screen, in the font of the window it is opened from
+  // where it was when last hidden, while that still shows on a screen there is now; else most of the screen in
+  // use, in the font of the window it is opened from
   const kept = await $.fs.read(placementPath(home, name)).then(text => placementFrom(JSON.parse(text))).catch(() => undefined)
-  const place = kept ?? (await firstPlacement($, osascript))
+  const seen = await screens($, osascript)
+  const place = kept !== undefined && seen !== undefined && isOnScreen(kept, seen.screens) ? kept : seen === undefined ? undefined : defaultPlacement(seen.screens[0]!, seen.fontSize)
   const opened = await osascript(OPEN_SCRIPT, command, ...(place === undefined ? [] : [JSON.stringify(place)]))
   const isOpened = opened.exitCode === 0 && opened.stdout.trim() === 'opened'
   // the window makes the session (made new, or again after it ended): once it is there, its bar gets Hide
@@ -650,15 +654,14 @@ async function openWorkspace($: EngineInterface, ws: Workspace, at?: { window: s
     : { isOpen: false, text: `Not opened (${firstLine(opened.stderr) || `exit ${opened.exitCode}`}). Run: ${command}` }
 }
 
-/** A workspace window's first placement: from the screen, and the font size of this session's own tab. */
-async function firstPlacement($: EngineInterface, osascript: (script: string, ...args: string[]) => Promise<{ stdout: string }>) {
+/** The screens there are now (the one in use first), and the font size of this session's own tab. */
+async function screens($: EngineInterface, osascript: (script: string, ...args: string[]) => Promise<{ stdout: string }>) {
   const selfId = await $.session.id()
   const tty = (await read($, snapshot)).claude.find(s => s.sessionId === selfId)?.tty ?? ''
   try {
-    const seen = JSON.parse((await osascript(SCREEN_SCRIPT, /^ttys\d+$/.test(tty) ? tty : 'none')).stdout) as { screen?: { x: number; y: number; width: number; height: number }; fontSize?: number }
-    const screen = seen.screen
-    if (screen === undefined || !(screen.width > 0 && screen.height > 0)) return undefined
-    return defaultPlacement(screen, seen.fontSize ?? 0)
+    const seen = JSON.parse((await osascript(SCREEN_SCRIPT, /^ttys\d+$/.test(tty) ? tty : 'none')).stdout) as { screens?: Screen[]; fontSize?: number }
+    const all = (seen.screens ?? []).filter(s => [s.x, s.y, s.width, s.height].every(n => typeof n === 'number' && Number.isFinite(n)) && s.width > 0 && s.height > 0)
+    return all.length === 0 ? undefined : { screens: all, fontSize: typeof seen.fontSize === 'number' ? seen.fontSize : 0 }
   } catch {
     return undefined
   }
@@ -964,6 +967,7 @@ async function removeWorkspace($: EngineInterface, ws: Workspace): Promise<strin
   const home = (await $.env.get('HOME')) ?? ''
   if (!(await changeWorkspaces($, home, now => now.filter(w => w.id !== ws.id)))) return `Not done: ${UNREADABLE}.`
   await removePrompts($, home, ws.id)
+  await $.process.run(['/bin/rm', '-f', placementPath(home, tmuxName(ws)), openScriptPath(home, ws.id)], { timeoutMs: 10_000 }).catch(() => undefined)
   await refresh($, 0)
   return `Removed ${ws.name} (${ws.env || 'default'}, ${ws.dir}). Its agents keep running in tmux session ${tmuxName(ws)} (end it: tmux kill-session -t ${tmuxName(ws)}).`
 }

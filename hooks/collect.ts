@@ -104,13 +104,16 @@ export const OPEN_SCRIPT = [
   'function run(argv) {',
   "  const terminal = Application('Terminal')",
   '  const tab = terminal.doScript(argv[0])',
-  // a placement, when given: its font size first (which can resize the window), then where and how large
+  // a placement, when given: its font size first (which can resize the window), then where and how large;
+  // the window is open whatever placing it does
   '  if (argv[1] !== undefined) {',
-  '    const place = JSON.parse(argv[1])',
-  '    const tty = tab.tty()',
-  '    const win = terminal.windows().find(w => w.tabs().some(t => t.tty() === tty))',
-  '    if (place.fontSize > 0) tab.fontSize = place.fontSize',
-  '    if (win !== undefined && place.width > 0) win.bounds = { x: place.x, y: place.y, width: place.width, height: place.height }',
+  '    try {',
+  '      const place = JSON.parse(argv[1])',
+  '      const tty = tab.tty()',
+  '      const win = terminal.windows().find(w => w.tabs().some(t => t.tty() === tty))',
+  '      if (place.fontSize > 0) tab.fontSize = place.fontSize',
+  '      if (win !== undefined && place.width > 0) win.bounds = { x: place.x, y: place.y, width: place.width, height: place.height }',
+  '    } catch (error) {}',
   '  }',
   '  terminal.activate()',
   "  return 'opened'",

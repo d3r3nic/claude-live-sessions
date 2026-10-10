@@ -404,6 +404,46 @@ except ChildProcessError: pass
     closeWith(true, [{ name: 'w', tabs: [{ tty: '/dev/ttys050', busy: () => ++polls < 3 }] }]),
   ]
   check('hide: the window-closing script closes only a lone tab back at its shell, saying where it was', JSON.stringify(cases) === JSON.stringify([['none', ''], ['none', ''], ['shared', ''], ['busy', ''], ['closed {"x":1,"y":2,"width":1300,"height":900,"fontSize":13}', 'w']]), JSON.stringify(cases))
+  // the opening script, run as written against a stand-in Terminal: a placement sets the new tab's font, then
+  // its window's place and size; none leaves them; a placement that fails leaves the window open all the same
+  const openWith = (arg, failBounds = false) => {
+    const did = []
+    const tab = { tty: () => '/dev/ttys060', set fontSize(v) { did.push(`font ${v}`) } }
+    const win = { tabs: () => [tab], set bounds(v) { if (failBounds) throw new Error('no'); did.push(`bounds ${v.x},${v.y},${v.width},${v.height}`) } }
+    const terminal = { doScript: () => tab, windows: () => [{ tabs: () => [{ tty: () => '/dev/ttys001' }] }, win], activate: () => did.push('activate') }
+    try {
+      const result = new Function('Application', `${c.OPEN_SCRIPT}\nreturn run(${JSON.stringify(arg === undefined ? ['cmd'] : ['cmd', arg])})`)(() => terminal)
+      return `${result}: ${did.join('; ')}`
+    } catch (error) {
+      return `threw ${error.message}: ${did.join('; ')}`
+    }
+  }
+  const opens = [openWith(JSON.stringify({ x: 5, y: 6, width: 700, height: 500, fontSize: 11 })), openWith(undefined), openWith(JSON.stringify({ x: 5, y: 6, width: 700, height: 500, fontSize: 0 }), true), openWith('not json')]
+  check('open: a placement sets the font, then the place; none leaves them; a failing one still opens', JSON.stringify(opens) === JSON.stringify(['opened: font 11; bounds 5,6,700,500; activate', 'opened: activate', 'opened: activate', 'opened: activate']), JSON.stringify(opens))
+  // the screen script against stand-in screens: the menu bar's screen 2560×1440 at (0,0), an external 1920×1080
+  // above its right half, in use; Terminal's places are from the menu bar screen's top left
+  const nsScreen = (x, y, w, h, free) => ({ frame: { origin: { x, y }, size: { width: w, height: h } }, visibleFrame: { origin: { x: free.x, y: free.y }, size: { width: free.w, height: free.h } } })
+  const menuBar = nsScreen(0, 0, 2560, 1440, { x: 0, y: 0, w: 2560, h: 1410 })
+  const external = nsScreen(1280, 1440, 1920, 1080, { x: 1280, y: 1440, w: 1920, h: 1080 })
+  const stand$ = { NSScreen: { screens: { count: 2, objectAtIndex: i => [menuBar, external][i] }, mainScreen: external } }
+  const seenScreens = JSON.parse(new Function('Application', 'ObjC', '$', `${w.SCREEN_SCRIPT}\nreturn run(['ttys070'])`)(() => ({ running: () => false }), { import: () => undefined }, stand$))
+  check('screens: every screen, the one in use first, placed from the menu bar screen\'s top left', JSON.stringify(seenScreens) === JSON.stringify({ screens: [{ x: 1280, y: -1080, width: 1920, height: 1080 }, { x: 0, y: 30, width: 2560, height: 1410 }], fontSize: 0 }), JSON.stringify(seenScreens))
+  // hide.sh's end, with tmux and osascript stood in for: where the window was is kept under the workspace
+  // session's name, in the windows folder beside hide.sh, and only then
+  const stubs = join(scratch, 'stubs')
+  mkdirSync(stubs)
+  const runHide = (session, said) => {
+    writeFileSync(join(stubs, 'tmux'), `#!/bin/sh\ncase "$1" in display-message) case "$*" in *client_session*) printf '%s\\n' '${session}';; esac;; esac\nexit 0\n`, { mode: 0o755 })
+    writeFileSync(join(stubs, 'osa'), `#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '${said}'\n`, { mode: 0o755 })
+    const dir = mkdtempSync(join(scratch, 'hide-'))
+    writeFileSync(join(dir, 'hide.sh'), w.HIDE_SCRIPT.replace('/usr/bin/osascript', join(stubs, 'osa')))
+    const out = spawnSync('/bin/sh', [join(dir, 'hide.sh'), '/dev/ttys080'], { encoding: 'utf8', env: { ...process.env, PATH: `${stubs}:${process.env.PATH}` } }).stdout.trim()
+    const kept = existsSync(join(dir, 'windows')) ? readdirSync(join(dir, 'windows')).map(f => `${f}=${readFileSync(join(dir, 'windows', f), 'utf8').trim()}`) : []
+    return `${out} | ${kept.join(',') || '-'}`
+  }
+  const placed = '{"x":1,"y":2,"width":1300,"height":900,"fontSize":13}'
+  const hides = [runHide('ws-check', `closed ${placed}`), runHide('ws-check', 'busy'), runHide('ws-../x', `closed ${placed}`), runHide('ws-ä', `closed ${placed}`), runHide('mine', `closed ${placed}`)]
+  check('hide: where it was kept under the workspace session only, and only once it closed', JSON.stringify(hides) === JSON.stringify([`closed | ws-check.json=${placed}`, 'busy | -', 'closed | -', 'closed | -', 'closed | -']), JSON.stringify(hides))
     // a workspace made before the marks (a window per agent), with a window of the owner's own now current:
     // set up at Open, each window gets the borders, the agents' named by their windows
     t6('new-session', '-d', '-s', 'ws-old', '-n', 'claude', 'sleep 30')

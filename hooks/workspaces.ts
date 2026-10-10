@@ -211,7 +211,8 @@ export const HIDE_SCRIPT = [
   CLOSE_SCRIPT,
   'JXA',
   ')',
-  'case $session in ws-*[!a-z0-9-]*) session=;; ws-?*) ;; *) session=;; esac',
+  // the letters spelt out: a range would take others in some locales
+  'case $session in ws-*[!abcdefghijklmnopqrstuvwxyz0123456789-]*) session=;; ws-?*) ;; *) session=;; esac',
   'case $out in "closed {"*) [ -n "$session" ] && mkdir -p "$(dirname "$0")/windows" && printf \'%s\\n\' "\${out#closed }" > "$(dirname "$0")/windows/$session.json";; esac',
   'echo "\${out%% *}"',
   '',
@@ -233,12 +234,25 @@ export function placementFrom(raw: unknown): Placement | undefined {
   return { x, y, width, height, fontSize: fontSize >= 6 && fontSize <= 72 ? fontSize : 0 }
 }
 
+/** A screen's free part (what the menu bar and Dock leave), from the top left of the menu bar's screen, as Terminal places windows. */
+export type Screen = { x: number; y: number; width: number; height: number }
+
+/** Whether a kept placement still shows: at least a quarter of it on one of the screens there are now. */
+export function isOnScreen(place: Placement, screens: readonly Screen[]): boolean {
+  const area = place.width * place.height
+  return screens.some(s => {
+    const w = Math.min(place.x + place.width, s.x + s.width) - Math.max(place.x, s.x)
+    const h = Math.min(place.y + place.height, s.y + s.height) - Math.max(place.y, s.y)
+    return w > 0 && h > 0 && w * h >= area / 4
+  })
+}
+
 /**
  * A workspace window's first place: most of the screen (85% of the part
  * the menu bar and Dock leave, centred), in the font size of the window it
  * is opened from, so it never opens small in a profile's larger font.
  */
-export function defaultPlacement(screen: { x: number; y: number; width: number; height: number }, fontSize: number): Placement {
+export function defaultPlacement(screen: Screen, fontSize: number): Placement {
   const width = Math.round(screen.width * 0.85)
   const height = Math.round(screen.height * 0.85)
   return {
@@ -251,24 +265,33 @@ export function defaultPlacement(screen: { x: number; y: number; width: number; 
 }
 
 /**
- * The main screen's part the menu bar and Dock leave (from its top left, as
- * Terminal places windows), and the font size of terminal "$1"'s tab
- * (`ttys012`; 0 when no Terminal tab is that terminal): JSON. Never starts
- * Terminal.
+ * Every screen's free part (Screen), the one in use now (mainScreen: the
+ * one with the keyboard's window) first, and the font size of terminal
+ * "$1"'s tab (`ttys012`; 0 when no Terminal tab is that terminal): JSON.
+ * Screens are placed from the top left of the menu bar's screen
+ * (screens[0]), as Terminal places windows. Never starts Terminal.
  */
 export const SCREEN_SCRIPT = `function run(argv) {
   ObjC.import('AppKit')
-  const main = $.NSScreen.mainScreen
-  const full = main.frame
-  const free = main.visibleFrame
-  const screen = { x: free.origin.x, y: full.size.height - free.origin.y - free.size.height, width: free.size.width, height: free.size.height }
+  const all = $.NSScreen.screens
+  const top = all.objectAtIndex(0).frame.size.height
+  const place = s => {
+    const free = s.visibleFrame
+    return { x: free.origin.x, y: top - free.origin.y - free.size.height, width: free.size.width, height: free.size.height }
+  }
+  const main = place($.NSScreen.mainScreen)
+  const screens = [main]
+  for (let i = 0; i < all.count; i++) {
+    const s = place(all.objectAtIndex(i))
+    if (s.x !== main.x || s.y !== main.y || s.width !== main.width || s.height !== main.height) screens.push(s)
+  }
   let fontSize = 0
   const terminal = Application('Terminal')
   if (terminal.running()) {
     const tty = '/dev/' + argv[0]
     for (const w of terminal.windows()) for (const t of w.tabs()) if (t.tty() === tty) fontSize = t.fontSize()
   }
-  return JSON.stringify({ screen, fontSize })
+  return JSON.stringify({ screens, fontSize })
 }`
 
 /**
