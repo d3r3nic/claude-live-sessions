@@ -51,7 +51,7 @@ import {
 } from '../hooks/collect'
 import type { CodexProc, ThreadRow } from '../hooks/collect'
 import type { Workspace } from '../types'
-import { afterStep, cueOf, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_MAX_AGE_MS, TURN_SCRIPT } from '../hooks/relay'
+import { afterOwner, afterStep, cueOf, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_MAX_AGE_MS, TURN_SCRIPT } from '../hooks/relay'
 import type { Side } from '../hooks/relay'
 import {
   absoluteDir,
@@ -248,6 +248,8 @@ function machine(argv: readonly string[], env: unknown): Run {
         // the ledger takes each key once; a pass types only into a pane running an allowed command
         const [kind, , key = '', pane = '', allow = ''] = args
         if (world.ledger.has(key)) return ok('taken\n')
+        // a cue held at the cap that was passed before is taken already (host-check holds the real script to it)
+        if (key.startsWith('cap-') && world.ledger.has(`pass-${key.slice(4)}`)) return ok('taken\n')
         // scrolled back: the step is left untaken
         if (kind === 'pass' && world.inMode.has(pane)) return ok('in-mode\n')
         world.ledger.add(key)
@@ -1810,15 +1812,16 @@ describe('relay', () => {
 
   test('turns: each file\'s last turn, done with its cue or under way', async () => {
     const out = [
-      '==> /c.jsonl', `done\tu-1\t2026-10-09T10:05:00Z\t${READY_CODEX}`,
-      '==> /x.jsonl', 'busy\tturn-2\t2026-10-09T10:06:00Z\t',
+      '==> /c.jsonl', `done\tu-1\t2026-10-09T10:05:00Z\t${READY_CODEX}\t2026-10-09T09:00:00Z`,
+      '==> /x.jsonl', 'busy\tturn-2\t2026-10-09T10:06:00Z\t\tnot a time',
       '==> /n.jsonl', 'done\tturn-3\t2026-10-09T10:07:00Z\t',
       '==> /bad.jsonl', 'done\tbad id;rm\t2026-10-09T10:07:00Z\t', 'done\tok-1\tnot a time\t',
       '==> /none.jsonl',
     ].join('\n')
     const turns = parseTurns(out)
     expect([...turns.keys()]).toEqual(['/c.jsonl', '/x.jsonl', '/n.jsonl'])
-    expect(turns.get('/c.jsonl')).toEqual({ state: 'done', id: 'u-1', at: Date.parse('2026-10-09T10:05:00Z'), cue: cueOf(READY_CODEX) })
+    // with when the owner last typed into the agent, when the pipeline found that
+    expect(turns.get('/c.jsonl')).toEqual({ state: 'done', id: 'u-1', at: Date.parse('2026-10-09T10:05:00Z'), cue: cueOf(READY_CODEX), typedAt: Date.parse('2026-10-09T09:00:00Z') })
     expect(turns.get('/x.jsonl')).toEqual({ state: 'busy', id: 'turn-2', at: Date.parse('2026-10-09T10:06:00Z') })
     expect(turns.get('/n.jsonl')?.cue).toBeUndefined()
   })
@@ -1855,8 +1858,13 @@ describe('relay', () => {
     expect(relaySteps(ws, { claude: claude(done('c1', READY_CODEX)) }, NOW)).toEqual([
       { kind: 'tell', key: 'tell-c1', text: `RBAC: Claude handed over, but Codex is not running in the workspace. Paste: ${READY_CODEX}`, isForOwner: true },
     ])
-    // after RELAY_CAP passes in a row it waits for the owner
-    expect(relaySteps({ ...ws, relay: relayOn({ streak: RELAY_CAP }) }, { claude: claude(done('c1', READY_CODEX)), codex: codex() }, NOW).map(s => s.key)).toEqual(['cap-c1'])
+    // after RELAY_CAP passes in a row it waits for the owner, holding a cue only where it would pass it:
+    // not while the other is at work (as on the cue it has just passed), nor before its first turn
+    const capped = { ...ws, relay: relayOn({ streak: RELAY_CAP }) }
+    expect(relaySteps(capped, { claude: claude(done('c1', READY_CODEX)), codex: codex() }, NOW).map(s => s.key)).toEqual(['cap-c1'])
+    expect(relaySteps(capped, { claude: claude(done('c1', READY_CODEX)), codex: codex(done('x0', 'Ready.'), true) }, NOW)).toEqual([])
+    expect(relaySteps(capped, { claude: claude(done('c1', READY_CODEX)), codex: codex(null) }, NOW).map(s => s.key)).toEqual(['wait-c1'])
+    expect(relaySteps(capped, { claude: claude(done('c1', READY_CODEX)), codex: codex() }, NOW)[0]).toMatchObject({ text: 'RBAC: the relay passed 10 hand-offs in a row and waits for you; type to either agent, or press continue in /sessions, to pass the next.' })
     // a turn older than TURN_MAX_AGE_MS is never acted on (the ledger forgets steps after 30 days)
     expect(relaySteps({ ...ws, relay: relayOn({ since: 0 }) }, { claude: claude(done('c1', READY_CODEX, NOW - TURN_MAX_AGE_MS - 1)), codex: codex() }, NOW)).toEqual([])
     expect(TURN_MAX_AGE_MS).toBeLessThan(30 * 24 * 3600_000)
@@ -1870,6 +1878,67 @@ describe('relay', () => {
     expect(['not-agent zsh', 'gone', 'failed', ''].map(passFailure)).toEqual(['its pane runs zsh, not the agent', 'its pane is gone', 'tmux could not type into its pane', 'tmux could not type into its pane'])
     expect(passFailure('unsent')).toMatch(/waits in its input: leave copy mode \(q\) and press Enter there$/)
     expect(afterStep(relayOn({ streak: 3 }), { kind: 'tell', key: 'tell-c2', text: '', isForOwner: true }, 'told', NOW)).toEqual(relayOn({ streak: 0, status: 'needs you', at: NOW }))
+  })
+
+  test('the owner typing to either agent starts the count over', async () => {
+    const side = (tool: 'claude' | 'codex', typedAt?: number): Side => ({ tool, pane: tool === 'claude' ? '%1' : '%2', isBusy: false, turn: { ...done(`${tool}-0`, 'Ready.'), ...(typedAt === undefined ? {} : { typedAt }) } })
+    // waiting at the cap; the owner typed to Claude since: it goes on, the prompt counted
+    expect(afterOwner(relayOn({ streak: RELAY_CAP, status: 'waits for you' }), { claude: side('claude', NOW - 1_000), codex: side('codex') }))
+      .toEqual(relayOn({ streak: 0, status: 'going on', typedAt: NOW - 1_000 }))
+    // the newer of the two sides; any other status is left as it is
+    expect(afterOwner(relayOn({ streak: 3, status: 'passed to Codex', typedAt: NOW - 9_000 }), { claude: side('claude', NOW - 5_000), codex: side('codex', NOW - 2_000) }))
+      .toEqual(relayOn({ streak: 0, status: 'passed to Codex', typedAt: NOW - 2_000 }))
+    // a prompt already counted, one from before the relay was on, or none: nothing changes
+    expect(afterOwner(relayOn({ streak: 3, typedAt: NOW - 2_000 }), { claude: side('claude', NOW - 2_000), codex: side('codex', NOW - 4_000) })).toBeUndefined()
+    expect(afterOwner(relayOn({ streak: 3, since: NOW - 1_000 }), { claude: side('claude', NOW - 2_000) })).toBeUndefined()
+    expect(afterOwner(relayOn({ streak: 3 }), { claude: side('claude'), codex: side('codex') })).toBeUndefined()
+    expect(afterOwner(relayOn({ streak: 3 }), {})).toBeUndefined()
+  })
+
+  test('at the cap, a prompt from the owner lets the held hand-off pass; a cue already passed is never held', async ($, on) => {
+    const { files, runs, clock } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    const at = (ms: number) => new Date(NOW - ms).toISOString()
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, checkout: '/Users/u/dev/web-app', relay: relayOn({ streak: RELAY_CAP - 1 }) }] }))
+    world.tmuxPanes = 'ws-practice-rbac\tpeers\t/dev/ttys022\t%1\tclaude\nws-practice-rbac\tpeers\t/dev/ttys045\t%2\tcodex\n'
+    world.tmuxOwner = String(NOW)
+    world.paneCommands = { '%1': 'claude', '%2': 'codex' }
+    const kept = () => JSON.parse(files.get(WORKSPACES)!).workspaces[0].relay
+    const steps = () => runs.filter(r => r[2] === RELAY_SCRIPT).map(r => [r[4], r[6]])
+    const collect = async () => {
+      await clock.advance(4_000)
+      await $.command.run(SESSIONS)
+    }
+    // the tenth pass in a row
+    world.turns = { 'session-104': `done\tturn-c1\t${at(60_000)}\t${READY_CODEX}`, '/rollouts/a.jsonl': `done\tturn-x0\t${at(120_000)}\t` }
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    expect(kept()).toMatchObject({ streak: RELAY_CAP, status: 'passed to Codex' })
+    // Codex at work on it: nothing is held, nothing said
+    world.turns = { ...world.turns, '/rollouts/a.jsonl': `busy\tturn-x1\t${at(30_000)}\t` }
+    await collect()
+    // Codex finished with no cue: Claude's cue, passed already, is not held either
+    world.turns = { ...world.turns, '/rollouts/a.jsonl': `done\tturn-x1\t${at(20_000)}\t` }
+    await collect()
+    expect(steps()).toEqual([['pass', 'pass-turn-c1'], ['tell', 'cap-turn-c1']])
+    expect(kept()).toMatchObject({ streak: RELAY_CAP, status: 'passed to Codex' })
+    // Codex hands back: held at the cap, the owner told
+    world.turns = { ...world.turns, '/rollouts/a.jsonl': `done\tturn-x2\t${at(10_000)}\t${READY_CLAUDE}` }
+    await collect()
+    expect(steps().at(-1)).toEqual(['tell', 'cap-turn-x2'])
+    expect(kept()).toMatchObject({ streak: RELAY_CAP, status: 'waits for you' })
+    // the owner types to Claude: the count starts over at once, while Claude works on the prompt
+    world.turns = { ...world.turns, 'session-104': `busy\tturn-c2\t${at(5_000)}\t\t${at(5_000)}` }
+    await collect()
+    expect(steps().at(-1)).toEqual(['tell', 'cap-turn-x2'])
+    expect(kept()).toMatchObject({ streak: 0, status: 'going on', typedAt: NOW - 5_000 })
+    // Claude done: the held cue passes
+    world.turns = { ...world.turns, 'session-104': `done\tturn-c2\t${at(1_000)}\t\t${at(5_000)}` }
+    await collect()
+    expect(steps().at(-1)).toEqual(['pass', 'pass-turn-x2'])
+    expect(kept()).toMatchObject({ streak: 1, status: 'passed to Claude', typedAt: NOW - 5_000 })
+    // the same prompt seen again counts once
+    await collect()
+    expect(kept()).toMatchObject({ streak: 1, typedAt: NOW - 5_000 })
   })
 
   test('the collecting session passes Claude\'s hand-off into Codex\'s pane, once, and shows it', async ($, on) => {

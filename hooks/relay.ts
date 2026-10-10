@@ -44,6 +44,9 @@ export function cueOf(line: string): Cue | undefined {
  *   start nothing.
  * - A Codex rollout: `task_complete` or `turn_aborted` ends a turn,
  *   `task_started` starts one.
+ * A fifth field is when the owner last typed a prompt into the agent: a
+ * prompt, a command (`/model`, `!ls`) or a paste, not the relay's cue line
+ * (one line, all cue), a background task's notice or an interrupt's record.
  * A subagent's records, and a line cut by `tail`, are skipped.
  */
 export const TURN_SCRIPT = [
@@ -52,7 +55,7 @@ export const TURN_SCRIPT = [
   "  tail -n 600 \"$f\" 2>/dev/null | /usr/bin/jq -R -n -r '",
   '    def cue: split("\\n") | map(select(test("^\\\\s*(?:[0-9]+\\\\.|[-*>])?\\\\s*[`*_]*(READY FOR (CLAUDE|CODEX)|NEEDS USER|SCOPE CLOSED) · "))) | (last // "") | gsub("[\\t\\r]"; " ");',
   '    def said: if (.message.content | type) == "string" then .message.content else ([.message.content[]? | select(.type == "text") | .text] | join("\\n")) end;',
-  '    reduce (inputs | fromjson? | select(type == "object" and .isSidechain != true)) as $o (null;',
+  '    def step($o):',
   '      if $o.type == "assistant" and (($o.message.stop_reason // "") as $r | $r == "tool_use" or $r == "pause_turn" or $r == "") then',
   '        {state: "busy", id: $o.uuid, at: $o.timestamp, text: ""}',
   '      elif $o.type == "assistant" then',
@@ -66,13 +69,24 @@ export const TURN_SCRIPT = [
   '      elif $o.type == "event_msg" and $o.payload.type == "task_complete" then {state: "done", id: $o.payload.turn_id, at: $o.timestamp, text: ($o.payload.last_agent_message // "")}',
   '      elif $o.type == "event_msg" and $o.payload.type == "turn_aborted" then {state: "done", id: $o.payload.turn_id, at: $o.timestamp, text: ""}',
   '      elif $o.type == "event_msg" and $o.payload.type == "task_started" then {state: "busy", id: $o.payload.turn_id, at: $o.timestamp, text: ""}',
-  '      else . end)',
-  '    | select(. != null) | [.state, .id, .at, ((.text // "") | cue)] | map(. // "" | tostring) | join("\\t")',
+  '      else . end;',
+  '    def text: if (.content | type) == "string" then .content else ([.content[]? | select(.type == "text") | .text] | join("\\n")) end;',
+  '    def typed: (test("\\n") | not) and cue != "" | not;',
+  '    def owner:',
+  '      if .type == "user" then .isMeta != true and .isCompactSummary != true and ([.message.content[]?.type] | index("tool_result") | not)',
+  '        and (said | test("^\\\\s*($|\\\\[Request interrupted|<(?!command-name>|bash-input>|pasted_content))") | not) and (said | typed)',
+  '      elif .type == "event_msg" and .payload.type == "user_message" then .payload.message // "" | typed',
+  '      elif .type == "event_msg" and .payload.type == "item_completed" and .payload.item.type == "UserMessage" then .payload.item | text | typed',
+  '      else false end;',
+  '    reduce (inputs | fromjson? | select(type == "object" and .isSidechain != true)) as $o ({t: null, o: null};',
+  '      {t: (.t | step($o)), o: (if ($o | owner) then $o.timestamp else .o end)})',
+  '    | .o as $typed | .t | select(. != null) | [.state, .id, .at, ((.text // "") | cue), $typed] | map(. // "" | tostring) | join("\\t")',
   "  ' 2>/dev/null",
   'done',
 ].join('\n')
 
-export type Turn = { state: 'done' | 'busy'; id: string; at: number; cue?: Cue }
+/** An agent's last turn; `typedAt`, when the owner last typed into the agent (as far back as the pipeline reads). */
+export type Turn = { state: 'done' | 'busy'; id: string; at: number; cue?: Cue; typedAt?: number }
 
 /** TURN_SCRIPT's answer: each file's last turn. */
 export function parseTurns(stdout: string): Map<string, Turn> {
@@ -83,11 +97,12 @@ export function parseTurns(stdout: string): Map<string, Turn> {
       file = line.slice(4)
       continue
     }
-    const [state, id = '', iso = '', cueLine = ''] = line.split('\t')
+    const [state, id = '', iso = '', cueLine = '', typedIso = ''] = line.split('\t')
     const at = Date.parse(iso)
     if (file === '' || (state !== 'done' && state !== 'busy') || !/^[A-Za-z0-9-]{1,80}$/.test(id) || Number.isNaN(at)) continue
     const cue = state === 'done' ? cueOf(cueLine) : undefined
-    turns.set(file, { state, id, at, ...(cue === undefined ? {} : { cue }) })
+    const typedAt = Date.parse(typedIso)
+    turns.set(file, { state, id, at, ...(cue === undefined ? {} : { cue }), ...(Number.isNaN(typedAt) ? {} : { typedAt }) })
   }
   return turns
 }
@@ -110,7 +125,7 @@ export type Step =
  * relay was turned on) with a cue for the other agent has it passed on once
  * that agent has finished a turn of its own (so it is past any question it
  * asks at its start) and is not at work; in `notify` mode, or after
- * RELAY_CAP passes in a row, the owner is told instead. A NEEDS USER or SCOPE CLOSED cue is the
+ * RELAY_CAP passes in a row with no prompt from the owner, the owner is told instead. A NEEDS USER or SCOPE CLOSED cue is the
  * owner's: they are told.
  */
 export function relaySteps(ws: Pick<Workspace, 'name' | 'relay'>, sides: Partial<Record<Tool, Side>>, now: number, cap = RELAY_CAP): Step[] {
@@ -133,12 +148,15 @@ export function relaySteps(ws: Pick<Workspace, 'name' | 'relay'>, sides: Partial
       steps.push({ kind: 'tell', key: `tell-${turn.id}`, text: `${ws.name}: ${NAME[tool]} handed over to ${NAME[cue.to]}. Paste: ${cue.line}`, isForOwner: false })
     } else if (other === undefined) {
       steps.push({ kind: 'tell', key: `tell-${turn.id}`, text: `${ws.name}: ${NAME[tool]} handed over, but ${NAME[cue.to]} is not running in the workspace. Paste: ${cue.line}`, isForOwner: true })
-    } else if (relay.streak >= cap) {
-      steps.push({ kind: 'tell', key: `cap-${turn.id}`, text: `${ws.name}: the relay passed ${relay.streak} hand-offs in a row and waits for you; press continue in /sessions to pass the next.`, isForOwner: true })
     } else if (other.turn === undefined) {
       // an agent that has not finished a turn may be at a question of its own (trust, an update), which Enter would answer
       steps.push({ kind: 'tell', key: `wait-${turn.id}`, text: `${ws.name}: ${NAME[tool]} handed over; the relay passes it once ${NAME[cue.to]} has finished a turn. If ${NAME[cue.to]} is waiting at a question in its pane, answer it.`, isForOwner: false })
-    } else if (!other.isBusy) {
+    } else if (other.isBusy) {
+      continue
+    } else if (relay.streak >= cap) {
+      // a cue already passed is never held: the ledger takes this step when it has its pass (RELAY_SCRIPT)
+      steps.push({ kind: 'tell', key: `cap-${turn.id}`, text: `${ws.name}: the relay passed ${relay.streak} hand-offs in a row and waits for you; type to either agent, or press continue in /sessions, to pass the next.`, isForOwner: true })
+    } else {
       steps.push({ kind: 'pass', key: `pass-${turn.id}`, to: cue.to, pane: other.pane, line: cue.line })
     }
   }
@@ -170,6 +188,8 @@ export const RELAY_SCRIPT = [
   't() { if [ -n "$sock" ]; then tmux -L "$sock" -f /dev/null "$@"; else tmux "$@"; fi; }',
   'mkdir -p "$ledger" || exit 1',
   'find "$ledger" -mindepth 1 -maxdepth 1 -type d -mtime +30 -exec rmdir {} + 2>/dev/null',
+  // a cue held at the cap that was passed before the cap was reached is taken already
+  'case $key in cap-*) [ -d "$ledger/pass-${key#cap-}" ] && { echo taken; exit 0; };; esac',
   'mkdir "$ledger/$key" 2>/dev/null || { echo taken; exit 0; }',
   'if [ "$kind" = tell ]; then',
   `  /usr/bin/osascript -l JavaScript -e 'function run(a) { const app = Application.currentApplication(); app.includeStandardAdditions = true; app.displayNotification(a[1], { withTitle: a[0] }) }' "$title" "$text" >/dev/null 2>&1`,
@@ -206,6 +226,18 @@ export function passFailure(outcome: string): string | undefined {
   if (outcome === 'gone') return 'its pane is gone'
   if (outcome === 'unsent') return 'its pane was scrolled back (copy mode) as the line was typed, so the line waits in its input: leave copy mode (q) and press Enter there'
   return 'tmux could not type into its pane'
+}
+
+/**
+ * The relay's state once the owner has typed into either agent since the
+ * count last started over (or since the relay was turned on): the count of
+ * hand-offs in a row starts over, as the owner is there. Undefined when
+ * there is nothing new.
+ */
+export function afterOwner(relay: Relay, sides: Partial<Record<Tool, Side>>): Relay | undefined {
+  const typedAt = Math.max(0, ...Object.values(sides).map(s => s?.turn?.typedAt ?? 0))
+  if (typedAt <= (relay.typedAt ?? relay.since)) return undefined
+  return { ...relay, streak: 0, typedAt, ...(relay.status === 'waits for you' ? { status: 'going on' } : {}) }
 }
 
 /** The relay's state after a step: a pass counts toward the cap; a cue for the owner starts the count again. */

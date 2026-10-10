@@ -3,7 +3,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { ClaudeSession, CodexSession, Place, Relay, Snapshot, Workspace } from '../types'
 import type { Screen } from './workspaces'
-import { AGENT_COMMANDS, afterStep, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_SCRIPT } from './relay'
+import { AGENT_COMMANDS, afterOwner, afterStep, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_SCRIPT } from './relay'
 import type { Side } from './relay'
 import {
   CHECKOUT_SCRIPT,
@@ -933,13 +933,18 @@ async function passCues(
   const files = [...new Set(live.flatMap(ws => panesOf(ws).flatMap(([tty, p]) => fileFor(p.window, tty)?.file ?? [])))]
   const read = files.length === 0 ? { stdout: '' } : await $.process.run(['/bin/sh', '-c', TURN_SCRIPT, 'sh', ...files], { timeoutMs: 20_000 })
   const turns = parseTurns(read.stdout)
-  for (const ws of live) {
+  for (let ws of live) {
     const sides: Partial<Record<'claude' | 'codex', Side>> = {}
     for (const [tty, p] of panesOf(ws)) {
       const tool = p.window as 'claude' | 'codex'
       const known = fileFor(tool, tty)
       const turn = known?.file === undefined ? undefined : turns.get(known.file)
       sides[tool] = { tool, pane: p.pane!, isBusy: (known?.isBusy ?? false) || turn?.state === 'busy', ...(turn === undefined ? {} : { turn }) }
+    }
+    const typed = ws.relay === undefined ? undefined : afterOwner(ws.relay, sides)
+    if (typed !== undefined) {
+      if (!(await changeWorkspaces($, home, list => list.map(w => (w.id === ws.id && w.relay !== undefined ? { ...w, relay: afterOwner(w.relay, sides) ?? w.relay } : w))))) continue
+      ws = { ...ws, relay: typed }
     }
     for (const step of relaySteps(ws, sides, now)) {
       const args = step.kind === 'pass' ? ['pass', step.pane, AGENT_COMMANDS[step.to], step.line] : ['tell', '', '', step.text]

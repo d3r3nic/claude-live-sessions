@@ -84,8 +84,10 @@ export type Relay = {
   mode: 'auto' | 'notify' | 'off'
   /** Since when cues count: a turn that ended before is never passed on. */
   since: number
-  /** Cues passed on since the owner last answered; at the limit the relay waits for the owner. */
+  /** Cues passed on since the owner last typed to an agent or answered; at the limit the relay waits for the owner. */
   streak: number
+  /** When the owner last typed to an agent, as far as the count knows: a later prompt starts the count over. */
+  typedAt?: number
   /** The last thing it did, said for the owner: `passed to Codex`, `needs you`. */
   status?: string
   /** When it last did something. */
