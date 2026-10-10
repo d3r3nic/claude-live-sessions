@@ -2538,7 +2538,13 @@ describe('the context guard', () => {
     expect(files.get(contextFile)).toBeUndefined()
     await $.turn.complete(turn)
     expect(JSON.parse(files.get(contextFile)!)).toEqual({ percent: 61, at: expect.any(Number) })
-    // out of the workspace's panes: nothing more is written
+    // in a tmux session that is no workspace's, or none: nothing more is written
+    world.tmuxPanes = 'my-own\tmain\t/dev/ttys022\t%5\t\n'
+    files.delete(contextFile)
+    await clock.advance(4_000)
+    await $.command.run(SESSIONS)
+    await $.turn.complete(turn)
+    expect(files.get(contextFile)).toBeUndefined()
     world.tmuxPanes = ''
     files.delete(contextFile)
     await clock.advance(4_000)
