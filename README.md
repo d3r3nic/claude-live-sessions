@@ -6,7 +6,8 @@ A Claude Code plugin (a function-hooks mod) that lists the live Claude Code and 
 - The pane groups sessions by repository (its origin, `owner/repo`), then worktree or branch, then each session, labelled `claude` (orange) or `codex` (blue). An idle row is white.
 - A session is listed where it has been working, not where it started. That is the worktree it used most among the last 40 folders its transcript or rollout records.
 - The `1d 2d 3d 7d all` buttons, or `/sessions 2d | 12h | all`, list only the sessions active that recently. The choice is kept.
-- Each row (a repository, worktree, session or workspace) has one `[ more ]` button. Pressed, the row's actions show under it as worded buttons, each with its key in brackets, e.g. `[ Open (o) ]  [ To background (b) ]  [ Assign to workspace (w) ]  [ Move up (u) ]  [ Move down (d) ]  [ Close (x) ]`. Showing them also hands this pane the keys (over an empty prompt; `ctrl+x tab` otherwise), so a key presses its button at once. One row's actions show at a time.
+- Each row (a repository, worktree, session or workspace) has one `[ more ]` button. Pressed, the row's actions show under it as worded buttons, e.g. `[ Open (o) ]  [ To background ]  [ Assign to workspace (w) ]  [ Move up (u) ]  [ Move down (d) ]  [ Close (x) ]`. One row's actions show at a time.
+- A key in brackets presses its button once you give the pane the keys (`ctrl+x tab`); typing in the prompt never does. What moves a session, removes a workspace or switches its relay has no key: those take a click (`To background` and `Remove`, two).
 - `Move up` and `Move down` put a row in your own order, which is kept. Use `reset order` or `/sessions reset` to go back to the automatic order.
 - In Terminal.app, a press on a session's title does one of two things:
   - For a session running in a terminal tab, it brings that tab to the front.
@@ -19,7 +20,7 @@ A Claude Code plugin (a function-hooks mod) that lists the live Claude Code and 
 
 A workspace is a project with your own name: a repository, an environment, and Claude and Codex side by side in one tmux session, ready to peer code. Its name is only your label; it never names a branch or a worktree.
 
-- In the pane, `+ New workspace` (key `n`) opens a form:
+- In the pane, `+ New workspace` (key `n`) opens a form; with the pane holding the keys, what you type next goes into its name:
   - **name**: anything.
   - **project**: type to search the git repositories on this Mac (their main checkouts, up to five folders down from your home folder, skipping Library, hidden folders and `*-worktrees`), those worked in lately first, and pick one; or type a folder (absolute, or starting with `~/`).
   - **environment**: one of the environments on this Mac (below).

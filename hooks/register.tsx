@@ -781,6 +781,8 @@ async function openDraft($: EngineInterface, dir: string) {
   const home = (await $.env.get('HOME')) ?? ''
   const shown = dir.startsWith(`${home}/`) ? `~${dir.slice(home.length)}` : dir
   await update($, draft, () => ({ ...NO_DRAFT, isOpen: true, dir, query: shown }))
+  // while this pane has the keys (the form opened by its key), what is typed next goes into the name, not to the pane's keys
+  await $.ui.focus({ requestId: PANE, key: 'form:name' }).catch(() => undefined)
   if ((await read($, projects)).length > 0) return
   const found = await $.process
     .run(['/bin/sh', '-c', PROJECTS_SCRIPT, 'sh', home], { timeoutMs: 30_000 })
@@ -1053,10 +1055,11 @@ export const register: Register = on => {
     // each row carries one [ more ]; pressed, the row's actions show under it, each a worded button with a
     // key that presses it while this pane has the focus
     const open = await read($, selected)
-    // showing a row's actions also asks for the keyboard (granted over an empty prompt), so their keys work at once
+    // one row's actions at a time; a workspace chooser left open goes with them. The keyboard stays where it
+    // is: a key in ( ) works once the person gives this pane the keys (ctrl+x tab), never by surprise
     const toggle = (id: string) => async () => {
-      const shown = await update($, selected, now => (now === id ? '' : id))
-      if (shown !== '') await $.ui.open({ id: PANE, title: TITLE, focus: true }).catch(() => undefined)
+      await update($, selected, now => (now === id ? '' : id))
+      await update($, assigning, () => ({ key: '', member: '' }))
     }
     const more = (id: string): Element => (
       <Box width={9} flexShrink={0} marginLeft={1}>
@@ -1128,10 +1131,10 @@ export const register: Register = on => {
         ...(target === undefined ? [] : [<Button key={`open-bar ${i.key}`} label="Open (o)" hotkey="o" variant="primary" onPress={() => void openSession($, target)} />]),
         ...(hasMove && i.move !== undefined
           ? [
+              // a click, twice: no key, so no two keystrokes can move a session
               <Button
                 key={`bg ${i.key}`}
-                label={isPending(i.key) ? 'Press again to move it (b)' : 'To background (b)'}
-                hotkey="b"
+                label={isPending(i.key) ? 'Press again to move it' : 'To background'}
                 {...(isPending(i.key) ? { variant: 'primary' as const } : {})}
                 onPress={() => void pressMove(i.key, i.move!)()}
               />,
@@ -1203,7 +1206,7 @@ export const register: Register = on => {
           )}
           {form.isOpen && Input !== undefined && Select !== undefined && (
             <Box key="form" flexDirection="column" width={width - 2} marginLeft={2}>
-              <Input key="form:name" label="name" value={form.name} placeholder="Practice RBAC" onInput={setForm('name')} onSubmit={() => void submitDraft($)} />
+              <Input key="form:name" label="name" autoFocus value={form.name} placeholder="Practice RBAC" onInput={setForm('name')} onSubmit={() => void submitDraft($)} />
               <Input
                 key="form:project"
                 label="project"
@@ -1245,10 +1248,11 @@ export const register: Register = on => {
           {view.workspaces.map(ws => (
             <Box key={`ws-${ws.key}`} flexDirection="column" width={width}>
               <Box flexDirection="row" width={width}>
-                <Box flexGrow={1} flexShrink={1} flexDirection="row">
+                <Box flexGrow={1} flexShrink={1}>
                   <Text bold wrap="truncate-end">{`  ${ws.name}`}</Text>
-                  <Text color="permission">{`  ${ws.env || 'default'}`}</Text>
-                  <Text dimColor wrap="truncate-end">{`  ${ws.dir}`}</Text>
+                </Box>
+                <Box flexShrink={0} marginLeft={1}>
+                  <Text color="permission">{ws.env || 'default'}</Text>
                 </Box>
                 <Box flexShrink={0} marginLeft={1}>
                   <Text dimColor>{ws.isAttached ? 'open' : ws.isRunning ? 'running' : 'stopped'}</Text>
@@ -1256,15 +1260,22 @@ export const register: Register = on => {
                 <Box flexShrink={0} marginLeft={2}>
                   <Button key={`wsopen ${ws.key}`} label="Open" onPress={() => void openWorkspaceById($, ws.key)} />
                 </Box>
-                <Box flexShrink={0} marginLeft={2}>
-                  <Button key={`relay ${ws.key}`} label={`Relay: ${ws.relay.mode}`} {...(ws.relay.mode === 'auto' ? { variant: 'primary' as const } : {})} onPress={() => void cycleRelay($, ws.key)} />
-                </Box>
+                {/* in its actions too: on a narrow pane the row keeps room for the name */}
+                {width >= 80 && (
+                  <Box flexShrink={0} marginLeft={2}>
+                    <Button key={`relay ${ws.key}`} label={`Relay: ${ws.relay.mode}`} {...(ws.relay.mode === 'auto' ? { variant: 'primary' as const } : {})} onPress={() => void cycleRelay($, ws.key)} />
+                  </Box>
+                )}
                 {more(`ws:${ws.key}`)}
+              </Box>
+              <Box width={width - 4} marginLeft={4}>
+                <Text dimColor wrap="truncate-end">{ws.dir}</Text>
               </Box>
               {open === `ws:${ws.key}` &&
                 bar(`ws:${ws.key}`, 4, [
                   <Button key={`wsopen-bar ${ws.key}`} label="Open (o)" hotkey="o" variant="primary" onPress={() => void openWorkspaceById($, ws.key)} />,
-                  <Button key={`relay-bar ${ws.key}`} label={`Relay: ${ws.relay.mode} → ${RELAY_NEXT[ws.relay.mode]} (r)`} hotkey="r" onPress={() => void cycleRelay($, ws.key)} />,
+                  // by a click only: turned on, the relay types into the agents
+                  <Button key={`relay-bar ${ws.key}`} label={`Relay: ${ws.relay.mode} → ${RELAY_NEXT[ws.relay.mode]}`} onPress={() => void cycleRelay($, ws.key)} />,
                   ...moves(WORKSPACES_SCOPE, view.workspaces.map(w => w.key), ws.key),
                   <Button
                     key={`remove ${ws.key}`}
@@ -1319,7 +1330,7 @@ export const register: Register = on => {
         {problems}
         <Box marginTop={1}>
           <Text dimColor wrap="truncate-end">
-            {`checked ${ago(now - snap.checkedAt)} ago${hidden > 0 ? ` · ${hidden} idle longer, hidden` : ''} · [ more ] shows a row's actions; a key in ( ) presses one while this pane has the keys (ctrl+x tab) · /sessions hides`}
+            {`checked ${ago(now - snap.checkedAt)} ago${hidden > 0 ? ` · ${hidden} idle longer, hidden` : ''} · [ more ] shows a row's actions; a key in ( ) presses one once this pane has the keys (ctrl+x tab) · /sessions hides`}
           </Text>
         </Box>
       </Box>

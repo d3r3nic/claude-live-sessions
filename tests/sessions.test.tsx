@@ -761,7 +761,7 @@ describe('pane', () => {
     await ui.unmount()
   })
 
-  test('[to bg] pressed twice moves the session: checked again, hung up, resumed and attached in its own tab', async ($, on) => {
+  test('To background pressed twice moves the session: checked again, hung up, resumed and attached in its own tab', async ($, on) => {
     const { runs } = engine(on, machine, { termProgram: 'Apple_Terminal' })
     await $.session.start(START)
     await $.command.run(SESSIONS)
@@ -773,7 +773,7 @@ describe('pane', () => {
     expect(await ui.find({ key: 'bg claude-101' })).toBeUndefined()
     await reveal(ui, 'item:claude-104')
     await ui.press({ key: 'bg claude-104' })
-    expect((await ui.find({ key: 'bg claude-104' }))?.props.label).toBe('Press again to move it (b)')
+    expect((await ui.find({ key: 'bg claude-104' }))?.props.label).toBe('Press again to move it')
     expect(moves()).toEqual([])
     await ui.press({ key: 'bg claude-104' })
     expect(moves()).toEqual([[
@@ -781,7 +781,7 @@ describe('pane', () => {
       "cd '/Users/u' && CLAUDE_CONFIG_DIR='/Users/u/.claude-work' claude --bg --resume session-104 --dangerously-skip-permissions && CLAUDE_CONFIG_DIR='/Users/u/.claude-work' claude attach session-",
       TYPE_SCRIPT,
     ]])
-    expect((await ui.find({ key: 'bg claude-104' }))?.props.label).toBe('To background (b)')
+    expect((await ui.find({ key: 'bg claude-104' }))?.props.label).toBe('To background')
     await ui.unmount()
   })
 
@@ -866,9 +866,9 @@ describe('pane', () => {
     await reveal(ui, 'item:claude-104')
     await ui.press({ key: 'bg claude-104' })
     expect(moves()).toEqual([])
-    expect((await ui.find({ key: 'bg claude-104' }))?.props.label).toBe('Press again to move it (b)')
+    expect((await ui.find({ key: 'bg claude-104' }))?.props.label).toBe('Press again to move it')
     await reveal(ui, 'item:claude-101')
-    expect((await ui.find({ key: 'bg claude-101' }))?.props.label).toBe('To background (b)')
+    expect((await ui.find({ key: 'bg claude-101' }))?.props.label).toBe('To background')
     await reveal(ui, 'item:claude-104')
     await ui.press({ key: 'bg claude-104' })
     expect(moves()).toEqual(['104'])
@@ -979,7 +979,7 @@ describe('pane', () => {
     await ui.unmount()
   })
 
-  test('↑ ↓ reorder repositories and sessions; the order is kept and can be reset', async ($, on) => {
+  test('Move up and Move down reorder repositories and sessions; the order is kept and can be reset', async ($, on) => {
     const { store } = engine(on)
     await $.session.start(START)
     await $.command.run(SESSIONS)
@@ -1443,7 +1443,7 @@ describe('workspaces', () => {
 
 describe('workspaces, from the pane', () => {
   test('each row has one [ more ]; it shows the row\'s actions, worded, each with its key; one row at a time', async ($, on) => {
-    const { focusAsked } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    const { focusAsked, runs } = engine(on, machine, { termProgram: 'Apple_Terminal' })
     await $.session.start(START)
     await $.command.run(SESSIONS)
     const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
@@ -1453,10 +1453,20 @@ describe('workspaces, from the pane', () => {
     expect(await shown('bg claude-104')).toBeUndefined()
     await reveal(ui, 'item:claude-104')
     expect((await shown('more item:claude-104'))?.label).toBe('hide')
-    // shown, it asks for the keyboard, so its keys work at once
-    expect(focusAsked).toEqual(['live-sessions'])
+    // the keyboard stays where it is: keys work once the person gives the pane the keys, never by surprise
+    expect(focusAsked).toEqual([])
     expect([await shown('open-bar claude-104'), await shown('bg claude-104'), await shown('assign claude-104'), await shown('close item:claude-104')].map(b => [b?.label, b?.hotkey]))
-      .toEqual([['Open (o)', 'o'], ['To background (b)', 'b'], ['Assign to workspace (w)', 'w'], ['Close (x)', 'x']])
+      .toEqual([['Open (o)', 'o'], ['To background', undefined], ['Assign to workspace (w)', 'w'], ['Close (x)', 'x']])
+    // a chooser left open goes when the actions close: they come back as actions
+    await ui.press({ key: 'assign claude-104' })
+    expect(await shown('assign-cancel claude-104')).toBeDefined()
+    await ui.press({ key: 'close item:claude-104' })
+    await reveal(ui, 'item:claude-104')
+    expect(await shown('assign-cancel claude-104')).toBeUndefined()
+    expect(await shown('bg claude-104')).toBeDefined()
+    // Open in the actions brings the session's tab up
+    await ui.press({ key: 'open-bar claude-104' })
+    expect(runs.filter(r => r[4] === FOCUS_SCRIPT).map(r => r[5])).toEqual(['ttys022'])
     // another row's [ more ] shows its actions instead
     await reveal(ui, 'item:claude-101')
     expect(await shown('bg claude-104')).toBeUndefined()
@@ -1470,6 +1480,11 @@ describe('workspaces, from the pane', () => {
     await reveal(ui, 'tree:/Users/u/dev/web-app')
     expect(await shown('new-from:/Users/u/dev/web-app')).toBeUndefined()
     expect(await shown('workspace:new')).toMatchObject({ label: '+ New workspace (n)', hotkey: 'n' })
+    // opened, the form puts the keys on the name (moved there while the pane holds them; seen in a real
+    // terminal: n, then `ab`, filled the name and pressed nothing), so what is typed next is the name
+    await ui.press({ key: 'workspace:new' })
+    expect((await ui.find({ key: 'form:name' }))?.props.autoFocus).toBe(true)
+    await ui.press({ key: 'form:cancel' })
     // no single-glyph control is left to aim at
     const labels = (await ui.findAll({ type: 'Button' })).map(b => (b.props as { label: string }).label)
     expect(labels.filter(l => [...l].length < 3)).toEqual(['1d', '2d', '3d', '7d'])
@@ -1477,7 +1492,7 @@ describe('workspaces, from the pane', () => {
   })
 
   test('a workspace: Open and Relay on its row; its actions move, cycle the relay, and remove it on a second press', async ($, on) => {
-    const { files, toasts } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    const { files, toasts, clock, runs, store } = engine(on, machine, { termProgram: 'Apple_Terminal' })
     files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [practice, { ...practice, id: 'other', name: 'Other' }] }))
     await $.session.start(START)
     await $.command.run(SESSIONS)
@@ -1485,8 +1500,26 @@ describe('workspaces, from the pane', () => {
     const label = async (key: string) => ((await ui.find({ key }))?.props as { label: string } | undefined)?.label
     expect([await label('wsopen practice-rbac'), await label('relay practice-rbac')]).toEqual(['Open', 'Relay: off'])
     await reveal(ui, 'ws:practice-rbac')
-    expect([await label('wsopen-bar practice-rbac'), await label('relay-bar practice-rbac'), await label('up workspaces practice-rbac'), await label('remove practice-rbac')])
-      .toEqual(['Open (o)', 'Relay: off → auto (r)', 'Move up (u)', 'Remove'])
+    const hotkey = async (key: string) => ((await ui.find({ key }))?.props as { hotkey?: string } | undefined)?.hotkey
+    expect([await label('wsopen-bar practice-rbac'), await label('relay-bar practice-rbac'), await label('down workspaces practice-rbac'), await label('remove practice-rbac')])
+      .toEqual(['Open (o)', 'Relay: off → auto', 'Move down (d)', 'Remove'])
+    // keys on what only shows or moves; none on what types into agents or forgets a workspace
+    expect([await hotkey('wsopen-bar practice-rbac'), await hotkey('down workspaces practice-rbac'), await hotkey('relay-bar practice-rbac'), await hotkey('remove practice-rbac')]).toEqual(['o', 'd', undefined, undefined])
+    // only this workspace's actions are drawn
+    expect(await ui.find({ key: 'wsopen-bar other' })).toBeUndefined()
+    // they act: the relay goes round, the order changes, Open opens it
+    await ui.press({ key: 'relay-bar practice-rbac' })
+    expect(JSON.parse(files.get(WORKSPACES)!).workspaces[0].relay.mode).toBe('auto')
+    await ui.press({ key: 'down workspaces practice-rbac' })
+    expect((store.get('order') as Record<string, string[]>).workspaces).toEqual(['other', 'practice-rbac'])
+    await ui.press({ key: 'wsopen-bar practice-rbac' })
+    expect(runs.filter(r => r[4] === OPEN_SCRIPT)).toHaveLength(1)
+    // a first press goes stale after a few seconds
+    await ui.press({ key: 'remove practice-rbac' })
+    await clock.advance(7_000)
+    await ui.press({ key: 'remove practice-rbac' })
+    expect(JSON.parse(files.get(WORKSPACES)!).workspaces.map((w: Workspace) => w.id)).toEqual(['practice-rbac', 'other'])
+    await clock.advance(7_000)
     await ui.press({ key: 'remove practice-rbac' })
     expect(await label('remove practice-rbac')).toBe('Press again to remove it')
     expect(JSON.parse(files.get(WORKSPACES)!).workspaces.map((w: Workspace) => w.id)).toEqual(['practice-rbac', 'other'])
@@ -1583,7 +1616,7 @@ describe('workspaces, from the pane', () => {
     await ui.unmount()
   })
 
-  test('+ ws on a branch row fills in its folder; a purpose needs a git repository', async ($, on) => {
+  test('New workspace here on a branch row fills in its folder; a purpose needs a git repository', async ($, on) => {
     const { files } = engine(on, machine, { termProgram: 'Apple_Terminal' })
     await $.session.start(START)
     await $.command.run(SESSIONS)
@@ -1676,7 +1709,7 @@ describe('workspaces, from the pane', () => {
     expect(JSON.parse(files.get(WORKSPACES)!).workspaces.map((w: Workspace) => w.id)).toContain('after')
   })
 
-  test('⊕ on a session assigns it to a workspace from the pane, and none unassigns it', async ($, on) => {
+  test('Assign to workspace on a session assigns it from the pane, and No workspace unassigns it', async ($, on) => {
     const { files } = engine(on, machine, { termProgram: 'Apple_Terminal' })
     files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [practice] }))
     await $.session.start(START)
