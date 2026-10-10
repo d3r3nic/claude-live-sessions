@@ -40,6 +40,29 @@ const check = (name, ok, detail = '') => {
   console.log(`${ok ? 'ok  ' : 'FAIL'} ${name}${detail ? `: ${detail}` : ''}`)
 }
 const turnOf = file => (file === undefined ? undefined : r.parseTurns(sh(r.TURN_SCRIPT, file)).get(file))
+// the Codex terminals as the plugin's own collection matches them to their conversations (processes, environments,
+// rollouts held open, each Codex home's threads)
+const PS_ENV = { ...process.env, LC_ALL: 'C', TZ: 'UTC' }
+const codexRows = () => {
+  const now = Date.now()
+  const pids = new Set(spawnSync('/usr/bin/pgrep', ['-x', 'codex'], { encoding: 'utf8' }).stdout.split('\n').filter(Boolean).map(Number))
+  const procs = c.parsePs(spawnSync('/bin/ps', ['-ww', '-o', c.PS_COLUMNS, '-p', [...pids].join(',') || '1'], { encoding: 'utf8', env: PS_ENV }).stdout)
+  const raw = c.codexTerminals(procs, pids)
+  const envBy = raw.length ? c.parseEnv(spawnSync('/bin/sh', ['-c', c.ENV_SCRIPT, 'sh', raw.map(p => p.pid).join(',')], { encoding: 'utf8', env: PS_ENV }).stdout) : new Map()
+  const heldBy = raw.length ? c.parseRollouts(spawnSync('/usr/sbin/lsof', ['-n', '-P', '-a', '-p', raw.map(p => p.pid).join(','), '-Fpn'], { encoding: 'utf8' }).stdout) : new Map()
+  const terminals = raw.map(p => c.codexProcFrom(p, envBy.get(p.pid), heldBy.get(p.pid) ?? [], HOME))
+  const threads = new Map()
+  for (const dir of readdirSync(HOME).filter(n => /^\.codex(-[\w.-]+)?$/.test(n))) {
+    const codexHome = join(HOME, dir)
+    const db = readdirSync(codexHome).map(n => /^state_(\d+)\.sqlite$/.exec(n)).filter(Boolean).sort((x, y) => y[1] - x[1])[0]?.[0]
+    if (!db) continue
+    const mine = terminals.filter(t => t.codexHome === codexHome)
+    const sql = c.threadQuery(Math.min(now - c.ACTIVE_MS, ...mine.map(t => t.startedAt - 5000)), now - c.AGENT_MS, mine.flatMap(t => [...t.held, ...(t.resumeId ? [t.resumeId] : [])]))
+    const path = join(codexHome, db)
+    threads.set(codexHome, c.parseThreads(spawnSync('sqlite3', ['-json', '-cmd', '.timeout 2000', ...c.readOnlyArgs(path, existsSync(`${path}-shm`)), sql], { encoding: 'utf8' }).stdout))
+  }
+  return c.codexSessions({ terminals, threads, now })
+}
 const waitFor = async (what, ms, test) => {
   for (const end = Date.now() + ms; Date.now() < end; await sleep(2_000)) {
     const value = test()
@@ -103,9 +126,14 @@ try {
     codex: { id: codexId, dir: b.codexDir(codexMode) ?? TRUSTED, flags: b.codexFlags(codexMode) },
   }
   check('read: Claude\'s permission flags and Codex\'s sandbox, approvals and folder', claudeFlags !== undefined && b.codexDir(codexMode) === TRUSTED && threads.codex.flags[0] === '--sandbox', JSON.stringify(threads))
-  const claudeStop = sh(b.STOP_SCRIPT, claudeTty, b.JOB_COMMANDS.claude, 'claude').trim()
-  const codexStop = sh(b.STOP_SCRIPT, codexTty, b.JOB_COMMANDS.codex, 'codex').trim()
   const front = tty => spawnSync('/bin/ps', ['-t', tty, '-o', 'stat=,comm='], { encoding: 'utf8' }).stdout
+  // the plugin's own match: the terminal's row, its conversation and process, known for certain (else never brought in)
+  const rows = codexRows()
+  const row = rows.find(s => s.surface === 'terminal' && s.tty === codexTty)
+  check('the plugin matches the Codex terminal to its conversation, for certain', row?.key === codexId && row.pid !== undefined && b.isKnownCodex({ codex: rows }, row), `${row?.key} ${row?.match} ${row?.pid}`)
+  const codexPid = row?.pid
+  const claudeStop = sh(b.STOP_SCRIPT, claudeTty, b.JOB_COMMANDS.claude, String(claudePid)).trim()
+  const codexStop = sh(b.STOP_SCRIPT, codexTty, b.JOB_COMMANDS.codex, String(codexPid)).trim()
   check('closed where they ran: each hung up and exited; the terminal keeps its shell', claudeStop === 'stopped' && codexStop === 'stopped' && !/claude|codex/.test(front(claudeTty) + front(codexTty)), `${claudeStop} ${codexStop}`)
 
   // resumed in the workspace by the plugin's own command line, each with its first prompt there

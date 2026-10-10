@@ -143,7 +143,7 @@ export type Step =
  * RELAY_CAP passes in a row with no prompt from the owner, the owner is told instead. A NEEDS USER or SCOPE CLOSED cue is the
  * owner's: they are told.
  */
-export function relaySteps(ws: Pick<Workspace, 'name' | 'relay'>, sides: Partial<Record<Tool, Side>>, now: number, cap = RELAY_CAP): Step[] {
+export function relaySteps(ws: Pick<Workspace, 'name' | 'relay'> & Partial<Pick<Workspace, 'threads'>>, sides: Partial<Record<Tool, Side>>, now: number, cap = RELAY_CAP): Step[] {
   const relay: Relay | undefined = ws.relay
   if (relay === undefined || relay.mode === 'off') return []
   const steps: Step[] = []
@@ -163,8 +163,9 @@ export function relaySteps(ws: Pick<Workspace, 'name' | 'relay'>, sides: Partial
       steps.push({ kind: 'tell', key: `tell-${turn.id}`, text: `${ws.name}: ${NAME[tool]} handed over to ${NAME[cue.to]}. Paste: ${cue.line}`, isForOwner: false })
     } else if (other === undefined) {
       steps.push({ kind: 'tell', key: `tell-${turn.id}`, text: `${ws.name}: ${NAME[tool]} handed over, but ${NAME[cue.to]} is not running in the workspace. Paste: ${cue.line}`, isForOwner: true })
-    } else if (other.turn === undefined) {
-      // an agent that has not finished a turn may be at a question of its own (trust, an update), which Enter would answer
+    } else if (other.turn === undefined || other.turn.at < (ws.threads?.[cue.to]?.since ?? -Infinity)) {
+      // an agent that has not finished a turn (one resuming its conversation: a turn in this workspace) may be at a
+      // question of its own (trust, an update), which Enter would answer
       steps.push({ kind: 'tell', key: `wait-${turn.id}`, text: `${ws.name}: ${NAME[tool]} handed over; the relay passes it once ${NAME[cue.to]} has finished a turn. If ${NAME[cue.to]} is waiting at a question in its pane, answer it.`, isForOwner: false })
     } else if (other.isBusy) {
       continue
@@ -212,7 +213,8 @@ export const RELAY_SCRIPT = [
   'fi',
   `tty=$(t display-message -p -t "$pane" '#{pane_tty}' 2>/dev/null) && [ -n "$tty" ] || { echo gone; exit 0; }`,
   `cmds=$(ps -t "\${tty#/dev/}" -o stat=,comm= 2>/dev/null | awk '$1 ~ /[+]/ { n = $0; sub(/^[ \\t]*[^ \\t]+[ \\t]+/, "", n); sub(".*/", "", n); print n }' | sort -u)`,
-  'ok=; for c in $cmds; do case "|$allow|" in *"|$c|"*) ok=1;; esac; done',
+  // one command name a line (a name may hold a space): each matched whole
+  'ok=; while IFS= read -r c; do case "|$allow|" in *"|$c|"*) ok=1;; esac; done <<EOF\n$cmds\nEOF',
   '[ -n "$ok" ] || { printf \'not-agent %s\\n\' "$(echo $cmds)"; exit 0; }',
   // typed only while the pane is not scrolled back, checked and done in one step of the tmux server; the
   // line goes through a buffer, so tmux reads none of it (a `;` that ends it stays)

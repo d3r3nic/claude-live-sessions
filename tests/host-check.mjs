@@ -470,6 +470,19 @@ except ChildProcessError: pass
     spawnSync(process.env.SHELL ?? '/bin/zsh', ['-c', line], { encoding: 'utf8' })
     const again = Object.values(w.parsePanes(spawnSync('tmux', ['-L', socket, '-f', '/dev/null', 'list-panes', '-a', '-F', w.PANES_FORMAT], { encoding: 'utf8' }).stdout)).length
     check('workspace: opening it again creates nothing more', again === 4, `${again} panes in two workspaces`)
+    // a workspace that resumes Claude's conversation: never while a live Claude session (its registry entry, its
+    // process) has it open; resumed, from its folder, when none has
+    mkdirSync(join(fakeHome, '.claude', 'sessions'), { recursive: true })
+    writeFileSync(join(fakeHome, '.claude', 'sessions', `${process.pid}.json`), JSON.stringify({ pid: process.pid, sessionId: 'held-conv' }))
+    writeFileSync(join(fakeHome, '.claude', 'sessions', '999999.json'), JSON.stringify({ pid: 999999, sessionId: 'free-conv' }))
+    const resumes = (id, n) => w.openCommand({ id: `check-${n}`, env: '', dir: scratch, createdAt: n, threads: { claude: { id, dir: hashed } } }, fakeHome, { socket, attach: false, bins: { claude: record('claude', `${n}-`), codex: record('codex', `${n}-`) } })
+    spawnSync(process.env.SHELL ?? '/bin/zsh', ['-c', resumes('held-conv', 3)], { encoding: 'utf8' })
+    spawnSync(process.env.SHELL ?? '/bin/zsh', ['-c', resumes('free-conv', 4)], { encoding: 'utf8' })
+    for (let i = 0; i < 30 && !existsSync(`${scratch}/4-claude.args`); i++) await new Promise(r => setTimeout(r, 200))
+    await new Promise(r => setTimeout(r, 500))
+    const said = spawnSync('tmux', ['-L', socket, '-f', '/dev/null', 'capture-pane', '-p', '-J', '-t', '=ws-check-3:peers.0'], { encoding: 'utf8' }).stdout
+    check('workspace: Claude\'s conversation open in a live session is not resumed again; it says so', !existsSync(`${scratch}/3-claude.args`) && said.includes('This conversation is open in another Claude session'), said.trim().split('\n')[0])
+    check('workspace: a conversation no live session has is resumed, from where it started', file('4-claude.args').startsWith('--resume\nfree-conv\n') && file('4-claude.pwd').trim().endsWith('C#{session_name}'), file('4-claude.args').split('\n').slice(0, 2).join(' '))
   } finally {
     // a check that throws still ends the private server
     spawnSync('tmux', ['-L', socket, '-f', '/dev/null', 'kill-server'])
@@ -784,21 +797,27 @@ except ChildProcessError: pass
     const bin = join(scratch, 'My Tools')
     mkdirSync(bin)
     writeFileSync(join(scratch, 'wait.c'), '#include <unistd.h>\n#include <stdlib.h>\nint main(int c, char **v) { sleep(c > 1 ? atoi(v[1]) : 600); return 0; }\n')
-    for (const name of ['codex', 'node']) execFileSync('/usr/bin/cc', ['-o', join(bin, name), join(scratch, 'wait.c')])
+    for (const name of ['codex', 'node', 'my claude']) execFileSync('/usr/bin/cc', ['-o', join(bin, name), join(scratch, 'wait.c')])
     writeFileSync(join(scratch, 'job.sh'), `#!/bin/sh\n'${bin}/node' 600 &\nexec '${bin}/codex' 600\n`)
     tmux('new-session', '-d', '-s', 'agent', `/bin/sh '${scratch}/job.sh'`)
     tmux('new-session', '-d', '-s', 'shell', '/bin/sh')
+    tmux('new-session', '-d', '-s', 'lookalike', `'${bin}/my claude' 600`)
     await new Promise(res => setTimeout(res, 500))
     const ttyOf = name => tmux('display-message', '-p', '-t', `=${name}:`, '#{pane_tty}').stdout.trim().replace('/dev/', '')
     const front = tty => spawnSync('/bin/ps', ['-t', tty, '-o', 'pid=,stat=,comm='], { encoding: 'utf8' }).stdout
     const agentTty = ttyOf('agent')
     const before = front(agentTty)
-    const stop = (tty, agent) => spawnSync('/bin/sh', ['-c', b.STOP_SCRIPT, 'sh', tty, b.JOB_COMMANDS[agent], agent], { encoding: 'utf8', timeout: 30_000 }).stdout.trim()
-    check('bring: nothing is hung up where the agent is not in front of its terminal', stop(ttyOf('shell'), 'codex') === 'not-running' && stop(agentTty, 'claude') === 'not-running' && stop('console', 'codex') === 'not-running')
+    const stop = (tty, agent, pid) => spawnSync('/bin/sh', ['-c', b.STOP_SCRIPT, 'sh', tty, b.JOB_COMMANDS[agent], String(pid)], { encoding: 'utf8', timeout: 30_000 }).stdout.trim()
+    const codexPid = Number(before.split('\n').find(l => l.trim().endsWith('/codex'))?.trim().split(/\s+/)[0])
+    check('bring: nothing is hung up unless that very process is in front of its terminal, under the agent\'s name',
+      stop(ttyOf('shell'), 'codex', codexPid) === 'not-running' && stop(agentTty, 'claude', codexPid) === 'not-running' && stop(agentTty, 'codex', process.pid) === 'not-running' && stop('console', 'codex', codexPid) === 'not-running' && /codex/.test(front(agentTty)), String(codexPid))
     // the relay too knows the agent by its command's whole name, its folder's space and all
     const typedIn = spawnSync('/bin/sh', ['-c', r.RELAY_SCRIPT, 'sh', 'pass', join(scratch, 'ledger'), 'pass-b1', tmux('display-message', '-p', '-t', '=agent:', '#{pane_id}').stdout.trim(), 'codex', 'READY FOR CODEX · x', socket, 'check'], { encoding: 'utf8' }).stdout.trim()
     check('relay: an agent run from a folder with a space in its name is the agent', typedIn === 'passed', typedIn)
-    const stopped = stop(agentTty, 'codex')
+    // a command whose name only holds the agent's among other words is not the agent
+    const lookalike = spawnSync('/bin/sh', ['-c', r.RELAY_SCRIPT, 'sh', 'pass', join(scratch, 'ledger'), 'pass-b2', tmux('display-message', '-p', '-t', '=lookalike:', '#{pane_id}').stdout.trim(), 'claude', 'READY FOR CLAUDE · x', socket, 'check'], { encoding: 'utf8' }).stdout.trim()
+    check('relay: a command named "my claude" is not Claude', lookalike === 'not-agent my claude', lookalike)
+    const stopped = stop(agentTty, 'codex', codexPid)
     const after = front(agentTty)
     check('bring: the agent\'s job in front of its terminal hung up, waited for until it has exited', stopped === 'stopped' && /codex/.test(before) && /node/.test(before) && !/codex|node/.test(after), `${stopped} | ${before.trim()} | ${after.trim()}`)
     // a Codex home with a rollout: found by its id; how it last ran read from its last turn_context

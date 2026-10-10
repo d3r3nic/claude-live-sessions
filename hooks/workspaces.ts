@@ -113,6 +113,7 @@ export const promptPath = (home: string, id: string, tool: 'claude' | 'codex') =
  * folder it ran in, with the flags that keep its permissions.
  */
 function paneScript(tool: 'claude' | 'codex', ws: Pick<Workspace, 'id' | 'env' | 'checkout' | 'threads'>, home: string, bin?: string): string {
+  // (an id from the workspaces file reaches the line only as threadFrom read it: letters, digits, dashes)
   const thread = ws.threads?.[tool]
   const addDir = ws.checkout === undefined ? '' : ` --add-dir ${shellWord(`${ws.checkout}-worktrees`)}`
   const prompt = shellWord(promptPath(home, ws.id, tool))
@@ -122,8 +123,11 @@ function paneScript(tool: 'claude' | 'codex', ws: Pick<Workspace, 'id' | 'env' |
     thread === undefined
       ? `${start}${tool === 'codex' ? ` ${UPDATE_OFF} --sandbox workspace-write` : ''}${addDir} \${p:+--} \${p:+"$p"}`
       : tool === 'claude'
-        // a Claude conversation is kept under the folder it started in: resumed from there
-        ? `cd ${shellWord(thread.dir)} && ${start} --resume ${thread.id}${flags}${addDir} \${p:+--} \${p:+"$p"}`
+        // a Claude conversation is kept under the folder it started in: resumed from there, unless a live Claude
+        // session has it open (its registry entry, its process there): then it says so and leaves a shell
+        ? `open=; for f in ${shellWord(`${home}/.claude${ws.env === '' ? '' : `-${ws.env}`}`)}/sessions/*.json; do grep -q '"sessionId":"${thread.id}"' "$f" 2>/dev/null && kill -0 "$(basename "$f" .json)" 2>/dev/null && open=1; done; ` +
+          `if [ -n "$open" ]; then echo 'This conversation is open in another Claude session; close it there, then open the workspace again.'; ` +
+          `else cd ${shellWord(thread.dir)} && ${start} --resume ${thread.id}${flags}${addDir} \${p:+--} \${p:+"$p"}; fi`
         : `${start} resume ${UPDATE_OFF}${thread.flags?.includes('--sandbox') === true ? '' : ' --sandbox workspace-write'}${flags}${addDir} -C ${shellWord(thread.dir)} -- ${thread.id} \${p:+"$p"}`
   const run = `p=$(cat ${prompt} 2>/dev/null) && rm -f ${prompt}; ${agent}`
   return `/bin/sh -c ${shellWord(`${run}; exec "$SHELL" -l`)}`
@@ -498,7 +502,7 @@ export function checkoutResult(stdout: string): { checkout: string } | { error: 
  * which the workspace's relay passes on.
  */
 export function setupPrompt(ws: Pick<Workspace, 'name' | 'purpose' | 'checkout' | 'threads'>): string {
-  const codex = ws.threads?.codex === undefined ? 'Codex runs in the pane beside you' : 'Codex runs in the pane beside you, in its own conversation, which the owner brought in: it has been working on this already'
+  const codex = ws.threads?.codex === undefined ? 'Codex runs in the pane beside you' : 'Codex runs in the pane beside you, in its own conversation, which the owner brought in: your alignment brief can ask it where its work stands'
   return [
     `This is the workspace "${ws.name}". What it is for: ${ws.purpose ?? ''}`,
     '',
@@ -558,7 +562,7 @@ export function joinPrompt(ws: Pick<Workspace, 'name' | 'purpose' | 'checkout' |
     '',
     'From here, work as a peer under the peer-coding rules, using the peer-coding skill:',
     '1. If this repository is not set up for peer coding in the current layout, set it up. Record the owner\'s decisions you already know and ask for the rest with NEEDS USER.',
-    `2. If the work above already has a peer-coding branch, go on with it. Otherwise start one for this purpose: name it from the purpose by the settings' branch naming, never from the workspace's name, in its own worktree in ${ws.checkout ?? '<checkout>'}-worktrees/, and take along work of yours that is not committed yet.`,
+    `2. If the work above already has a peer-coding branch, go on with it. Otherwise start one for this purpose: name it from the purpose by the settings' branch naming, never from the workspace's name, in its own worktree in ${ws.checkout ?? '<checkout>'}-worktrees/. Work of yours not committed yet stays where it is: ask the owner with NEEDS USER before moving any of it.`,
     '3. Make your alignment move for that branch, telling Codex where the work stands, and end your turn with the line the rules\' cue prints.',
   ].join('\n')
 }

@@ -1,14 +1,14 @@
 // Bringing running sessions into a new workspace: each one closes where it
 // runs and its pane in the workspace resumes the same conversation. Pure: no
 // `$`, so the tests drive it directly.
-import type { ClaudeSession, CodexSession, Snapshot, Thread, Workspace } from '../types'
+import type { CodexSession, Snapshot, Thread, Workspace } from '../types'
 import { claudeState, WORKING_MS } from './collect'
 import { tmuxName } from './workspaces'
 
 type Tool = 'claude' | 'codex'
 
-/** An id that goes into a shell command as it is. */
-const SAFE_ID = /^[A-Za-z0-9-]{1,64}$/
+/** An id that goes into a command line as it is: letters, digits and dashes, never first a dash (an option). */
+const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/
 
 /** The environment a session's profile belongs to: '' for `claude`/`codex`, `work` for `claude-work`; undefined for none. */
 export function envOfProfile(tool: Tool, profile: string): string | undefined {
@@ -26,6 +26,21 @@ export type Bringable = {
   env: string
   /** Between turns: what bringing it in needs. */
   isIdle: boolean
+  /** Why it cannot be brought in, when it cannot: it is shown, not offered. */
+  blocked?: string
+}
+
+/**
+ * Whether a Codex terminal's conversation is known for certain, so that
+ * closing it closes that conversation and no other: it holds the
+ * conversation's rollout open; or it is the only Codex terminal in its folder
+ * under its Codex home, and no conversation there is newer than the one it was
+ * matched to (as a `/new` or `/resume` inside it since would make).
+ */
+export function isKnownCodex(snap: Pick<Snapshot, 'codex'>, s: CodexSession): boolean {
+  if (s.surface !== 'terminal' || s.pid === undefined || s.match === undefined || !SAFE_ID.test(s.key) || s.key.startsWith('pid-')) return false
+  if (s.match === 'held') return true
+  return !snap.codex.some(o => o !== s && o.profile === s.profile && o.cwd === s.cwd && (o.surface === 'terminal' || o.updatedAt > s.updatedAt))
 }
 
 /**
@@ -51,10 +66,16 @@ export function bringable(snap: Snapshot, o: { now: number; selfId: string }, di
   }
   for (const s of snap.codex) {
     const env = envOfProfile('codex', s.profile)
-    if (s.surface !== 'terminal' || !/^ttys\d+$/.test(s.tty) || !SAFE_ID.test(s.key) || s.key.startsWith('pid-')) continue
+    if (s.surface !== 'terminal' || !/^ttys\d+$/.test(s.tty)) continue
     if (env === undefined || !s.cwd.startsWith('/') || inWorkspace(s.tty) || !inRepo(s.cwd)) continue
     const isIdle = !(s.updatedAt > 0 && o.now - s.updatedAt < WORKING_MS)
-    found.push({ member: `codex:${s.key}`, tool: 'codex', label: `Codex · ${s.title || s.key.slice(0, 8)}`, env, isIdle, at: s.lastActive })
+    const isKnown = isKnownCodex(snap, s)
+    // a terminal whose conversation is not known for certain is shown, never offered: closing it could close another
+    const blocked = isKnown ? undefined : s.key.startsWith('pid-') ? 'its conversation was not found' : 'another Codex works in that folder, so which conversation it runs is not certain'
+    found.push({
+      member: isKnown ? `codex:${s.key}` : `codex-tty:${s.tty}`, tool: 'codex', label: `Codex · ${s.key.startsWith('pid-') ? s.tty : s.title || s.key.slice(0, 8)}`, env, isIdle, at: s.lastActive,
+      ...(blocked === undefined ? {} : { blocked }),
+    })
   }
   return found.sort((a, b) => Number(b.isIdle) - Number(a.isIdle) || b.at - a.at).map(({ at: _, ...b }) => b)
 }
@@ -68,6 +89,18 @@ export function toggled(chosen: readonly string[], member: string): string[] {
 
 /** Codex's rollout of the conversation "$2" under the Codex home "$1": its path, or nothing. */
 export const ROLLOUT_SCRIPT = 'find "$1/sessions" -type f -name "rollout-*-$2.jsonl" 2>/dev/null | head -n 1'
+
+/**
+ * How a Codex conversation's last turn stands, from its whole rollout ("$1"):
+ * the last task event, `"type":"task_started"` while one is under way.
+ */
+export const CODEX_TASK_SCRIPT = `/usr/bin/grep -oE '"type":"(task_started|task_complete|turn_aborted)"' "$1" 2>/dev/null | /usr/bin/tail -n 1`
+
+/** CODEX_TASK_SCRIPT's answer: a task under way, none (between turns), or unknown (no task yet, or no rollout). */
+export function codexTaskState(stdout: string): 'busy' | 'done' | undefined {
+  const last = stdout.trim()
+  return last.includes('task_started') ? 'busy' : /task_complete|turn_aborted/.test(last) ? 'done' : undefined
+}
 
 /**
  * The sandbox, approval policy and folder a Codex conversation last ran
@@ -85,7 +118,11 @@ export function codexDir(stdout: string): string | undefined {
   return dir.startsWith('/') && !/[\u0000-\u001f\u007f]/.test(dir) ? dir : undefined
 }
 
-const APPROVALS = new Set(['untrusted', 'on-failure', 'on-request', 'never'])
+/** The approval policies `codex resume --ask-for-approval` takes (0.160). */
+const APPROVALS = new Set(['on-request', 'never'])
+const SANDBOXES = new Set(['workspace-write', 'danger-full-access'])
+/** The modes `claude --permission-mode` takes, as a session records them. */
+const MODES = new Set(['acceptEdits', 'auto', 'manual', 'dontAsk', 'plan'])
 
 /**
  * The flags that resume a Codex conversation as it ran, from
@@ -102,36 +139,62 @@ export function codexFlags(stdout: string): string[] {
   ]
 }
 
-const CLAUDE_FLAGS = new Set(['--dangerously-skip-permissions', '--permission-mode', 'acceptEdits', 'auto', 'manual', 'dontAsk', 'plan'])
-const CODEX_FLAGS = new Set(['--sandbox', 'workspace-write', 'danger-full-access', '--ask-for-approval', ...APPROVALS])
+/** Flags as the plugin writes them, whole: Claude's permission mode; Codex's sandbox, then its approvals. */
+function isFlags(tool: Tool, f: readonly unknown[]): boolean {
+  if (tool === 'claude') {
+    return f.length === 0 || (f.length === 1 && f[0] === '--dangerously-skip-permissions') || (f.length === 2 && f[0] === '--permission-mode' && MODES.has(String(f[1])))
+  }
+  return f[0] === '--sandbox' && SANDBOXES.has(String(f[1])) && (f.length === 2 || (f.length === 4 && f[2] === '--ask-for-approval' && APPROVALS.has(String(f[3]))))
+}
 
 /** A thread as saved, if it is one: a hand-edited or later one is dropped, never run. */
 export function threadFrom(tool: Tool, raw: unknown): Thread | undefined {
   const o = raw as Partial<Thread> | null
   if (typeof o !== 'object' || o === null || typeof o.id !== 'string' || !SAFE_ID.test(o.id) || typeof o.dir !== 'string' || !o.dir.startsWith('/')) return undefined
   if (/[\u0000-\u001f\u007f]/.test(o.dir)) return undefined
-  const allowed = tool === 'claude' ? CLAUDE_FLAGS : CODEX_FLAGS
-  if (o.flags !== undefined && !(Array.isArray(o.flags) && o.flags.every(f => typeof f === 'string' && allowed.has(f)))) return undefined
-  return { id: o.id, dir: o.dir, ...(o.flags === undefined || o.flags.length === 0 ? {} : { flags: [...o.flags] }) }
+  if (o.flags !== undefined && !(Array.isArray(o.flags) && o.flags.every(f => typeof f === 'string') && isFlags(tool, o.flags))) return undefined
+  const since = typeof o.since === 'number' && Number.isFinite(o.since) ? o.since : undefined
+  return { id: o.id, dir: o.dir, ...(o.flags === undefined || o.flags.length === 0 ? {} : { flags: [...o.flags] }), ...(since === undefined ? {} : { since }) }
+}
+
+/**
+ * The list with `threads` kept for the workspace `id` (none: none kept), and
+ * those conversations taken from any other workspace: a conversation goes on
+ * in one workspace at most, so two never resume it at once.
+ */
+export function withThreads(list: readonly Workspace[], id: string, threads: { claude?: Thread; codex?: Thread }): Workspace[] {
+  const ids = new Set([threads.claude?.id, threads.codex?.id].filter((x): x is string => x !== undefined))
+  const isTaken = (t: Thread | undefined) => t !== undefined && ids.has(t.id)
+  const pick = (t: { claude?: Thread; codex?: Thread }) => ({
+    ...(t.claude === undefined ? {} : { claude: t.claude }),
+    ...(t.codex === undefined ? {} : { codex: t.codex }),
+  })
+  return list.map(ws => {
+    const kept = ws.id === id ? pick(threads) : pick({ claude: isTaken(ws.threads?.claude) ? undefined : ws.threads?.claude, codex: isTaken(ws.threads?.codex) ? undefined : ws.threads?.codex })
+    if (ws.id !== id && ws.threads === undefined) return ws
+    const { threads: _, ...rest } = ws
+    return kept.claude === undefined && kept.codex === undefined ? rest : { ...rest, threads: kept }
+  })
 }
 
 /**
  * Closes an agent where it runs, as a terminal closing does, so its
- * conversation can go on elsewhere and never runs twice: hangs up each
- * process of the job in front of the terminal "$1" whose command is one of
- * "$2" (`a|b`), once one of them is "$3", then waits until they have exited.
- * Prints `stopped`; `not-running` when "$3" is not in front of that
- * terminal; `stuck` when they have not exited in 20 s.
+ * conversation can go on elsewhere and never runs twice: once the process
+ * "$3" is in front of the terminal "$1" under one of the commands "$2"
+ * (`a|b`), hangs up each process of that job named so, then waits until they
+ * have exited. Prints `stopped`; `not-running` when that process is not in
+ * front of that terminal (gone, suspended, behind another program); `stuck`
+ * when they have not exited in 20 s.
  */
 export const STOP_SCRIPT = [
-  'tty=$1; names=$2; agent=$3',
+  'tty=$1; names=$2; want=$3',
   'case $tty in ttys[0-9]*) ;; *) echo not-running; exit 0;; esac',
   // each process in front: its pid, a tab, its command's name (the rest of the line: a folder may hold spaces)
   `front() { /bin/ps -t "$tty" -o pid=,stat=,comm= 2>/dev/null | /usr/bin/awk '$2 ~ /[+]/ && $2 !~ /^Z/ { n = $0; sub(/^[ \\t]*[0-9]+[ \\t]+[^ \\t]+[ \\t]+/, "", n); sub(".*/", "", n); print $1 "\\t" n }'; }`,
   'pids=; seen=; tab=$(printf "\\t")',
   'list=$(front)',
   'while IFS=$tab read -r pid name; do',
-  '  case "|$names|" in *"|$name|"*) pids="$pids $pid"; [ "$name" = "$agent" ] && seen=1;; esac',
+  '  case "|$names|" in *"|$name|"*) pids="$pids $pid"; [ "$pid" = "$want" ] && seen=1;; esac',
   'done <<EOF',
   '$list',
   'EOF',
@@ -151,30 +214,34 @@ export const JOB_COMMANDS: Record<Tool, string> = { claude: 'claude', codex: 'co
 
 /**
  * The conversations each workspace's panes run now, where they differ from
- * what it keeps: a pane's Claude session (resumed from where it started) or
- * Codex terminal (from its thread's folder). A pane with no agent running
- * leaves what is kept; the flags kept go with the same conversation only.
+ * what it keeps: a pane's interactive Claude session (resumed from where it
+ * started) or a Codex terminal whose conversation is known for certain (from
+ * its thread's folder), under the workspace's own environment. A pane with
+ * no such agent leaves what is kept. Claude keeps its flags (the pane started
+ * it with them, `/clear` and all); Codex keeps them with the same conversation.
  */
 export function seenThreads(
-  workspaces: readonly Pick<Workspace, 'id' | 'threads'>[],
-  panes: Snapshot['tmux']['panes'],
-  claude: readonly Pick<ClaudeSession, 'tty' | 'sessionId' | 'startCwd'>[],
-  codex: readonly Pick<CodexSession, 'tty' | 'key' | 'cwd' | 'surface'>[],
+  workspaces: readonly Pick<Workspace, 'id' | 'env' | 'threads'>[],
+  snap: Pick<Snapshot, 'tmux' | 'claude' | 'codex'>,
 ): Map<string, { claude?: Thread; codex?: Thread }> {
   const changed = new Map<string, { claude?: Thread; codex?: Thread }>()
   for (const ws of workspaces) {
     const now: { claude?: Thread; codex?: Thread } = { ...ws.threads }
     let isChanged = false
-    for (const [tty, pane] of Object.entries(panes)) {
+    for (const [tty, pane] of Object.entries(snap.tmux.panes)) {
       if (pane.session !== tmuxName(ws) || (pane.window !== 'claude' && pane.window !== 'codex')) continue
       const tool = pane.window
-      const seen =
-        tool === 'claude'
-          ? claude.filter(s => s.tty === tty && SAFE_ID.test(s.sessionId) && s.startCwd.startsWith('/')).map(s => ({ id: s.sessionId, dir: s.startCwd }))[0]
-          : codex.filter(s => s.surface === 'terminal' && s.tty === tty && SAFE_ID.test(s.key) && !s.key.startsWith('pid-') && s.cwd.startsWith('/')).map(s => ({ id: s.key, dir: s.cwd }))[0]
       const kept = now[tool]
+      let seen: Thread | undefined
+      if (tool === 'claude') {
+        const s = snap.claude.find(c => c.tty === tty && c.kind === 'interactive' && SAFE_ID.test(c.sessionId) && c.startCwd.startsWith('/') && envOfProfile('claude', c.profile) === ws.env)
+        seen = s === undefined ? undefined : { id: s.sessionId, dir: s.startCwd, ...(kept?.flags === undefined ? {} : { flags: kept.flags }), ...(kept?.id === s.sessionId && kept.since !== undefined ? { since: kept.since } : {}) }
+      } else {
+        const s = snap.codex.find(c => c.tty === tty && isKnownCodex(snap, c) && envOfProfile('codex', c.profile) === ws.env)
+        seen = s === undefined ? undefined : { id: s.key, dir: s.cwd, ...(kept?.id === s.key && kept.flags !== undefined ? { flags: kept.flags } : {}), ...(kept?.id === s.key && kept.since !== undefined ? { since: kept.since } : {}) }
+      }
       if (seen === undefined || (kept?.id === seen.id && kept.dir === seen.dir)) continue
-      now[tool] = { ...seen, ...(kept?.id === seen.id && kept.flags !== undefined ? { flags: kept.flags } : {}) }
+      now[tool] = seen
       isChanged = true
     }
     if (isChanged) changed.set(ws.id, now)

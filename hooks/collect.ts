@@ -394,6 +394,14 @@ export const sortClaude = (list: ClaudeSession[]) =>
   [...list].sort((a, b) => rank(a) - rank(b) || b.since - a.since)
 
 /** An open codex terminal, as its process and environment tell it. */
+/**
+ * How a Codex terminal was matched to its conversation: it holds the
+ * conversation's rollout open (`held`, certain); its command line resumed it
+ * (`resume`: a `/new` or `/resume` inside since would leave that stale); or it
+ * is the newest made in its folder since it started (`folder`).
+ */
+export type CodexMatch = 'held' | 'resume' | 'folder'
+
 export type CodexProc = {
   pid: number
   tty: string
@@ -531,25 +539,25 @@ export function codexSessions(args: {
   const newest = (list: ThreadRow[]) => list.sort((a, b) => b.updated_at_ms - a.updated_at_ms)[0]
 
   const taken = new Set<string>()
-  const matched = new Map<number, ThreadRow>()
+  const matched = new Map<number, { thread: ThreadRow; by: CodexMatch }>()
   const newestFirst = [...terminals].sort((a, b) => b.startedAt - a.startedAt)
-  const pass = (pick: (proc: CodexProc, free: ThreadRow[]) => ThreadRow | undefined) => {
+  const pass = (by: CodexMatch, pick: (proc: CodexProc, free: ThreadRow[]) => ThreadRow | undefined) => {
     for (const proc of newestFirst) {
       if (matched.has(proc.pid)) continue
       const free = (threads.get(proc.codexHome) ?? []).filter(t => !taken.has(t.id))
       const thread = pick(proc, free)
       if (thread === undefined) continue
       taken.add(thread.id)
-      matched.set(proc.pid, thread)
+      matched.set(proc.pid, { thread, by })
     }
   }
   const sinceStart = (proc: CodexProc, ms: number) => ms >= proc.startedAt - 5_000
-  pass((proc, free) => newest(free.filter(t => proc.held.includes(t.id))))
-  pass((proc, free) => free.find(t => t.id === proc.resumeId))
-  pass((proc, free) =>
+  pass('held', (proc, free) => newest(free.filter(t => proc.held.includes(t.id))))
+  pass('resume', (proc, free) => free.find(t => t.id === proc.resumeId))
+  pass('folder', (proc, free) =>
     newest(free.filter(t => madeBy(proc, t) && t.cwd === proc.cwd && sinceStart(proc, t.created_at_ms))),
   )
-  pass((proc, free) =>
+  pass('folder', (proc, free) =>
     newest(free.filter(t => madeBy(proc, t) && t.cwd === proc.cwd && sinceStart(proc, t.updated_at_ms))),
   )
 
@@ -566,9 +574,9 @@ export function codexSessions(args: {
     agents: t.agents,
   })
   const rows: CodexSession[] = terminals.map(proc => {
-    const thread = matched.get(proc.pid)
-    return thread !== undefined
-      ? toRow(thread, proc.codexHome, 'terminal', proc.tty)
+    const found = matched.get(proc.pid)
+    return found !== undefined
+      ? { ...toRow(found.thread, proc.codexHome, 'terminal', proc.tty), pid: proc.pid, match: found.by }
       : {
           key: `pid-${proc.pid}`,
           title: 'session (thread not found)',
