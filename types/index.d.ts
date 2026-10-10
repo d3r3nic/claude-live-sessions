@@ -40,9 +40,11 @@ export type CodexSession = {
   lastActive: number
   /** Subagents under this thread, at any depth, that wrote in the last two minutes. */
   agents: number
-  /** An open terminal matched to its thread: its process, and how it was matched (CodexMatch). */
+  /** An open terminal matched to its thread: its process, when it started, how it was matched (CodexMatch), and whether it is an exec run. */
   pid?: number
+  startedAt?: number
   match?: 'held' | 'resume' | 'folder'
+  isExec?: boolean
 }
 
 /** Where a working directory sits. */

@@ -94,6 +94,7 @@ import {
   windowLabel,
   workDir,
   WORKING_MS,
+  isFromTerminal,
 } from './collect'
 import type { CodexProc, Item, Proc, ThreadRow } from './collect'
 
@@ -636,6 +637,11 @@ async function openWorkspace($: EngineInterface, ws: Workspace, at?: { window: s
       ...(codex === undefined ? [] : [`Codex's ${codex.surface === 'terminal' ? `runs in ${codex.tty}` : `was written a moment ago (${codex.surface})`}`]),
     ]
     if (elsewhere.length > 0) return { isOpen: false, text: `Not opened: its agents go on with their own conversations, and ${elsewhere.join(' and ')}. Close it there first.` }
+    // each resumes now: the relay types into it only after a turn from here (it may first ask how to resume)
+    await changeWorkspaces($, home, list => list.map(w => (w.id !== ws.id || w.threads === undefined ? w : {
+      ...w,
+      threads: Object.fromEntries(Object.entries(w.threads).map(([tool, t]) => [tool, { ...t, since: now }])),
+    })))
   }
   // a terminal's login shell may be any shell: it is only given `/bin/sh <file>`, the file holding the command
   const file = openScriptPath(home, ws.id)
@@ -851,15 +857,18 @@ async function makeWorkspace(
   const createdAt = await $.clock.now()
   for (const b of checked.bring) {
     // checked again just before it is closed: one that began a turn since is left running
-    const live = b.tool === 'claude' ? await liveClaude($, home, b.pid, b.profile, b.thread.id) : undefined
+    const live = b.tool === 'claude' && b.runs !== undefined ? await liveClaude($, home, b.runs.pid, b.profile, b.thread.id) : undefined
     const why = typeof live === 'string' ? live : b.rollout === undefined ? undefined : await codexBusy($, b.rollout)
+    // a conversation closed already has nothing to close
     const out = why !== undefined
       ? { stdout: why }
-      : await $.process
-        .run(['/bin/sh', '-c', STOP_SCRIPT, 'sh', b.tty, JOB_COMMANDS[b.tool], String(b.pid)], { timeoutMs: 30_000 })
-        .catch(() => ({ stdout: 'failed' }))
+      : b.runs === undefined
+        ? { stdout: 'stopped' }
+        : await $.process
+          .run(['/bin/sh', '-c', STOP_SCRIPT, 'sh', b.runs.tty, JOB_COMMANDS[b.tool], String(b.runs.pid)], { timeoutMs: 30_000 })
+          .catch(() => ({ stdout: 'failed' }))
     if (out.stdout.trim() === 'stopped') threads[b.tool] = { ...b.thread, since: createdAt }
-    else notBrought.push(`${b.label} (${why === undefined ? `it did not close in ${b.tty}` : `it ${why}`}; it was left as it was, and the workspace's ${b.tool === 'claude' ? 'Claude' : 'Codex'} starts new)`)
+    else notBrought.push(`${b.label} (${why === undefined ? `it did not close in ${b.runs?.tty ?? 'its terminal'}` : `it ${why}`}; it was left as it was, and the workspace's ${b.tool === 'claude' ? 'Claude' : 'Codex'} starts new)`)
   }
   // never the name of a tmux session already running: a new workspace never takes over an old one
   const running = Object.values(snap.tmux.panes).map(p => p.session).filter(s => s.startsWith('ws-')).map(s => s.slice(3))
@@ -904,7 +913,8 @@ async function makeWorkspace(
   }
 }
 
-type Bring = { tool: 'claude' | 'codex'; label: string; tty: string; pid: number; profile: string; rollout?: string; thread: Thread }
+/** A session to bring in: where it runs (none for a conversation already closed), and the conversation it resumes. */
+type Bring = { tool: 'claude' | 'codex'; label: string; runs?: { tty: string; pid: number }; profile: string; rollout?: string; thread: Thread }
 
 /**
  * The sessions to bring into a new workspace, each checked as it runs now:
@@ -932,17 +942,26 @@ async function checkBring($: EngineInterface, home: string, snap: Snapshot, memb
       const mode = await $.process.run(['/bin/sh', '-c', MODE_SCRIPT, 'sh', transcriptPath(`${home}/.${s.profile}`, live.startCwd, id)], { timeoutMs: 10_000 })
       const flags = modeFlags(mode.stdout)
       if (flags === undefined) return { error: `${offer.label}'s permission mode is not one this knows` }
-      bring.push({ tool, label: offer.label, tty: live.tty, pid: s.pid, profile: s.profile, thread: { id, dir: live.startCwd, ...(flags.length > 0 ? { flags } : {}) } })
+      bring.push({ tool, label: offer.label, runs: { tty: live.tty, pid: s.pid }, profile: s.profile, thread: { id, dir: live.startCwd, ...(flags.length > 0 ? { flags } : {}) } })
     } else {
-      const s = snap.codex.find(c => c.key === id && c.surface === 'terminal')!
-      const rollout = (await $.process.run(['/bin/sh', '-c', ROLLOUT_SCRIPT, 'sh', `${home}/.${s.profile}`, id], { timeoutMs: 15_000 })).stdout.trim()
+      const s = snap.codex.find(c => c.key === id && (offer.isClosed === true ? c.surface === 'cli' : c.surface === 'terminal'))!
+      const codexHome = `${home}/.${s.profile}`
+      const rollout = (await $.process.run(['/bin/sh', '-c', ROLLOUT_SCRIPT, 'sh', codexHome, id], { timeoutMs: 15_000 })).stdout.trim()
       if (!rollout.startsWith('/')) return { error: `${offer.label}'s conversation was not found under ~/.${s.profile}` }
+      // which conversation the terminal runs, made sure of again now: the rollout it holds open, read fresh; or,
+      // the only Codex terminal of that account, no other conversation written there since it started
+      if (offer.isClosed !== true) {
+        const isSure = s.match === 'held'
+          ? (parseRollouts((await $.process.run(['/usr/sbin/lsof', '-n', '-P', '-a', '-p', String(s.pid), '-Fpn'], { timeoutMs: 10_000 }).catch(() => ({ stdout: '' }))).stdout).get(s.pid!) ?? []).includes(id)
+          : (await codexWrittenSince($, codexHome, (s.startedAt ?? now) - 5_000)).every(t => t === id)
+        if (!isSure) return { error: `${offer.label} cannot be brought in: which conversation it runs is no longer certain; close it yourself, then bring in its conversation` }
+      }
       const busy = await codexBusy($, rollout)
       if (busy !== undefined || (s.updatedAt > 0 && now - s.updatedAt < WORKING_MS)) return { error: `${offer.label} ${busy ?? 'is working: bring it in once its turn is done'}` }
       const mode = (await $.process.run(['/bin/sh', '-c', CODEX_MODE_SCRIPT, 'sh', rollout], { timeoutMs: 10_000 })).stdout
       const folder = codexDir(mode) ?? s.cwd
       if (!folder.startsWith('/')) return { error: `${offer.label}'s folder is not known` }
-      bring.push({ tool, label: offer.label, tty: s.tty, pid: s.pid!, profile: s.profile, rollout, thread: { id, dir: folder, flags: codexFlags(mode) } })
+      bring.push({ tool, label: offer.label, ...(offer.isClosed === true ? {} : { runs: { tty: s.tty, pid: s.pid! } }), profile: s.profile, rollout, thread: { id, dir: folder, flags: codexFlags(mode) } })
     }
   }
   return { bring }
@@ -959,6 +978,20 @@ async function liveClaude($: EngineInterface, home: string, pid: number, profile
   if (claudeState(still, await $.clock.now()) !== 'idle') return 'is working: bring it in once its turn is done'
   if (!isForeground(proc.stat)) return 'is suspended (Ctrl+Z) or not in front of its terminal; bring it back first'
   return still
+}
+
+/** The top-level conversations of a Codex home written since `since`, by Codex's own records (undefined ids when unreadable: never sure). */
+async function codexWrittenSince($: EngineInterface, codexHome: string, since: number): Promise<string[]> {
+  const files = await $.fs.list(codexHome).catch(() => [])
+  const db = files.map(f => /^state_(\d+)\.sqlite$/.exec(f.name)).filter(m => m !== null).sort((a, b) => Number(b[1]) - Number(a[1]))[0]?.[0]
+  if (db === undefined) return ['?']
+  const path = `${codexHome}/${db}`
+  const out = await $.process
+    .run(['sqlite3', '-json', '-cmd', '.timeout 2000', ...readOnlyArgs(path, await $.fs.exists(`${path}-shm`)), threadQuery(since, since, [])], { timeoutMs: 10_000 })
+    .catch(() => ({ exitCode: -1, stdout: '', stderr: '' }))
+  if (out.exitCode !== 0) return ['?']
+  // only a conversation made in a terminal could be the one a Codex terminal runs
+  return parseThreads(out.stdout).filter(t => t.updated_at_ms >= since && isFromTerminal(t) && t.source !== 'exec').map(t => t.id)
 }
 
 /** Why a Codex conversation cannot be closed now, by its whole rollout: a turn under way, or none yet; undefined when between turns. */

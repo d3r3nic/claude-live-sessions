@@ -135,6 +135,13 @@ try {
   const claudeStop = sh(b.STOP_SCRIPT, claudeTty, b.JOB_COMMANDS.claude, String(claudePid)).trim()
   const codexStop = sh(b.STOP_SCRIPT, codexTty, b.JOB_COMMANDS.codex, String(codexPid)).trim()
   check('closed where they ran: each hung up and exited; the terminal keeps its shell', claudeStop === 'stopped' && codexStop === 'stopped' && !/claude|codex/.test(front(claudeTty) + front(codexTty)), `${claudeStop} ${codexStop}`)
+  // what the open check sees right after: neither conversation runs anywhere (no live Claude registry entry with it,
+  // no Codex terminal matched to it)
+  const liveClaude = readdirSync(join(HOME, '.claude', 'sessions')).filter(f => f.endsWith('.json')).some(f => {
+    const entry = JSON.parse(readFileSync(join(HOME, '.claude', 'sessions', f), 'utf8'))
+    try { process.kill(entry.pid, 0); return entry.sessionId === registry?.sessionId } catch { return false }
+  })
+  check('after closing: the open check finds neither conversation running', !liveClaude && !codexRows().some(s => s.key === codexId && s.surface === 'terminal'))
 
   // resumed in the workspace by the plugin's own command line, each with its first prompt there
   mkdirSync(dirname(w.promptPath(HOME, ws.id, 'claude')), { recursive: true })

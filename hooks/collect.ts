@@ -511,7 +511,7 @@ export type ThreadRow = {
   agents: number
 }
 
-const isFromTerminal = (t: ThreadRow) => t.originator === 'codex-tui' || t.source === 'cli'
+export const isFromTerminal = (t: ThreadRow) => t.originator === 'codex-tui' || t.source === 'cli'
 const madeBy = (proc: CodexProc, t: ThreadRow) => (proc.isExec ? t.source === 'exec' : isFromTerminal(t))
 
 /** Where a thread no open terminal holds was written from. */
@@ -576,7 +576,7 @@ export function codexSessions(args: {
   const rows: CodexSession[] = terminals.map(proc => {
     const found = matched.get(proc.pid)
     return found !== undefined
-      ? { ...toRow(found.thread, proc.codexHome, 'terminal', proc.tty), pid: proc.pid, match: found.by }
+      ? { ...toRow(found.thread, proc.codexHome, 'terminal', proc.tty), pid: proc.pid, startedAt: proc.startedAt, match: found.by, ...(proc.isExec ? { isExec: true } : {}) }
       : {
           key: `pid-${proc.pid}`,
           title: 'session (thread not found)',

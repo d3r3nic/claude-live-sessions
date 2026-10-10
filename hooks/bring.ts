@@ -28,19 +28,27 @@ export type Bringable = {
   isIdle: boolean
   /** Why it cannot be brought in, when it cannot: it is shown, not offered. */
   blocked?: string
+  /** A Codex conversation open in no terminal (closed by the owner): resumed, nothing to close. */
+  isClosed?: boolean
 }
 
 /**
  * Whether a Codex terminal's conversation is known for certain, so that
- * closing it closes that conversation and no other: it holds the
- * conversation's rollout open; or it is the only Codex terminal in its folder
- * under its Codex home, and no conversation there is newer than the one it was
- * matched to (as a `/new` or `/resume` inside it since would make).
+ * closing it closes that conversation and no other. Codex records no link
+ * from a terminal to its conversation, so only: it holds the conversation's
+ * rollout open (checked again, fresh, before it is closed); or it is the only
+ * Codex terminal under its Codex home and no other conversation there was
+ * written since it started (a `/new` or `/resume` inside it would make one;
+ * checked again in Codex's own records before it is closed). An exec run is
+ * never one.
  */
 export function isKnownCodex(snap: Pick<Snapshot, 'codex'>, s: CodexSession): boolean {
-  if (s.surface !== 'terminal' || s.pid === undefined || s.match === undefined || !SAFE_ID.test(s.key) || s.key.startsWith('pid-')) return false
+  if (s.surface !== 'terminal' || s.pid === undefined || s.match === undefined || s.isExec === true || !SAFE_ID.test(s.key) || s.key.startsWith('pid-')) return false
   if (s.match === 'held') return true
-  return !snap.codex.some(o => o !== s && o.profile === s.profile && o.cwd === s.cwd && (o.surface === 'terminal' || o.updatedAt > s.updatedAt))
+  const since = (s.startedAt ?? 0) - 5_000
+  // what a Codex terminal could be running: another terminal's conversation, or one made in a terminal (an exec run
+  // and its thread, or the desktop app's, never are)
+  return !snap.codex.some(o => o !== s && o.profile === s.profile && o.isExec !== true && (o.surface === 'terminal' || (o.surface === 'cli' && o.updatedAt >= since)))
 }
 
 /**
@@ -68,14 +76,23 @@ export function bringable(snap: Snapshot, o: { now: number; selfId: string }, di
     const env = envOfProfile('codex', s.profile)
     if (s.surface !== 'terminal' || !/^ttys\d+$/.test(s.tty)) continue
     if (env === undefined || !s.cwd.startsWith('/') || inWorkspace(s.tty) || !inRepo(s.cwd)) continue
+    if (s.isExec === true) continue
     const isIdle = !(s.updatedAt > 0 && o.now - s.updatedAt < WORKING_MS)
     const isKnown = isKnownCodex(snap, s)
     // a terminal whose conversation is not known for certain is shown, never offered: closing it could close another
-    const blocked = isKnown ? undefined : s.key.startsWith('pid-') ? 'its conversation was not found' : 'another Codex works in that folder, so which conversation it runs is not certain'
+    const blocked = isKnown ? undefined : s.key.startsWith('pid-') ? 'its conversation was not found; close it yourself, then bring in its conversation' : 'which conversation it runs is not certain (other Codex work under this account): close it yourself, then bring in its conversation'
     found.push({
       member: isKnown ? `codex:${s.key}` : `codex-tty:${s.tty}`, tool: 'codex', label: `Codex · ${s.key.startsWith('pid-') ? s.tty : s.title || s.key.slice(0, 8)}`, env, isIdle, at: s.lastActive,
       ...(blocked === undefined ? {} : { blocked }),
     })
+  }
+  // a conversation made in Codex's terminal and open in none (closed by the owner), once every Codex terminal under
+  // that account is certain (else it may be the one an uncertain terminal runs), and not written in the last minute
+  for (const s of snap.codex) {
+    const env = envOfProfile('codex', s.profile)
+    if (s.surface !== 'cli' || !SAFE_ID.test(s.key) || env === undefined || !s.cwd.startsWith('/') || !inRepo(s.cwd) || o.now - s.updatedAt < WORKING_MS) continue
+    if (snap.codex.some(t => t.surface === 'terminal' && t.isExec !== true && t.profile === s.profile && !isKnownCodex(snap, t))) continue
+    found.push({ member: `codex:${s.key}`, tool: 'codex', label: `Codex · ${s.title || s.key.slice(0, 8)} (closed)`, env, isIdle: true, isClosed: true, at: s.lastActive })
   }
   return found.sort((a, b) => Number(b.isIdle) - Number(a.isIdle) || b.at - a.at).map(({ at: _, ...b }) => b)
 }
@@ -217,8 +234,8 @@ export const JOB_COMMANDS: Record<Tool, string> = { claude: 'claude', codex: 'co
  * what it keeps: a pane's interactive Claude session (resumed from where it
  * started) or a Codex terminal whose conversation is known for certain (from
  * its thread's folder), under the workspace's own environment. A pane with
- * no such agent leaves what is kept. Claude keeps its flags (the pane started
- * it with them, `/clear` and all); Codex keeps them with the same conversation.
+ * no such agent leaves what is kept. Flags go with the same conversation only
+ * (a conversation started anew, even by /clear, resumes without them).
  */
 export function seenThreads(
   workspaces: readonly Pick<Workspace, 'id' | 'env' | 'threads'>[],
@@ -235,7 +252,8 @@ export function seenThreads(
       let seen: Thread | undefined
       if (tool === 'claude') {
         const s = snap.claude.find(c => c.tty === tty && c.kind === 'interactive' && SAFE_ID.test(c.sessionId) && c.startCwd.startsWith('/') && envOfProfile('claude', c.profile) === ws.env)
-        seen = s === undefined ? undefined : { id: s.sessionId, dir: s.startCwd, ...(kept?.flags === undefined ? {} : { flags: kept.flags }), ...(kept?.id === s.sessionId && kept.since !== undefined ? { since: kept.since } : {}) }
+        // its flags and when it joined go with the same conversation only: one started anew in the pane has its own
+        seen = s === undefined ? undefined : { id: s.sessionId, dir: s.startCwd, ...(kept?.id === s.sessionId && kept.flags !== undefined ? { flags: kept.flags } : {}), ...(kept?.id === s.sessionId && kept.since !== undefined ? { since: kept.since } : {}) }
       } else {
         const s = snap.codex.find(c => c.tty === tty && isKnownCodex(snap, c) && envOfProfile('codex', c.profile) === ws.env)
         seen = s === undefined ? undefined : { id: s.key, dir: s.cwd, ...(kept?.id === s.key && kept.flags !== undefined ? { flags: kept.flags } : {}), ...(kept?.id === s.key && kept.since !== undefined ? { since: kept.since } : {}) }
