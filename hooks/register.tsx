@@ -3,10 +3,10 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { ClaudeSession, CodexSession, Place, Relay, Snapshot, Thread, Workspace } from '../types'
 import type { Screen } from './workspaces'
-import { AGENT_COMMANDS, afterOwner, afterStep, claudeKeep, compactStep, COMPACT_AT, cueOf, eventOf, EVENT_SCRIPT, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_SCRIPT } from './relay'
+import { AGENT_COMMANDS, afterOwner, afterStep, claudeKeep, compactStep, COMPACT_AT, cueOf, cutBytes, eventOf, EVENT_SCRIPT, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_SCRIPT } from './relay'
 import type { RelayEvent, Side, Step } from './relay'
-import { checkDue, DRIFT_EVERY, driftRequest, parseVerdict, recordFolderOf, RECORDS_SCRIPT } from './drift'
-import { bringable, codexDir, codexFlags, CODEX_MODE_SCRIPT, CODEX_TASK_SCRIPT, codexTaskState, JOB_COMMANDS, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, toggled, withThreads } from './bring'
+import { branchOf, checkDue, DRIFT_EVERY, driftRequest, parseVerdict, recordFolderOf, RECORDS_SCRIPT } from './drift'
+import { bringable, codexDir, envOfProfile, codexFlags, CODEX_MODE_SCRIPT, CODEX_TASK_SCRIPT, codexTaskState, JOB_COMMANDS, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, toggled, withThreads } from './bring'
 import {
   CHECKOUT_SCRIPT,
   CLIENTS_FORMAT,
@@ -423,12 +423,19 @@ async function readWorkspaces($: EngineInterface, home: string): Promise<{ list:
  * so a change another session made meanwhile is kept. Refuses (false) a
  * file it cannot read rather than replace it.
  */
-async function changeWorkspaces($: EngineInterface, home: string, change: (list: Workspace[]) => Workspace[]) {
-  const now = await readWorkspaces($, home)
-  if (!now.isReadable) return false
-  await $.fs.write(workspacesPath(home), `${JSON.stringify({ version: 1, workspaces: change(now.list) }, null, 2)}\n`)
-  return true
+async function changeWorkspaces($: EngineInterface, home: string, change: (list: Workspace[]) => Workspace[]): Promise<boolean> {
+  // one change at a time in this session: each reads what the one before it wrote (a check finishing while the relay
+  // saves would otherwise write back what it read before, undoing the relay's change)
+  const turn = changing.then(async () => {
+    const now = await readWorkspaces($, home)
+    if (!now.isReadable) return false
+    await $.fs.write(workspacesPath(home), `${JSON.stringify({ version: 1, workspaces: change(now.list) }, null, 2)}\n`)
+    return true
+  })
+  changing = turn.catch(() => false)
+  return turn
 }
+let changing: Promise<unknown> = Promise.resolve()
 
 /** tmux's panes and attached terminals; none when no tmux server runs. */
 async function tmuxState($: EngineInterface): Promise<Snapshot['tmux']> {
@@ -1079,7 +1086,15 @@ async function cycleCheckEvery($: EngineInterface, id: string) {
 
 async function checkNow($: EngineInterface, id: string) {
   const home = (await $.env.get('HOME')) ?? ''
-  $.ui.toast(await checkDrift($, home, id), { timeoutMs: 15_000 })
+  $.ui.toast('Checking the workspace: it takes a minute or so.', { timeoutMs: 8_000 })
+  $.ui.toast(await checkDrift($, home, id).catch((error: unknown) => `The check could not be done: ${message(error)}`), { timeoutMs: 15_000 })
+}
+
+/** The account this session runs under: '' for the default one, the name of a `~/.claude-<name>` one; undefined if neither. */
+async function ownEnv($: EngineInterface, home: string): Promise<string | undefined> {
+  const dir = (await $.env.get('CLAUDE_CONFIG_DIR'))?.replace(/\/+$/, '')
+  if (dir === undefined || dir === '' || dir === `${home}/.claude`) return ''
+  return dir.startsWith(`${home}/.`) ? envOfProfile('claude', dir.slice(home.length + 2)) : undefined
 }
 
 /** The workspaces being checked in this session: one check of each at a time. */
@@ -1099,22 +1114,40 @@ async function checkDrift($: EngineInterface, home: string, id: string): Promise
     const ws = (await readWorkspaces($, home)).list.find(w => w.id === id)
     if (ws === undefined) return 'That workspace is gone.'
     if (ws.purpose === undefined) return `${ws.name} has no purpose to check against: it was made without one.`
+    // under the workspace's own account: its records never go out through another's
+    const env = await ownEnv($, home)
+    if (env !== ws.env) return `${ws.name} is checked from a Claude session of its own account (${ws.env === '' ? 'the default one' : ws.env}).`
+    // the passes counted when it began: the ones made while it runs count toward the next check
+    const counted = ws.relay?.sinceCheck ?? 0
+    // a check done or not, the next is at the next milestone (a failed one is never tried again at every hand-off)
+    const restart = (more: Partial<Workspace>) =>
+      changeWorkspaces($, home, list => list.map(w => (w.id !== id ? w : { ...w, ...more, ...(w.relay === undefined ? {} : { relay: { ...w.relay, sinceCheck: Math.max(0, (w.relay.sinceCheck ?? 0) - counted) } }) })))
     const cues = await recentCues($, home, id)
-    const folder = cues.map(recordFolderOf).filter(f => f !== undefined).at(-1)
+    const latest = cues.filter(c => recordFolderOf(c) !== undefined).at(-1)
+    const folder = latest === undefined ? undefined : recordFolderOf(latest)
     const records = ws.checkout === undefined || folder === undefined
       ? ''
-      : (await $.process.run(['/bin/sh', '-c', RECORDS_SCRIPT, 'sh', ws.checkout, folder], { timeoutMs: 20_000 }).catch(() => ({ stdout: '' }))).stdout
+      : (await $.process.run(['/bin/sh', '-c', RECORDS_SCRIPT, 'sh', ws.checkout, folder, branchOf(latest!) ?? ''], { timeoutMs: 20_000 }).catch(() => ({ stdout: '' }))).stdout
+    // nothing the agents wrote: nothing to judge, and no model call
+    if (cues.length === 0 && records.trim() === '') {
+      await restart({})
+      return `${ws.name}: nothing to check yet: no hand-offs logged and no peer-coding records found.`
+    }
     const ask = driftRequest(ws, cues, records)
     const reply = await $.model
-      .complete({ model: 'opus', system: ask.system, prompt: ask.prompt, maxTokens: 600, effort: 'medium' })
-      .catch((error: unknown) => ({ isAnswered: false as const, why: message(error) }))
+      .complete({ model: 'opus', system: ask.system, prompt: ask.prompt, maxTokens: 1200, effort: 'medium', timeoutMs: 180_000 })
+      .catch((error: unknown) => ({ isAnswered: false as const, reason: message(error) }))
     const verdict = reply.isAnswered ? parseVerdict(reply.text) : undefined
+    // a workspace removed meanwhile is not reported on
+    if (!(await readWorkspaces($, home)).list.some(w => w.id === id)) return 'That workspace is gone.'
     if (verdict === undefined) {
-      await logEvent($, home, { kind: 'check', text: `${ws.name}: the check could not be done (${reply.isAnswered ? 'no verdict in its reply' : 'the model did not answer'})`, workspace: id })
-      return `${ws.name}: the check could not be done.`
+      const why = reply.isAnswered ? 'no verdict in its reply' : `the model did not answer: ${reply.reason}${'error' in reply ? `, ${reply.error}` : ''}`
+      await restart({})
+      await logEvent($, home, { kind: 'check', text: `${ws.name}: the check could not be done: ${why}`, workspace: id })
+      return `${ws.name}: the check could not be done: ${why}.`
     }
     const now = await $.clock.now()
-    await changeWorkspaces($, home, list => list.map(w => (w.id !== id ? w : { ...w, check: { at: now, ...verdict }, ...(w.relay === undefined ? {} : { relay: { ...w.relay, sinceCheck: 0 } }) })))
+    await restart({ check: { at: now, ...verdict } })
     const said = `${ws.name}: ${verdict.status.replace('-', ' ')}: ${verdict.brief}${verdict.ask === undefined ? '' : ` Ask: ${verdict.ask}`}`
     await logEvent($, home, { kind: verdict.status === 'on-track' ? 'check' : 'drift', text: said, workspace: id })
     if (verdict.status !== 'on-track') {
@@ -1129,13 +1162,20 @@ async function checkDrift($: EngineInterface, home: string, id: string): Promise
   }
 }
 
-/** A workspace's latest hand-off lines, oldest first, from the relay's event log (its last 8). */
+/**
+ * A workspace's latest hand-off lines, oldest first, from the relay's event
+ * log and the one before it (its last 8): those passed, those told to the
+ * owner (notify mode), and the agents' own for the owner (NEEDS USER, SCOPE
+ * CLOSED).
+ */
 async function recentCues($: EngineInterface, home: string, id: string): Promise<string[]> {
-  const text = await $.fs.read(eventsPath(home)).catch(() => '')
+  const read = (path: string) => $.fs.read(path).catch(() => '')
+  const text = `${await read(`${eventsPath(home)}.1`)}\n${await read(eventsPath(home))}`
   return text.split('\n').flatMap(line => {
     try {
       const e = JSON.parse(line) as { kind?: unknown; text?: unknown; workspace?: unknown }
-      const cue = e.workspace === id && e.kind === 'relay' && typeof e.text === 'string' ? /(READY FOR (CLAUDE|CODEX)|NEEDS USER|SCOPE CLOSED) · .*/.exec(e.text)?.[0] : undefined
+      const isCue = e.kind === 'relay' || e.kind === 'notify' || e.kind === 'needs'
+      const cue = e.workspace === id && isCue && typeof e.text === 'string' ? /(READY FOR (CLAUDE|CODEX)|NEEDS USER|SCOPE CLOSED) · .*/.exec(e.text)?.[0] : undefined
       return cue === undefined ? [] : [cue]
     } catch {
       return []
@@ -1253,7 +1293,8 @@ const eventsPath = (home: string) => `${home}/Library/Caches/live-sessions/event
 
 /** Adds an event to the relay's event log, timed now. */
 async function logEvent($: EngineInterface, home: string, event: RelayEvent) {
-  const line = JSON.stringify({ at: await $.clock.now(), ...event })
+  // its line well under 1 KB whatever wrote the text: one append, never split or mixed with another session's
+  const line = JSON.stringify({ at: await $.clock.now(), ...event, text: cutBytes(event.text, 600) })
   await $.process.run(['/bin/sh', '-c', EVENT_SCRIPT, 'sh', eventsPath(home), line], { timeoutMs: 10_000 }).catch(() => undefined)
 }
 
@@ -1768,13 +1809,13 @@ export const register: Register = on => {
                   />,
                 ])}
               {(ws.relay.status !== '' || ws.relay.isWaiting) && (
-                <Box flexDirection="row" width={width} columnGap={1} marginLeft={4}>
+                <Box flexDirection="row" width={width - 4} columnGap={1} marginLeft={4}>
                   <Text dimColor wrap="truncate-end">{`relay: ${ws.relay.isWaiting ? `waits for you after ${RELAY_CAP} hand-offs` : ws.relay.status}`}</Text>
                   {ws.relay.isWaiting && <Button key={`relay-go ${ws.key}`} label="continue" onPress={() => void continueRelay($, ws.key)} />}
                 </Box>
               )}
               {ws.check !== undefined && (
-                <Box flexDirection="row" width={width} marginLeft={4}>
+                <Box flexDirection="row" width={width - 4} marginLeft={4}>
                   <Text {...(ws.check.isOk ? { dimColor: true } : { color: 'warning' as const })} wrap="truncate-end">{`check: ${ws.check.text}`}</Text>
                 </Box>
               )}

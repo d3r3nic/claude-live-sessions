@@ -3,7 +3,7 @@
 // Run: node --experimental-strip-types tests/host-check.mjs
 // It opens Codex databases read-only, and prints no environment values.
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { registerHooks } from 'node:module'
@@ -1056,6 +1056,41 @@ except ChildProcessError: pass
       out.includes('==> CURRENT.md\nnew copy') && !out.includes('old copy') && out.includes('==> rounds/R10/claude.md\nround ten from claude') && out.includes('==> rounds/R10/codex.md') && !out.includes('round two') && out.includes('==> ALIGNMENT.md\naligned') && out.split('==> ALIGNMENT.md')[0].length < 7000,
       out.split('\n').filter(l => l.startsWith('==> ')).join(' | '))
     check('drift: no records for a folder not there, or one that would leave peer-coding/', read('feat-y') === '' && read('../app') === '' && read('a/b') === '')
+    // the copy on the branch the cue names wins over the one written last; a repository's own settings run nothing:
+    // the main checkout made a repository on feat/x whose settings name a signature program, with a signed commit
+    const marker = join(scratch, 'ran')
+    const gpg = join(scratch, 'gpg-stand-in')
+    writeFileSync(gpg, `#!/bin/sh\ntouch '${marker}'\nexit 1\n`)
+    execFileSync('/bin/chmod', ['+x', gpg])
+    const git = (...args) => spawnSync('/usr/bin/git', ['-C', checkout, ...args], { encoding: 'utf8' })
+    git('init', '-q', '-b', 'feat/x')
+    git('config', 'log.showSignature', 'true')
+    git('config', 'gpg.program', gpg)
+    const tree = git('write-tree').stdout.trim()
+    const signed = spawnSync('/usr/bin/git', ['-C', checkout, 'hash-object', '-t', 'commit', '-w', '--stdin'], { encoding: 'utf8', input: `tree ${tree}\nauthor t <t@t> 0 +0000\ncommitter t <t@t> 0 +0000\ngpgsig -----BEGIN PGP SIGNATURE-----\n \n -----END PGP SIGNATURE-----\n\nsigned work\n` }).stdout.trim()
+    git('update-ref', 'refs/heads/feat/x', signed)
+    // the stand-in does run for a plain git log here (so the check below means something)
+    git('log', '-n', '1')
+    const ranPlain = existsSync(marker)
+    rmSync(marker, { force: true })
+    const onBranch = spawnSync('/bin/sh', ['-c', dr.RECORDS_SCRIPT, 'sh', checkout, 'feat-x', 'feat/x'], { encoding: 'utf8' }).stdout
+    check('drift: the copy on the cue\'s branch read, though older; a program the repository\'s settings name never runs',
+      ranPlain && !existsSync(marker) && onBranch.includes('==> CURRENT.md\nold copy') && onBranch.includes('signed work'), `${ranPlain} ${existsSync(marker)} ${onBranch.split('\n')[1]}`)
+    // symbolic links never followed: a CURRENT.md, a round note or the folder itself pointing anywhere else
+    const secret = join(scratch, 'secret.txt')
+    writeFileSync(secret, 'SECRET-OUTSIDE')
+    const linked = join(checkout, 'peer-coding', 'feat-l')
+    mkdirSync(join(linked, 'rounds', 'R1'), { recursive: true })
+    symlinkSync(secret, join(linked, 'CURRENT.md'))
+    const linkedNote = join(checkout, 'peer-coding', 'feat-n')
+    mkdirSync(join(linkedNote, 'rounds', 'R1'), { recursive: true })
+    writeFileSync(join(linkedNote, 'CURRENT.md'), 'note copy')
+    writeFileSync(join(linkedNote, 'rounds', 'R1', 'gemini.md'), 'a note by another assistant')
+    symlinkSync(secret, join(linkedNote, 'rounds', 'R1', 'claude.md'))
+    symlinkSync(join(checkout, 'peer-coding', 'feat-n'), join(checkout, 'peer-coding', 'feat-d'))
+    const notes = read('feat-n')
+    check('drift: symbolic links never followed; a round\'s notes read whatever the assistant is called',
+      read('feat-l') === '' && read('feat-d') === '' && !notes.includes('SECRET') && notes.includes('==> rounds/R1/gemini.md\na note by another assistant'), notes.split('\n').filter(l => l.startsWith('==> ')).join(' | '))
   } finally {
     rmSync(scratch, { recursive: true, force: true })
   }

@@ -86,11 +86,13 @@ The peer-coding rules end every turn with one cue line for the owner to pass on:
 
 ### Drift check
 
-A workspace made for a purpose is checked at milestones: every 4 hand-offs passed in a row (`Check` in its actions goes every 4, every 8, off) and when the agents close their scope; `Check now` checks at once.
+A workspace made for a purpose is checked at milestones: after every 4 hand-offs passed since its last check (`Check` in its actions goes every 4, every 8, off) and when the agents close their scope; `Check now` checks at once.
 
-- One model call (Opus): what the owner said the workspace is for, its latest hand-offs (from the relay's event log), and its peer-coding records (the copy written last, in the main checkout or a worktree beside it: CURRENT.md, the latest round's two notes, the alignment and findings, each cut, and the branch's last 15 commit subjects). The records are given as data the agents wrote, never as instructions.
+- One model call (Opus, from a Claude session of the workspace's own account, so its records never go out through another): what the owner said the workspace is for, then what the agents wrote, as one block of data: their latest hand-offs (from the relay's event log: passed, told to you, and their own NEEDS USER and SCOPE CLOSED) and their peer-coding records (the copy in the worktree on the branch the latest hand-off names, else the copy written last: CURRENT.md, the latest round's notes, the alignment and findings, each cut, and the branch's last 15 commit subjects). Symbolic links are never followed, and no program a repository's settings name runs.
+- With nothing the agents wrote (no hand-off logged, no records) there is no call: nothing to check yet. Too little to judge is said as on track, never as an alarm.
 - Its verdict: on track; drifting (off into what the purpose did not ask for: a rabbit hole, scope creep, polishing past the need); unclear need (the purpose as stated may be mistaken or too thin for what the agents found: restate it); needs owner (a decision only you can make is blocking or being guessed at). A brief of a few plain sentences, and for anything but on track the one question or action for you.
-- It is kept on the workspace (its row says `check: …`), added to the event log (the ops screen shows it; a click opens the workspace), and, unless on track, notified: the agents may need your help.
+- It is kept on the workspace (its row says `check: …`), added to the event log (the ops screen shows it; a click opens the workspace), and, unless on track, notified: the agents may need your help. A check that could not be done says why, and the next comes at the next milestone.
+- Limits: the check judges what the agents recorded, and cannot see work they did not record. What they write is data to judge, and the model is told to ignore anything in it that tells it what to answer; still, text written to steer it can sway the verdict, including to on track. Each check is one Opus call on your account.
 
 ## Ops screen
 

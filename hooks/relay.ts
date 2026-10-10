@@ -141,7 +141,7 @@ export type Side = { tool: Tool; pane: string; turn?: Turn; isBusy: boolean; fil
  */
 export type Step =
   | { kind: 'pass'; key: string; from?: Tool; to: Tool; pane: string; line: string }
-  | { kind: 'tell'; key: string; from?: Tool; text: string; isForOwner: boolean }
+  | { kind: 'tell'; key: string; from?: Tool; text: string; isForOwner: boolean; cue?: Cue['kind'] }
   | { kind: 'compact'; key: string; to: Tool; pane: string; line: string; filled: number }
 
 /**
@@ -163,7 +163,7 @@ export function relaySteps(ws: Pick<Workspace, 'name' | 'relay'> & Partial<Pick<
     const cue = turn.cue
     if (cue.kind !== 'ready') {
       const what = cue.kind === 'needs-user' ? 'needs you' : 'closed its scope and waits for you'
-      steps.push({ kind: 'tell', key: `tell-${turn.id}`, from: tool, text: `${ws.name}: ${NAME[tool]} ${what}. ${cue.line}`, isForOwner: true })
+      steps.push({ kind: 'tell', key: `tell-${turn.id}`, from: tool, text: `${ws.name}: ${NAME[tool]} ${what}. ${cue.line}`, isForOwner: true, cue: cue.kind })
       continue
     }
     if (cue.to === tool) continue
@@ -219,17 +219,6 @@ export function claudeKeep(name: string): string {
 /** One line of the relay's event log, which the ops screen reads: what happened, in a workspace, at an agent. */
 export type RelayEvent = { kind: string; text: string; workspace: string; agent?: Tool }
 
-/**
- * What a step that was carried out is, for the event log (none for one taken
- * already, or waiting on a scrolled-back pane): a hand-off passed, one that
- * could not be, what is the owner's, a hold, a compaction.
- */
-export function eventOf(ws: Pick<Workspace, 'id' | 'name'>, step: Step, outcome: string): RelayEvent | undefined {
-  const event = eventFor(ws, step, outcome)
-  // its line well under 1 KB (any script): an append that size is one write, never split or mixed with another's
-  return event === undefined ? undefined : { ...event, text: cutBytes(event.text, 600) }
-}
-
 /** Text cut to at most `max` bytes as it is written in a JSON line (UTF-8, escapes counted), whole characters kept. */
 export function cutBytes(text: string, max: number): string {
   let bytes = 0
@@ -243,7 +232,12 @@ export function cutBytes(text: string, max: number): string {
   return out
 }
 
-function eventFor(ws: Pick<Workspace, 'id' | 'name'>, step: Step, outcome: string): RelayEvent | undefined {
+/**
+ * What a step that was carried out is, for the event log (none for one taken
+ * already, or waiting on a scrolled-back pane): a hand-off passed, one that
+ * could not be, what is the owner's, a hold, a compaction.
+ */
+export function eventOf(ws: Pick<Workspace, 'id' | 'name'>, step: Step, outcome: string): RelayEvent | undefined {
   if (outcome === 'taken' || outcome === 'in-mode') return undefined
   const at = { workspace: ws.id }
   if (step.kind === 'compact') return outcome === 'passed' ? { ...at, kind: 'compact', text: `${ws.name}: ${NAME[step.to]} compacting (its context ${step.filled}% full)`, agent: step.to } : undefined

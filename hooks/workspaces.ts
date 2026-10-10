@@ -2,6 +2,7 @@
 // session running its agents. Pure: no `$`, so the tests drive it directly.
 import type { Workspace } from '../types'
 import { threadFrom } from './bring'
+import { checkEveryFrom, checkFrom } from './drift'
 
 /** The tmux session a workspace runs in. */
 export const tmuxName = (ws: Pick<Workspace, 'id'>) => `ws-${ws.id}`
@@ -440,12 +441,17 @@ export function workspacesFrom(raw: unknown): Workspace[] {
     const codex = threadFrom('codex', (ws.threads as Record<string, unknown> | undefined)?.codex)
     // a compaction setting this does not read is left out: the default stands
     const compactAt = Number.isInteger(ws.compactAt) && ws.compactAt! >= 0 && ws.compactAt! <= 100 ? ws.compactAt : undefined
-    const { members: _, threads: __, compactAt: ___, ...rest } = ws
+    // likewise the drift check's interval, and its last verdict (one this does not read is dropped)
+    const checkEvery = checkEveryFrom(ws.checkEvery)
+    const check = checkFrom(ws.check)
+    const { members: _, threads: __, compactAt: ___, checkEvery: ____, check: _____, ...rest } = ws
     return {
       ...rest,
       ...(members !== undefined && members.length > 0 ? { members } : {}),
       ...(claude === undefined && codex === undefined ? {} : { threads: { ...(claude === undefined ? {} : { claude }), ...(codex === undefined ? {} : { codex }) } }),
       ...(compactAt === undefined ? {} : { compactAt }),
+      ...(checkEvery === undefined ? {} : { checkEvery }),
+      ...(check === undefined ? {} : { check }),
     }
   })
 }
