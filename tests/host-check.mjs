@@ -597,11 +597,13 @@ except ChildProcessError: pass
   // task's notice, an interrupt, a skill the agent ran, a command's output, a meta record or a summary
   const typedClaude = jsonl('c-typed.jsonl', [
     { type: 'user', uuid: 'p1', timestamp: '2026-10-09T09:00:00Z', message: { content: 'build the login' } },
+    // a skill or prompt command the owner typed (an agent's own skill run is a meta record)
+    { type: 'user', uuid: 'p0', timestamp: '2026-10-09T09:30:00Z', message: { content: '<command-message>peer-coding</command-message>\n<command-name>/peer-coding</command-name>\n<command-args>continue</command-args>' } },
     ended,
     { type: 'user', uuid: 'p2', timestamp: '2026-10-09T10:06:00Z', message: { content: 'READY FOR CLAUDE · peer-coding/feat-x R1 · feat/x@abc1234' } },
     { type: 'user', uuid: 'p3', timestamp: '2026-10-09T10:07:00Z', message: { content: '<task-notification>\n<task-id>b1</task-id>\n<summary>done</summary>\n</task-notification>' } },
     { type: 'user', uuid: 'p4', timestamp: '2026-10-09T10:08:00Z', message: { content: '<local-command-stdout>Set model</local-command-stdout>' } },
-    { type: 'user', uuid: 'p5', timestamp: '2026-10-09T10:08:30Z', message: { content: '<command-message>peer-coding</command-message>\n<command-name>/peer-coding</command-name>' } },
+    { type: 'user', uuid: 'p5', isMeta: true, timestamp: '2026-10-09T10:08:30Z', message: { content: [{ type: 'text', text: 'Base directory for this skill: …' }] } },
     { type: 'user', uuid: 'p6', isMeta: true, timestamp: '2026-10-09T10:09:00Z', message: { content: 'Context a hook added.' } },
     { type: 'user', uuid: 'p7', timestamp: '2026-10-09T10:09:30Z', message: { content: [{ type: 'text', text: '[Request interrupted by user]' }] } },
     { type: 'user', uuid: 'p8', isCompactSummary: true, timestamp: '2026-10-09T10:10:00Z', message: { content: 'This session is being continued…' } },
@@ -616,6 +618,22 @@ except ChildProcessError: pass
   const typedBash = jsonl('c-typed-bash.jsonl', [ended, { type: 'user', uuid: 'p1', timestamp: '2026-10-09T10:07:00Z', message: { content: [{ type: 'text', text: '<bash-input>ls</bash-input>' }] } }])
   // a cue line the owner pasted with words of their own is theirs
   const typedCue = jsonl('c-typed-cue.jsonl', [ended, { type: 'user', uuid: 'p1', timestamp: '2026-10-09T10:08:00Z', message: { content: 'READY FOR CLAUDE · peer-coding/feat-x R1 · feat/x@abc1234\nand check the login too' } }])
+  // records marked by who made them: the owner's prompt, one queued while the agent worked; not a task's
+  // notice, a queued notice, the relay's cue (pasted, wrapped or not)
+  const human = { kind: 'human' }
+  const typedMarked = jsonl('c-typed-marked.jsonl', [
+    { type: 'user', uuid: 'q1', origin: human, timestamp: '2026-10-09T11:00:00Z', message: { content: 'go on' } },
+    ended,
+    { type: 'attachment', uuid: 'q3', timestamp: '2026-10-09T11:10:00Z', attachment: { type: 'queued_command', commandMode: 'prompt', origin: human, prompt: 'and check the tests too' } },
+    { type: 'user', uuid: 'q2', origin: { kind: 'task-notification' }, timestamp: '2026-10-09T11:12:00Z', message: { content: 'a notice in plain words' } },
+    // a queued notice from an engine that marks no origin, in plain words
+    { type: 'attachment', uuid: 'q4', timestamp: '2026-10-09T11:15:00Z', attachment: { type: 'queued_command', commandMode: 'task-notification', prompt: 'The person enabled something for this session' } },
+    { type: 'attachment', uuid: 'q5', timestamp: '2026-10-09T11:16:00Z', attachment: { type: 'queued_command', commandMode: 'prompt', origin: human, prompt: 'READY FOR CLAUDE · peer-coding/feat-x R2 · feat/x@abc1234' } },
+    { type: 'user', uuid: 'q6', origin: human, timestamp: '2026-10-09T11:20:00Z', message: { content: 'READY FOR CLAUDE · peer-coding/feat-x R2 · feat/x@abc1234' } },
+    { type: 'user', uuid: 'q7', origin: human, timestamp: '2026-10-09T11:25:00Z', message: { content: '<pasted_content id="p1">\nREADY FOR CLAUDE · peer-coding/feat-x R3 · feat/x@abc1234\n</pasted_content>' } },
+    { type: 'attachment', uuid: 'q8', isSidechain: true, timestamp: '2026-10-09T11:30:00Z', attachment: { type: 'queued_command', commandMode: 'prompt', prompt: 'a subagent\'s' } },
+  ])
+  const typedPaste = jsonl('c-typed-paste.jsonl', [ended, { type: 'user', uuid: 'r1', origin: human, timestamp: '2026-10-09T12:00:00Z', message: { content: '<pasted_content id="p2">\nREADY FOR CLAUDE · peer-coding/feat-x R3 · feat/x@abc1234\n</pasted_content>\nand mind the login' } }])
   const typedCodex = jsonl('x-typed.jsonl', [
     { type: 'event_msg', timestamp: '2026-10-09T11:00:00Z', payload: { type: 'item_completed', item: { type: 'UserMessage', content: [{ type: 'text', text: 'fix the bug' }] } } },
     { type: 'event_msg', timestamp: '2026-10-09T11:00:01Z', payload: { type: 'task_started', turn_id: 't-1' } },
@@ -630,7 +648,7 @@ except ChildProcessError: pass
     { type: 'event_msg', timestamp: '2026-10-09T12:00:01Z', payload: { type: 'task_started', turn_id: 't-3' } },
     { type: 'event_msg', timestamp: '2026-10-09T12:01:00Z', payload: { type: 'user_message', message: 'NEEDS USER · peer-coding/feat-x · feat/x@abc1234' } },
   ])
-  const out = spawnSync('/bin/sh', ['-c', r.TURN_SCRIPT, 'sh', claudeDone, claudeBusy, codexDone, codexBusy, join(scratch, 'none.jsonl'), afterCommands, interrupted, midTurn, split, codexAborted, skillBusy, skillDone, apiError, typedClaude, typedCommand, typedBash, typedCue, typedCodex, typedCodexOld], { encoding: 'utf8' })
+  const out = spawnSync('/bin/sh', ['-c', r.TURN_SCRIPT, 'sh', claudeDone, claudeBusy, codexDone, codexBusy, join(scratch, 'none.jsonl'), afterCommands, interrupted, midTurn, split, codexAborted, skillBusy, skillDone, apiError, typedClaude, typedCommand, typedBash, typedCue, typedCodex, typedCodexOld, typedMarked, typedPaste], { encoding: 'utf8' })
   const turns = r.parseTurns(out.stdout)
   check('turns: a command run in the session, its output, a compaction or a meta record starts no turn', turns.get(afterCommands)?.state === 'done' && turns.get(afterCommands)?.id === 'e1' && turns.get(afterCommands)?.cue?.line === cue, JSON.stringify(turns.get(afterCommands)))
   check('turns: an interrupt ends a turn, with no cue', turns.get(interrupted)?.state === 'done' && turns.get(interrupted)?.id === 'i1' && turns.get(interrupted)?.cue === undefined)
@@ -645,11 +663,13 @@ except ChildProcessError: pass
   check('turns: a Codex task started after it is under way', turns.get(codexBusy)?.state === 'busy' && turns.get(codexBusy)?.id === 't-2')
   check('turns: nothing more of what was said leaves the pipeline', !out.stdout.includes('Ready.') && !out.stdout.includes('Confirmed.') && !out.stdout.includes('set it up') && !out.stdout.includes('build the login') && !out.stdout.includes('fix the bug'))
   const typedAt = file => turns.get(file)?.typedAt
-  check('typed: the owner\'s prompt, not the relay\'s cue, a task notice, an interrupt, a skill, output, meta, summary, tool result, subagent or image alone', typedAt(typedClaude) === Date.parse('2026-10-09T09:00:00Z'), new Date(typedAt(typedClaude)).toISOString())
+  check('typed: the owner\'s prompt or skill command, not the relay\'s cue, a task notice, an interrupt, a skill\'s text, output, meta, summary, tool result, subagent or image alone', typedAt(typedClaude) === Date.parse('2026-10-09T09:30:00Z'), new Date(typedAt(typedClaude)).toISOString())
+  check('typed: marked records: the owner\'s prompt queued while the agent worked; no notice, queued notice, cue (pasted or not) or subagent\'s', typedAt(typedMarked) === Date.parse('2026-10-09T11:10:00Z'), new Date(typedAt(typedMarked)).toISOString())
+  check('typed: a pasted cue with words of the owner\'s own is theirs', typedAt(typedPaste) === Date.parse('2026-10-09T12:00:00Z'))
   check('typed: a command and a shell command typed in the session are the owner\'s', typedAt(typedCommand) === Date.parse('2026-10-09T10:06:00Z') && typedAt(typedBash) === Date.parse('2026-10-09T10:07:00Z'))
   check('typed: a cue pasted with words of the owner\'s own is theirs', typedAt(typedCue) === Date.parse('2026-10-09T10:08:00Z'))
   check('typed: Codex\'s prompt (item_completed, or user_message before), not the relay\'s cue nor injected context', typedAt(typedCodex) === Date.parse('2026-10-09T11:00:00Z') && typedAt(typedCodexOld) === Date.parse('2026-10-09T12:00:00Z'), `${typedAt(typedCodex)} ${typedAt(typedCodexOld)}`)
-  check('typed: none in a transcript the owner never typed into', typedAt(claudeDone) === Date.parse('2026-10-09T10:00:00Z') && typedAt(codexDone) === undefined && typedAt(skillDone) === undefined)
+  check('typed: the skill command the owner typed; none where the owner never typed', typedAt(claudeDone) === Date.parse('2026-10-09T10:00:00Z') && typedAt(skillDone) === Date.parse('2026-10-09T10:20:00Z') && typedAt(codexDone) === undefined && typedAt(codexAborted) === undefined)
   // on this Mac's own records, read only: each answers in the expected form
   const real = readdirSync(join(home, '.claude', 'projects'), { withFileTypes: true }).filter(d => d.isDirectory()).slice(0, 3)
     .flatMap(d => readdirSync(join(home, '.claude', 'projects', d.name)).filter(f => f.endsWith('.jsonl')).slice(0, 2).map(f => join(home, '.claude', 'projects', d.name, f)))

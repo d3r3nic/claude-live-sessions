@@ -1035,7 +1035,8 @@ export function viewOf(
     relay: {
       mode: ws.relay?.mode ?? 'off',
       status: ws.relay?.status === undefined ? '' : `${ws.relay.status}${ws.relay.at === undefined ? '' : ` ${ago(o.now - ws.relay.at)} ago`}`,
-      isWaiting: ws.relay !== undefined && ws.relay.mode === 'auto' && ws.relay.streak >= RELAY_CAP,
+      // it waits once it holds a cue at the cap, not as soon as the count reaches it
+      isWaiting: ws.relay !== undefined && ws.relay.mode === 'auto' && ws.relay.streak >= RELAY_CAP && ws.relay.status === 'waits for you',
     },
   }))
   const created = (w: WorkspaceView) => snap.workspaces.findIndex(ws => ws.id === w.key)

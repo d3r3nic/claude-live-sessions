@@ -44,9 +44,10 @@ export function cueOf(line: string): Cue | undefined {
  *   start nothing.
  * - A Codex rollout: `task_complete` or `turn_aborted` ends a turn,
  *   `task_started` starts one.
- * A fifth field is when the owner last typed a prompt into the agent: a
- * prompt, a command (`/model`, `!ls`) or a paste, not the relay's cue line
- * (one line, all cue), a background task's notice or an interrupt's record.
+ * A fifth field is when the owner last typed into the agent: a prompt (one
+ * typed while it works too), a command (`/model`, `/peer-coding …`, `!ls`)
+ * or a paste; not a line that starts with a cue and is all there is (the
+ * relay's, pasted or not), a background task's notice or an interrupt.
  * A subagent's records, and a line cut by `tail`, are skipped.
  */
 export const TURN_SCRIPT = [
@@ -71,10 +72,18 @@ export const TURN_SCRIPT = [
   '      elif $o.type == "event_msg" and $o.payload.type == "task_started" then {state: "busy", id: $o.payload.turn_id, at: $o.timestamp, text: ""}',
   '      else . end;',
   '    def text: if (.content | type) == "string" then .content else ([.content[]? | select(.type == "text") | .text] | join("\\n")) end;',
-  '    def typed: (test("\\n") | not) and cue != "" | not;',
+  // a paste's wrapper is not the owner's words: a cue pasted alone is still only a cue
+  '    def unwrapped: gsub("</?pasted_content[^>]*>"; "") | gsub("^\\\\s+|\\\\s+$"; "");',
+  '    def typed: unwrapped | (test("\\n") | not) and cue != "" | not;',
+  // what the person typed: Claude Code marks it `origin.kind: human` (a prompt, a skill or prompt command, a
+  // paste; one typed while the agent works is kept as a queued_command attachment); a record from before
+  // that mark is read by its text: not an interrupt, a background task's notice or another engine tag
+  '    def keyed: test("^\\\\s*($|\\\\[Request interrupted|<(?!command-name>|command-message>|bash-input>|pasted_content))") | not;',
   '    def owner:',
   '      if .type == "user" then .isMeta != true and .isCompactSummary != true and ([.message.content[]?.type] | index("tool_result") | not)',
-  '        and (said | test("^\\\\s*($|\\\\[Request interrupted|<(?!command-name>|bash-input>|pasted_content))") | not) and (said | typed)',
+  '        and (if .origin.kind != null then .origin.kind == "human" else (said | keyed) end) and (said | typed)',
+  '      elif .type == "attachment" and .attachment.type == "queued_command" then (.attachment.commandMode // "prompt") == "prompt"',
+  '        and (.attachment.origin.kind // "human") == "human" and (.attachment.prompt | type) == "string" and (.attachment.prompt | keyed and typed)',
   '      elif .type == "event_msg" and .payload.type == "user_message" then .payload.message // "" | typed',
   '      elif .type == "event_msg" and .payload.type == "item_completed" and .payload.item.type == "UserMessage" then .payload.item | text | typed',
   '      else false end;',

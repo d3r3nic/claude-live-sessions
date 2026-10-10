@@ -1908,11 +1908,13 @@ describe('relay', () => {
       await clock.advance(4_000)
       await $.command.run(SESSIONS)
     }
-    // the tenth pass in a row
+    // the tenth pass in a row: nothing is held yet, so the row offers no continue
     world.turns = { 'session-104': `done\tturn-c1\t${at(60_000)}\t${READY_CODEX}`, '/rollouts/a.jsonl': `done\tturn-x0\t${at(120_000)}\t` }
     await $.session.start(START)
     await $.command.run(SESSIONS)
     expect(kept()).toMatchObject({ streak: RELAY_CAP, status: 'passed to Codex' })
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    expect(await ui.find({ key: 'relay-go practice-rbac' })).toBeUndefined()
     // Codex at work on it: nothing is held, nothing said
     world.turns = { ...world.turns, '/rollouts/a.jsonl': `busy\tturn-x1\t${at(30_000)}\t` }
     await collect()
@@ -1926,6 +1928,7 @@ describe('relay', () => {
     await collect()
     expect(steps().at(-1)).toEqual(['tell', 'cap-turn-x2'])
     expect(kept()).toMatchObject({ streak: RELAY_CAP, status: 'waits for you' })
+    expect(await ui.find({ key: 'relay-go practice-rbac' })).toBeDefined()
     // the owner types to Claude: the count starts over at once, while Claude works on the prompt
     world.turns = { ...world.turns, 'session-104': `busy\tturn-c2\t${at(5_000)}\t\t${at(5_000)}` }
     await collect()
@@ -1939,6 +1942,7 @@ describe('relay', () => {
     // the same prompt seen again counts once
     await collect()
     expect(kept()).toMatchObject({ streak: 1, typedAt: NOW - 5_000 })
+    await ui.unmount()
   })
 
   test('the collecting session passes Claude\'s hand-off into Codex\'s pane, once, and shows it', async ($, on) => {
@@ -2066,7 +2070,7 @@ describe('relay', () => {
 
   test('the mode button goes auto, notify, off; after the cap, continue lets it go on', async ($, on) => {
     const { files } = engine(on, machine, { termProgram: 'Apple_Terminal' })
-    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, relay: relayOn({ streak: RELAY_CAP, since: NOW - 1 }) }, { ...practice, id: 'plain', name: 'Plain' }] }))
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, relay: relayOn({ streak: RELAY_CAP, since: NOW - 1, status: 'waits for you' }) }, { ...practice, id: 'plain', name: 'Plain' }] }))
     await $.session.start(START)
     await $.command.run(SESSIONS)
     const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })

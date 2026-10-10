@@ -941,10 +941,16 @@ async function passCues(
       const turn = known?.file === undefined ? undefined : turns.get(known.file)
       sides[tool] = { tool, pane: p.pane!, isBusy: (known?.isBusy ?? false) || turn?.state === 'busy', ...(turn === undefined ? {} : { turn }) }
     }
-    const typed = ws.relay === undefined ? undefined : afterOwner(ws.relay, sides)
-    if (typed !== undefined) {
-      if (!(await changeWorkspaces($, home, list => list.map(w => (w.id === ws.id && w.relay !== undefined ? { ...w, relay: afterOwner(w.relay, sides) ?? w.relay } : w))))) continue
-      ws = { ...ws, relay: typed }
+    if (ws.relay !== undefined && afterOwner(ws.relay, sides) !== undefined) {
+      // the owner typed to an agent: the count starts again, on the relay as the file has it now
+      let fresh: Workspace | undefined
+      const isSaved = await changeWorkspaces($, home, list => list.map(w => {
+        if (w.id !== ws.id || w.relay === undefined) return w
+        fresh = { ...w, relay: afterOwner(w.relay, sides) ?? w.relay }
+        return fresh
+      }))
+      if (!isSaved || fresh === undefined) continue
+      ws = fresh
     }
     for (const step of relaySteps(ws, sides, now)) {
       const args = step.kind === 'pass' ? ['pass', step.pane, AGENT_COMMANDS[step.to], step.line] : ['tell', '', '', step.text]
