@@ -1602,7 +1602,8 @@ export const register: Register = on => {
     // a press reaches another Terminal tab or window, so only inside Terminal.app
     const canOpen = (await $.env.get('TERM_PROGRAM')) === 'Apple_Terminal'
     const hasMove = hasWhere && canOpen
-    const titleWidth = Math.max(8, width - (6 + 7 + 10 + (hasWhere ? 9 : 0) + 5 + 10))
+    // a session row's title, in a row `w` wide
+    const titleWidthAt = (w: number) => Math.max(8, w - (6 + 7 + 10 + (hasWhere ? 9 : 0) + 5 + 10))
     const elements = $.ui.resolve(e)
     const Input = 'Input' in elements ? elements.Input : undefined
     const Select = 'Select' in elements ? elements.Select : undefined
@@ -1663,8 +1664,8 @@ export const register: Register = on => {
         <Button key={`more ${id}`} label={open === id ? 'hide' : 'more'} {...(open === id ? { variant: 'primary' as const } : {})} onPress={() => void toggle(id)()} />
       </Box>
     )
-    const bar = (id: string, indent: number, children: Element[]): Element => (
-      <Box key={`bar ${id}`} flexDirection="row" flexWrap="wrap" width={width - indent} marginLeft={indent} columnGap={2}>
+    const bar = (id: string, indent: number, children: Element[], w = width): Element => (
+      <Box key={`bar ${id}`} flexDirection="row" flexWrap="wrap" width={w - indent} marginLeft={indent} columnGap={2}>
         {children}
         <Button key={`close ${id}`} label="Close (x)" hotkey="x" onPress={() => void toggle(id)()} />
       </Box>
@@ -1678,7 +1679,7 @@ export const register: Register = on => {
             <Button key={`down ${scope} ${key}`} label="Move down (d)" hotkey="d" dimColor={shown[shown.length - 1] === key} onPress={() => void move($, scope, shown, key, 1)} />,
           ]
 
-    const itemRow = (i: Item, siblings: readonly string[], scope: string) => {
+    const itemRow = (i: Item, siblings: readonly string[], scope: string, w = width) => {
       const isWorking = i.state === 'working'
       const isIdle = i.state === 'idle'
       const color = isWorking ? 'warning' : isIdle ? undefined : 'permission'
@@ -1686,7 +1687,7 @@ export const register: Register = on => {
       const title = i.tags.length > 0 ? `${i.title} (${i.tags.join(', ')})` : i.title
       const target = canOpen ? i.target : undefined
       return (
-        <Box key={i.key} flexDirection="row" width={width} {...(isIdle ? { backgroundColor: IDLE_BACKGROUND } : {})}>
+        <Box key={i.key} flexDirection="row" width={w} {...(isIdle ? { backgroundColor: IDLE_BACKGROUND } : {})}>
           <Box width={6} flexShrink={0}>
             <Text color={tool}>{`    ${isWorking ? '●' : isIdle ? '○' : '◆'}`}</Text>
           </Box>
@@ -1699,7 +1700,7 @@ export const register: Register = on => {
             ) : (
               <Button
                 key={`open ${i.key}`}
-                label={title.length > titleWidth ? `${title.slice(0, titleWidth - 1)}…` : title}
+                label={title.length > titleWidthAt(w) ? `${title.slice(0, titleWidthAt(w) - 1)}…` : title}
                 plain
                 onPress={() => void openSession($, target)}
               />
@@ -1721,7 +1722,7 @@ export const register: Register = on => {
       )
     }
     // a session's row and, while shown, its actions; while it is being assigned, the workspaces to choose from
-    const sessionRow = (i: Item, siblings: readonly string[], scope: string, treeDir = '') => {
+    const sessionRow = (i: Item, siblings: readonly string[], scope: string, treeDir = '', w = width) => {
       const id = `item:${i.key}`
       const target = canOpen ? i.target : undefined
       const offer = !treeDir.startsWith('/') || Input === undefined ? undefined : offeredAll.find(b => b.member === i.memberId && b.blocked === undefined)
@@ -1752,9 +1753,9 @@ export const register: Register = on => {
         <Button key={`assign-cancel ${i.key}`} label="Back" onPress={() => void update($, assigning, () => ({ key: '', member: '' }))} />,
       ]
       return (
-        <Box key={`row ${i.key}`} flexDirection="column" width={width}>
-          {itemRow(i, siblings, scope)}
-          {open === id && bar(id, 6, choosing.key === i.key ? choices() : actions())}
+        <Box key={`row ${i.key}`} flexDirection="column" width={w}>
+          {itemRow(i, siblings, scope, w)}
+          {open === id && bar(id, 6, choosing.key === i.key ? choices() : actions(), w)}
         </Box>
       )
     }
@@ -1898,10 +1899,20 @@ export const register: Register = on => {
             </Box>
           )}
           {view.workspaces.map(ws => (
-            <Box key={`ws-${ws.key}`} flexDirection="column" width={width}>
-              <Box flexDirection="row" width={width}>
+            // each workspace in a box of its own, a line apart; its border marked while it waits on the owner (a held
+            // hand-off, a cue for them, a check not on track)
+            <Box
+              key={`ws-${ws.key}`}
+              flexDirection="column"
+              width={width}
+              marginTop={1}
+              paddingX={1}
+              borderStyle="round"
+              {...(ws.relay.isWaiting || ws.relay.status.startsWith('needs you') || ws.check?.isOk === false ? { borderColor: 'warning' as const } : { borderDimColor: true })}
+            >
+              <Box flexDirection="row" width={width - 4}>
                 <Box flexGrow={1} flexShrink={1}>
-                  <Text bold wrap="truncate-end">{`  ${ws.name}`}</Text>
+                  <Text bold wrap="truncate-end">{ws.name}</Text>
                 </Box>
                 <Box flexShrink={0} marginLeft={1}>
                   <Text color="permission">{ws.env || 'default'}</Text>
@@ -1920,11 +1931,11 @@ export const register: Register = on => {
                 )}
                 {more(`ws:${ws.key}`)}
               </Box>
-              <Box width={width - 4} marginLeft={4}>
+              <Box width={width - 6} marginLeft={2}>
                 <Text dimColor wrap="truncate-end">{`${ws.only === undefined ? '' : `${ws.only === 'claude' ? 'Claude' : 'Codex'} only · `}${ws.branch === undefined ? '' : `on ${ws.branch} · `}${ws.dir}`}</Text>
               </Box>
               {open === `ws:${ws.key}` &&
-                bar(`ws:${ws.key}`, 4, [
+                bar(`ws:${ws.key}`, 2, [
                   <Button key={`wsopen-bar ${ws.key}`} label="Open (o)" hotkey="o" variant="primary" onPress={() => void openWorkspaceById($, ws.key)} />,
                   // by a click only: turned on, the relay types into the agents
                   ...(ws.isAttached ? [<Button key={`hide ${ws.key}`} label="Hide window" onPress={() => void hideWorkspaceById($, ws.key)} />] : []),
@@ -1944,19 +1955,19 @@ export const register: Register = on => {
                     {...(isPending(`rm:${ws.key}`) ? { variant: 'primary' as const } : {})}
                     onPress={() => void pressRemove(ws.key)()}
                   />,
-                ])}
+                ], width - 4)}
               {(ws.relay.status !== '' || ws.relay.isWaiting) && (
-                <Box flexDirection="row" width={width - 4} columnGap={1} marginLeft={4}>
+                <Box flexDirection="row" width={width - 6} columnGap={1} marginLeft={2}>
                   <Text dimColor wrap="truncate-end">{`relay: ${ws.relay.isWaiting ? `waits for you after ${RELAY_CAP} hand-offs` : ws.relay.status}`}</Text>
                   {ws.relay.isWaiting && <Button key={`relay-go ${ws.key}`} label="continue" onPress={() => void continueRelay($, ws.key)} />}
                 </Box>
               )}
               {ws.check !== undefined && (
-                <Box flexDirection="row" width={width - 4} marginLeft={4}>
+                <Box flexDirection="row" width={width - 6} marginLeft={2}>
                   <Text {...(ws.check.isOk ? { dimColor: true } : { color: 'warning' as const })} wrap="truncate-end">{`check: ${ws.check.text}`}</Text>
                 </Box>
               )}
-              {ws.items.map(i => sessionRow(i, ws.items.map(x => x.key), itemsScope(`ws:${ws.key}`)))}
+              {ws.items.map(i => sessionRow(i, ws.items.map(x => x.key), itemsScope(`ws:${ws.key}`), '', width - 4))}
             </Box>
           ))}
         </Box>

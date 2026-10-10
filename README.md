@@ -58,7 +58,7 @@ A workspace is a project with your own name: a repository, an environment, and C
   - From inside tmux, it switches that terminal to the workspace.
   - In another terminal app, it gives the command to run.
   It refuses a folder that is gone, and a running `ws-<id>` session that was not started for this workspace. A new workspace never reuses the name of a session already running.
-- The pane lists workspaces first, each with its agents (whatever runs in its tmux session) and a running or stopped state. Pressing an agent brings its pane up.
+- The pane lists workspaces first, each in a box of its own a line apart, with its agents (whatever runs in its tmux session) and a running or stopped state. A box's border is marked while the workspace waits on you (the relay holding a hand-off, a cue for you, a drift check not on track) and dim otherwise. Pressing an agent brings its pane up.
 - `Assign to workspace`, in a session's actions, assigns it to a workspace (or to none). A running session cannot move into tmux, but an assigned one is listed under the workspace, tagged `assigned`. Assignment is by the session's lasting id: its Claude session id, or its Codex thread id. A session running in a workspace's own tmux session is listed there, whatever it is assigned to.
 - `/workspace rm <name>`, or `Remove` (pressed twice) in its actions, forgets a workspace. Its tmux session keeps running until `tmux kill-session -t ws-<id>`.
 - The list is kept in `~/Library/Application Support/live-sessions/workspaces.json`, which every profile's sessions read. If that file can't be read, it is reported and never overwritten. Workspaces need tmux.
@@ -146,7 +146,7 @@ To change it, edit this folder, then run `/reload-plugins` in a session.
 
 ```sh
 claude plugin validate .
-claude plugin test .                                         # 139 tests
+claude plugin test .                                         # 140 tests
 npx -p typescript@5.6.3 tsc -p .                             # after one load, which lays down .claude-plugin/types
 node --experimental-strip-types tests/host-check.mjs [2d] [--slow]   # on this Mac: SQL, pipelines, a full collection, the move script on throwaway processes, workspaces and the relay on a private tmux server (reading no tmux.conf), the checkout script on throwaway repositories
 E2E_TRUSTED_DIR=<a trusted folder> node --experimental-strip-types tests/e2e-terminal.mjs    # a Terminal window: move a throwaway session to the background

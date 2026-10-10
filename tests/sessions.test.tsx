@@ -1598,6 +1598,37 @@ describe('workspaces', () => {
 })
 
 describe('workspaces, from the pane', () => {
+  test('each workspace in a box of its own, a line apart; its border marked while it waits on the owner', async ($, on) => {
+    const { files } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [
+      { ...practice, relay: relayOn({ streak: RELAY_CAP, status: 'waits for you' }) },
+      { ...practice, id: 'quiet', name: 'Quiet', relay: relayOn({ status: 'passed to Codex', at: NOW }) },
+      { ...practice, id: 'asks', name: 'Asks', relay: relayOn({ status: 'needs you', at: NOW }) },
+      { ...practice, id: 'drift', name: 'Drift', check: { at: NOW, status: 'drifting', brief: 'off course' } },
+    ] }))
+    // WEB CONSOLE (ttys004) runs in the first one's tmux session
+    world.tmuxPanes = 'ws-practice-rbac\tpeers\t/dev/ttys004\t%1\tclaude\n'
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    const box = async (id: string) => (await ui.find({ key: `ws-${id}` }))?.props as Record<string, unknown> | undefined
+    const looks = async (id: string) => {
+      const p = await box(id)
+      return [p?.borderStyle, p?.borderColor ?? (p?.borderDimColor === true ? 'dim' : undefined), p?.marginTop, p?.paddingX, p?.width]
+    }
+    expect(await looks('practice-rbac')).toEqual(['round', 'warning', 1, 1, 110])
+    expect(await looks('quiet')).toEqual(['round', 'dim', 1, 1, 110])
+    expect(await looks('asks')).toEqual(['round', 'warning', 1, 1, 110])
+    expect(await looks('drift')).toEqual(['round', 'warning', 1, 1, 110])
+    // what is inside lays out within the border and its padding
+    expect(((await ui.find({ key: 'claude-101' }))?.props as { width?: number } | undefined)?.width).toBe(106)
+    await reveal(ui, 'ws:practice-rbac')
+    expect(((await ui.find({ key: 'bar ws:practice-rbac' }))?.props as { width?: number } | undefined)?.width).toBe(104)
+    // a session row outside any workspace keeps the pane's width
+    expect(((await ui.find({ key: 'claude-104' }))?.props as { width?: number } | undefined)?.width).toBe(110)
+    await ui.unmount()
+  })
+
   test('each row has one [ more ]; it shows the row\'s actions, worded, each with its key; one row at a time', async ($, on) => {
     const { focusAsked, runs } = engine(on, machine, { termProgram: 'Apple_Terminal' })
     await $.session.start(START)
