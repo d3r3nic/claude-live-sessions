@@ -133,6 +133,8 @@ for (const dir of readdirSync(home).filter(n => /^\.codex(-[\w.-]+)?$/.test(n)))
   const path = join(codexHome, db)
   const out = run(['sqlite3', '-json', '-cmd', '.timeout 2000', ...c.readOnlyArgs(path, existsSync(`${path}-shm`)), sql])
   check(`query runs on ${dir}/${db}`, true, `${out.length} bytes`)
+  const noExec = c.parseThreads(run(['sqlite3', '-json', '-cmd', '.timeout 2000', ...c.readOnlyArgs(path, existsSync(`${path}-shm`)), c.threadQuery(now - 30 * 86_400_000, now, [], { noExec: true })]))
+  check(`the query without exec runs leaves them out on ${dir}`, noExec.every(t => t.source !== 'exec'), `${noExec.length} threads`)
   threads.set(codexHome, c.parseThreads(out))
 }
 const codex = c.codexSessions({ terminals, threads, now })

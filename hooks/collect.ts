@@ -607,7 +607,7 @@ export function codexSessions(args: {
  * that wrote since `agentsSince`. Long texts are cut so a home's rows stay
  * far below what one command's output may hold.
  */
-export function threadQuery(since: number, agentsSince: number, ids: readonly string[]): string {
+export function threadQuery(since: number, agentsSince: number, ids: readonly string[], o: { noExec?: boolean } = {}): string {
   const idList = [...new Set(ids.filter(id => UUID.test(id)))].map(id => `'${id}'`).join(',')
   const at = (t: string, col: string) => `coalesce(${t}.${col}_ms, ${t}.${col} * 1000)`
   return [
@@ -619,7 +619,7 @@ export function threadQuery(since: number, agentsSince: number, ids: readonly st
     "substr(t.source, 1, 40) as source, coalesce(t.originator, '') as originator, t.rollout_path,",
     `${at('t', 'created_at')} as created_at_ms, ${at('t', 'updated_at')} as updated_at_ms, coalesce(a.n, 0) as agents`,
     'from threads t left join agents a on a.root = t.id',
-    "where t.archived = 0 and coalesce(nullif(t.thread_source, ''), 'user') = 'user'",
+    `where t.archived = 0 and coalesce(nullif(t.thread_source, ''), 'user') = 'user'${o.noExec === true ? " and coalesce(t.source, '') != 'exec'" : ''}`,
     `and (${at('t', 'updated_at')} >= ${Math.floor(since)}${idList === '' ? '' : ` or t.id in (${idList})`})`,
     'order by updated_at_ms desc limit 400',
   ].join('\n')

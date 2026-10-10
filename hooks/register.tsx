@@ -987,7 +987,7 @@ async function codexWrittenSince($: EngineInterface, codexHome: string, since: n
   if (db === undefined) return ['?']
   const path = `${codexHome}/${db}`
   const out = await $.process
-    .run(['sqlite3', '-json', '-cmd', '.timeout 2000', ...readOnlyArgs(path, await $.fs.exists(`${path}-shm`)), threadQuery(since, since, [])], { timeoutMs: 10_000 })
+    .run(['sqlite3', '-json', '-cmd', '.timeout 2000', ...readOnlyArgs(path, await $.fs.exists(`${path}-shm`)), threadQuery(since, since, [], { noExec: true })], { timeoutMs: 10_000 })
     .catch(() => ({ exitCode: -1, stdout: '', stderr: '' }))
   if (out.exitCode !== 0) return ['?']
   // only a conversation made in a terminal could be the one a Codex terminal runs

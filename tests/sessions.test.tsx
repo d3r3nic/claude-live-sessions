@@ -2296,7 +2296,7 @@ describe('bringing running sessions into a workspace', () => {
     expect((await ui.find({ key: 'form:bring claude:session-101' }))?.props.label).toBe('[x] Claude · WEB CONSOLE')
     expect((await ui.find({ key: `form:bring codex:${HELD}` }))?.props.label).toMatch(/^\[ \] Codex · /)
     expect(await ui.find({ key: 'form:bring codex-tty:ttys045' })).toBeUndefined()
-    expect((await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')).toMatch(/Codex · .* · not offered: which conversation it runs is not certain/)
+    expect((await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')).toContain('Codex · the terminal in ttys045 · not offered: which conversation it runs is not certain')
     await ui.press({ key: `form:bring codex:${HELD}` })
     await ui.input({ key: 'form:name', text: 'Console', kind: 'change' })
     await ui.input({ key: 'form:purpose', text: 'finish the console', kind: 'change' })

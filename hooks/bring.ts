@@ -82,7 +82,8 @@ export function bringable(snap: Snapshot, o: { now: number; selfId: string }, di
     // a terminal whose conversation is not known for certain is shown, never offered: closing it could close another
     const blocked = isKnown ? undefined : s.key.startsWith('pid-') ? 'its conversation was not found; close it yourself, then bring in its conversation' : 'which conversation it runs is not certain (other Codex work under this account): close it yourself, then bring in its conversation'
     found.push({
-      member: isKnown ? `codex:${s.key}` : `codex-tty:${s.tty}`, tool: 'codex', label: `Codex · ${s.key.startsWith('pid-') ? s.tty : s.title || s.key.slice(0, 8)}`, env, isIdle, at: s.lastActive,
+      // an uncertain terminal is named by its terminal alone: a title would be a guess, and could send the owner to close another
+      member: isKnown ? `codex:${s.key}` : `codex-tty:${s.tty}`, tool: 'codex', label: `Codex · ${isKnown ? s.title || s.key.slice(0, 8) : `the terminal in ${s.tty}`}`, env, isIdle, at: s.lastActive,
       ...(blocked === undefined ? {} : { blocked }),
     })
   }
