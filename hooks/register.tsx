@@ -1137,7 +1137,8 @@ async function passCues(
     const typedInto = new Set<string>()
     for (const step of relaySteps(ws, sides, now)) {
       const outcome = await run(step)
-      if (step.kind === 'pass' && (outcome === 'passed' || outcome === 'unsent')) typedInto.add(step.pane)
+      // a pass that failed may have typed before it failed: counted as typed into
+      if (step.kind === 'pass' && (outcome === 'passed' || outcome === 'unsent' || outcome === 'failed')) typedInto.add(step.pane)
       await settle(step, outcome)
       // Codex's hand-off passed: if its context is full enough, it compacts now, once for that turn
       const compact = compactStep(ws, sides, step, outcome, typedInto)
@@ -1179,18 +1180,25 @@ async function compactAtHandOff($: EngineInterface, answer: string) {
   if (at <= 0) return
   const { context } = await $.session.usage()
   if (context.percent === undefined || context.percent < at) return
-  // its last turn, as the relay reads its records
+  // its last turn, as the relay reads its records: that turn (once its reply is written), still its last, until the
+  // relay has taken up its hand-off (its ledger step); not in two minutes (Codex at work, the relay waiting for you):
+  // left for a later hand-off
   const file = transcriptPath(`${home}/.${self.profile}`, self.startCwd, id)
   const lastTurn = async () => parseTurns((await $.process.run(['/bin/sh', '-c', TURN_SCRIPT, 'sh', file], { timeoutMs: 20_000 }).catch(() => ({ stdout: '' }))).stdout).get(file)
-  const turn = await lastTurn()
-  if (turn?.state !== 'done' || turn.cue?.line !== cue.line) return
-  for (let waited = 0; !(await $.fs.exists(`${ledgerPath(home)}/pass-${turn.id}`)); waited += 2_000) {
-    // not passed in two minutes (Codex at work, the relay waiting for you): left for a later hand-off
+  let turnId: string | undefined
+  for (let waited = 0; ; waited += 2_000) {
+    const turn = await lastTurn()
+    const isThatTurn = turn?.state === 'done' && turn.cue?.line === cue.line && (turnId === undefined || turn.id === turnId)
+    if (turnId !== undefined && !isThatTurn) return
+    if (isThatTurn) {
+      turnId = turn.id
+      if (await $.fs.exists(`${ledgerPath(home)}/pass-${turnId}`)) break
+    }
     if (waited >= 120_000) return
     await $.clock.sleep(2_000)
   }
-  const still = await lastTurn()
-  if (still?.id !== turn.id || still.state !== 'done') return
+  // still the same conversation (not cleared or resumed into another while it waited)
+  if ((await $.session.id()) !== id) return
   await $.session.compact({ instructions: claudeKeep(ws.name) }).catch(() => undefined)
 }
 

@@ -177,6 +177,8 @@ const world = {
   /** What STOP_SCRIPT answers for a terminal (default `stopped`), and what it was run for. */
   stop: {} as Record<string, string>,
   stopped: [] as string[],
+  /** This session's id, when it changed since the engine started (a /clear, a /resume). */
+  sessionId: undefined as string | undefined,
   /** What lsof answers now, when not the fixture's. */
   lsof: undefined as string | undefined,
   /** Threads the Codex databases no longer have, though the fixtures do. */
@@ -219,6 +221,7 @@ const resetWorld = () => {
   world.codexMode = 'workspace-write\ton-request\t/Users/u/dev/web-app\n'
   world.codexTask = '"type":"task_complete"\n'
   world.codexTaskAnswer = undefined
+  world.sessionId = undefined
 }
 const changed = (pid: number, line: string) => {
   const stat = world.stat.get(pid)
@@ -365,7 +368,7 @@ function engine(
 ) {
   resetWorld()
   on('session.start', async ($, e) => ({ cwd: e.cwd }))
-  on('session.id', async () => ({ value: selfId }))
+  on('session.id', async () => ({ value: world.sessionId ?? selfId }))
   on('command.register', async ($, e) => ({ value: { command: e.name } }))
   const panes = new Map<string, { isShown: boolean; isPlaced: boolean }>()
   const focusAsked: string[] = []
@@ -2552,6 +2555,22 @@ describe('the context guard', () => {
     files.set(`${ledger}/pass-turn-c1`, '')
     await wait(4_000)
     expect(compacted).toEqual([claudeKeep('Practice RBAC')])
+    // its final reply written a moment after the turn's end: read again until it is
+    world.turns = { 'session-104': `busy\tturn-r0\t${new Date(NOW).toISOString()}\t` }
+    await $.turn.complete({ answer: `Done.\n${READY_CODEX}`, durationMs: 1_000, isAborted: false, turnId: 'turn-r1', reason: 'answer' })
+    await wait(2_000)
+    world.turns = { 'session-104': `done\tturn-r1\t${new Date(NOW).toISOString()}\t${READY_CODEX}` }
+    files.set(`${ledger}/pass-turn-r1`, '')
+    await wait(4_000)
+    expect(compacted).toHaveLength(2)
+    // cleared into another conversation while it waited: no
+    await end(`Done.\n${READY_CODEX}`, 'turn-s1')
+    await wait(2_000)
+    world.sessionId = 'session-new'
+    files.set(`${ledger}/pass-turn-s1`, '')
+    await wait(4_000)
+    world.sessionId = undefined
+    expect(compacted).toHaveLength(2)
     // a cue for the owner: no
     await end('Asking.\nNEEDS USER · peer-coding/feat-rbac · feat/rbac@abc1234', 'turn-c2')
     files.set(`${ledger}/pass-turn-c2`, '')
@@ -2570,7 +2589,7 @@ describe('the context guard', () => {
     await end(`Done.\n${READY_CODEX}`, 'turn-c6')
     files.set(`${ledger}/pass-turn-c6`, '')
     await wait(4_000)
-    expect(compacted).toHaveLength(1)
+    expect(compacted).toHaveLength(2)
     // the relay in notify mode, or the guard off: no
     percent = 90
     for (const relay of [relayOn({ mode: 'notify' }), relayOn()]) {
@@ -2581,7 +2600,7 @@ describe('the context guard', () => {
       files.set(`${ledger}/pass-turn-n-${relay.mode}`, '')
       await wait(4_000)
     }
-    expect(compacted).toHaveLength(1)
+    expect(compacted).toHaveLength(2)
   })
 
   test('Compact at, in a workspace\'s actions: 50, 60, 70, 80 percent, off', async ($, on) => {
