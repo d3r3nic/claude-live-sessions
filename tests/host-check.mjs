@@ -268,6 +268,45 @@ if (process.argv.includes('--slow')) {
   check('workspace: Claude takes the first prompt as it is, as one argument after --, running nothing in it', file('claude.args') === `--add-dir\n/x/app-worktrees\n--\n${prompt}\n` && !existsSync(`${scratch}/RAN`), JSON.stringify(file('claude.args').slice(0, 60)))
   check('workspace: each first prompt is taken once', !existsSync(w.promptPath(fakeHome, 'check', 'claude')) && !existsSync(w.promptPath(fakeHome, 'check', 'codex')))
   check('workspace: marked as started for this workspace', spawnSync('tmux', ['-L', socket, '-f', '/dev/null', 'show-options', '-t', 'ws-check', '-qv', w.OWNER_OPTION], { encoding: 'utf8' }).stdout.trim() === '1234')
+  // used by hand: the mouse on in this session, and each side's border naming its agent
+  const t6 = (...args) => spawnSync('tmux', ['-L', socket, '-f', '/dev/null', ...args], { encoding: 'utf8' }).stdout.trim()
+  check('workspace: the mouse on in its session; borders shown', t6('show-options', '-t', 'ws-check', '-v', 'mouse') === 'on' && t6('show-window-options', '-t', 'ws-check:', '-v', 'pane-border-status') === 'top')
+  const sides = Object.fromEntries(Object.values(w.parsePanes(t6('list-panes', '-a', '-F', w.PANES_FORMAT))).filter(p => p.session === 'ws-check').map(p => [p.window, p.pane]))
+  const border = pane => t6('display-message', '-p', '-t', pane, '#{E:pane-border-format}')
+  check('workspace: each side\'s border names its agent; the side with the keys says so', border(sides.claude).startsWith('Claude') && border(sides.codex).startsWith('Codex') &&
+    [border(sides.claude), border(sides.codex)].filter(b => b.includes('your keys go here')).length === 1, `${border(sides.claude)}|${border(sides.codex)}`)
+  // real mouse events, from a terminal attached to it: a click on the left side gives Claude the keys; the
+  // wheel over the right side scrolls Codex's side alone
+  const mouse = spawnSync('python3', ['-c', `
+import os, pty, select, subprocess, time, struct, fcntl, termios, sys
+S = sys.argv[1]
+t = lambda *a: subprocess.run(['tmux', '-L', S, '-f', '/dev/null', *a], capture_output=True, text=True).stdout.strip()
+pid, fd = pty.fork()
+if pid == 0:
+    os.environ['TERM'] = 'xterm-256color'
+    os.execvp('tmux', ['tmux', '-L', S, '-f', '/dev/null', 'attach', '-t', '=ws-check'])
+fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack('HHHH', 30, 100, 0, 0))
+def pump(s):
+    end = time.time() + s
+    while time.time() < end:
+        r, _, _ = select.select([fd], [], [], 0.1)
+        if r:
+            try: os.read(fd, 65536)
+            except OSError: return
+pump(1.5)
+before = t('display-message', '-p', '-t', 'ws-check:peers', '#{pane_id}')
+os.write(fd, b'\\x1b[<0;10;12M\\x1b[<0;10;12m'); pump(0.8)
+after = t('display-message', '-p', '-t', 'ws-check:peers', '#{pane_id}')
+os.write(fd, b'\\x1b[<64;85;12M'); pump(0.8)
+modes = t('list-panes', '-t', 'ws-check:peers', '-F', '#{pane_id}=#{pane_in_mode}')
+print(before, after, modes.replace(chr(10), ' '))
+t('send-keys', '-t', 'ws-check:peers.1', '-X', 'cancel')
+os.write(fd, b'\\x02d'); pump(0.5)
+os.close(fd)
+os.waitpid(pid, 0)
+`, socket], { encoding: 'utf8' }).stdout.trim().split(' ')
+  check('workspace: a click picks the side that takes the keys', mouse[0] === sides.codex && mouse[1] === sides.claude, mouse.slice(0, 2).join(' → '))
+  check('workspace: the wheel scrolls the side under it alone', mouse.includes(`${sides.codex}=1`) && mouse.includes(`${sides.claude}=0`), mouse.slice(2).join(' '))
   // a default workspace on the same server, whose global environment holds another account, in a folder with # in its name
   const hashed = join(scratch, 'C#{session_name}')
   mkdirSync(hashed)

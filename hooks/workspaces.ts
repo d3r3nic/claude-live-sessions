@@ -120,6 +120,26 @@ function paneScript(tool: 'claude' | 'codex', ws: Pick<Workspace, 'id' | 'env' |
 /** The tmux pane option that says which agent a pane is for. */
 export const AGENT_OPTION = '@live-sessions-agent'
 
+/** Each side's border: its agent's name, and on the side that takes the keys, so it says. */
+export const BORDER_FORMAT =
+  ` #{?#{==:#{${AGENT_OPTION}},claude},Claude,#{?#{==:#{${AGENT_OPTION}},codex},Codex,#{pane_current_command}}}#{?pane_active, · your keys go here,} `
+
+/**
+ * A workspace's tmux session, set up to be used by hand, as tmux commands
+ * (arguments) for the session `name`: the mouse on in that session alone,
+ * so a click picks the side the keys go to and the wheel scrolls the side
+ * under it (or reaches its agent, when the agent takes the mouse); and each
+ * side's border naming its agent. tmux.conf and other sessions are left as
+ * they are.
+ */
+export function sessionSetup(name: string): string[][] {
+  return [
+    ['set-option', '-t', name, 'mouse', 'on'],
+    ['set-window-option', '-t', `${name}:`, 'pane-border-status', 'top'],
+    ['set-window-option', '-t', `${name}:`, 'pane-border-format', BORDER_FORMAT],
+  ]
+}
+
 /** The tmux session option that marks a session as started for one workspace (its createdAt). */
 export const OWNER_OPTION = '@live-sessions-workspace'
 
@@ -152,6 +172,7 @@ export function openCommand(
     `\\; set-option -p ${AGENT_OPTION} codex`,
     // set-option takes no `=` exact-match target; the session was just made under this exact name
     `\\; set-option -t ${shellWord(name)} ${OWNER_OPTION} ${shellWord(String(ws.createdAt))}`,
+    ...sessionSetup(name).map(args => `\\; ${args.map((a, i) => (i === 0 ? a : shellWord(a))).join(' ')}`),
   ].join(' ')
   return o.attach === false ? create : `${create}; ${tmux} attach -t ${shellWord(`=${name}`)}`
 }

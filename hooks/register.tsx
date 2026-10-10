@@ -27,6 +27,7 @@ import {
   promptPath,
   rankProjects,
   shellQuote,
+  sessionSetup,
   setupPrompt,
 } from './workspaces'
 import {
@@ -533,6 +534,8 @@ async function openWorkspace($: EngineInterface, ws: Workspace, at?: { window: s
     if (owner !== String(ws.createdAt)) {
       return { isOpen: false, text: `Not opened: tmux session ${name} was not started for this workspace; end it (tmux kill-session -t ${name}) or remove this workspace.` }
     }
+    // one made before the mouse and the side labels were set up gets them now
+    for (const args of sessionSetup(name)) await tmux(args)
     // its agent's pane (a workspace made before panes were marked has a window per agent)
     if (at?.pane !== undefined && /^%\d+$/.test(at.pane)) {
       await tmux(['select-window', '-t', at.pane])

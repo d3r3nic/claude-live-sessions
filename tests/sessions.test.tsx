@@ -64,6 +64,7 @@ import {
   PROJECTS_SCRIPT,
   peerPrompt,
   rankProjects,
+  sessionSetup,
   setupPrompt,
   envsFrom,
   findWorkspace,
@@ -1230,6 +1231,10 @@ describe('workspaces', () => {
     expect(cmd.indexOf('\\; set-option -p @live-sessions-agent claude \\; split-window -h -c \'/Users/u/dev/web-app\' ')).toBeGreaterThan(0)
     expect(cmd.indexOf('\\; set-option -p @live-sessions-agent codex \\; set-option -t \'ws-practice-rbac\' @live-sessions-workspace')).toBeGreaterThan(cmd.indexOf('split-window'))
     expect(cmd.endsWith("; tmux attach -t '=ws-practice-rbac'")).toBe(true)
+    // made with the mouse on in its session alone, and each side's border naming its agent
+    expect(cmd).toContain("\\; set-option '-t' 'ws-practice-rbac' 'mouse' 'on'")
+    expect(cmd).toContain("\\; set-window-option '-t' 'ws-practice-rbac:' 'pane-border-status' 'top'")
+    expect(cmd).not.toContain('-g')
     // its agents may work in the worktrees folder beside the checkout; Claude takes the first prompt once
     const withCheckout = openCommand({ ...practice, checkout: '/Users/u/dev/web-app' }, HOME)
     expect(withCheckout.match(/--add-dir/g)).toHaveLength(2)
@@ -1329,6 +1334,10 @@ describe('workspaces', () => {
     expect(shown).toContain('Practice RBAC')
     expect(shown).toContain('open')
     await ui.press({ key: 'open codex-' + RESUMED_A })
+    // a workspace running from before is set up for use by hand when opened: the mouse on in its session, borders named
+    const setUp = runs.filter(r => r[0] === 'tmux' && (r[1] === 'set-option' || r[1] === 'set-window-option'))
+    expect(setUp.slice(0, 3)).toEqual(sessionSetup('ws-practice-rbac').map(a => ['tmux', ...a]))
+    expect(sessionSetup('ws-practice-rbac')[0]).toEqual(['set-option', '-t', 'ws-practice-rbac', 'mouse', 'on'])
     // its pane: its window, then the pane itself
     expect(runs.filter(r => r[0] === 'tmux' && (r[1] === 'select-window' || r[1] === 'select-pane'))).toEqual([['tmux', 'select-window', '-t', '%2'], ['tmux', 'select-pane', '-t', '%2']])
     await ui.unmount()
