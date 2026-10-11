@@ -1665,9 +1665,9 @@ function usageText(used: UsageView, account: string, window: '5h' | '7d', now: n
     const rank = of?.ranks[`${tool} ${window}`]
     const limit = of?.limits[tool][window]
     const head = `${tool === 'claude' ? 'Claude' : 'Codex'} (${a || 'default'}), ${window}${limit === undefined ? '' : `: ${limitSaid(window, limit, now, used.offset)}`}`
-    if (rank === undefined) return limit === undefined ? [] : [`${head}; nothing counted since ${clockSaid(now - WINDOW_MS[window], now, used.offset)}`]
+    if (rank === undefined) return limit === undefined ? [] : [`${head}; nothing counted since ${clockSaid(now - WINDOW_MS[window], now, used.offset, true)}`]
     const rows = rank.rows.map(r => `${r.name} ${Math.round(r.share * 100)}%${r.ofLimit === undefined ? '' : ` (≈ ${r.ofLimit < 1 ? '<1' : Math.round(r.ofLimit)}% of the limit)`}`)
-    return [`${head}; since ${clockSaid(rank.since, now, used.offset)}: ${rows.join(', ')}${rank.more === 0 ? '' : `, +${rank.more} more`}`]
+    return [`${head}; since ${clockSaid(rank.since, now, used.offset, true)}: ${rows.join(', ')}${rank.more === 0 ? '' : `, +${rank.more} more`}`]
   }))
   return [...lines, ...(used.problem === '' ? [] : [`! ${used.problem}`])].join('\n') || `Usage: nothing counted in this ${window} window.`
 }
@@ -2026,7 +2026,7 @@ export const register: Register = on => {
         const rank = used.accounts[a]?.ranks[`${tool} ${usedIn}`]
         if (rank === undefined) return []
         const limit = used.accounts[a]?.limits[tool][usedIn]
-        const label = `${tool === 'claude' ? 'Claude' : 'Codex'} · ${accountName(a)} · since ${clockSaid(rank.since, now, used.offset)}${limit === undefined ? ' · its limit not read yet' : ` · ${Math.round(limit.used)}% of the ${usedIn} limit used`}`
+        const label = `${tool === 'claude' ? 'Claude' : 'Codex'} · ${accountName(a)} · since ${clockSaid(rank.since, now, used.offset, true)}${limit === undefined ? ' · its limit not read yet' : ` · ${Math.round(limit.used)}% of the ${usedIn} limit used`}`
         return [
           <Text key={`usage ${a} ${tool}`} color={TOOL_COLOR[tool]} wrap="truncate-end">{`  ${label}`}</Text>,
           ...rank.rows.map(r => (

@@ -4,6 +4,17 @@ A Claude Code plugin (a function-hooks mod) that lists the live Claude Code and 
 
 - `/sessions` shows or hides the pane. A status line under the prompt keeps the counts: `Claude 22 (3 working) · Codex 11 (1 working)`.
 - **One account at a time.** A session's pane, its status line and the ops screen it opens show its own account: the Claude sessions and Codex conversations of that account's profiles (`claude` and `codex` for the default account, `claude-<name>` and `codex-<name>` for another) and that account's workspaces. `account: default` (or the account's name), beside the activity buttons, switches to `all accounts` and back; the choice is kept for that account's next sessions. A session under a profile the plugin cannot name sees every account. A new workspace starts in the session's own account. Each account sees its own only where this plugin is installed for it (`claude plugin install` under that account's `CLAUDE_CONFIG_DIR`).
+- **Context and limits.** Each session's row shows its context at its last request: `437k` for Claude, `117k/258k` for Codex (its context window too). It is read from the last 256 KB of its transcript or rollout, and shown when the pane is at least 80 columns wide. Under the activity buttons, each shown account's limits: `Claude 5h 4% ↻15:00 · 7d 19% ↻Thu 14:00 │ Codex 7d 42% ↻Tue 08:40`.
+  - Claude's limits are what its sessions last read. Each session writes its own account's limits to `~/Library/Caches/live-sessions/limits.json` for the other accounts' panes.
+  - Codex's are what its rollouts last recorded.
+  - A reading whose window has reset since is not shown; one more than an hour old says how old it is.
+- **Usage by project.** The `usage by project` button shows the panel, with `5h` and `7d` to choose the window; `/sessions usage [5h | 7d]` gives the same as text. For each account and tool it lists each project's share of what that account used since the limit's window began (its reset less its length), and about how much of the limit that is (the share times the percent used).
+  - Without a limit reading, the window counts back from now and only shares are shown.
+  - A project is a folder's repository, its worktrees included; outside a repository it is the folder. A Claude reply counts for the folder it recorded, a Codex count for the folder its turn ran in.
+  - **These are estimates.** Claude replies are priced at API list prices per model: Opus 5.5 at $4 input and $20 output per million tokens, cache reads $0.20, cache writes 1.25× (5 minutes) or 2× (an hour). Older models are priced by their family. Codex tokens are weighed as OpenAI prices its GPT-5 models: cached input 0.1×, output 8×. A plan may weigh usage differently; the shares are what to compare.
+  - **How it reads.** `hooks/usage.pl`, run with macOS's own perl, reads each Claude transcript (subagents' too) and Codex rollout written in the last 8 days. After the first read it reads only what was added since: the byte after each file's last whole line is kept.
+  - It sums tokens into 10-minute slots per account, tool and folder, and keeps 7 days of them in `~/Library/Caches/live-sessions/usage.json` for every session. Only numbers, times, model names, reply ids and folders leave the script. Codex's running totals are turned into what each count added: a repeat adds nothing, a lower count starts over.
+  - The first read of a week of records (about 4.5 GB on the machine it was built on) took about 5 s. After that it reads at most every 2 minutes while a pane is in view, by whichever session's turn comes; a read another session made in the last 2 minutes is used as it is.
 - The pane groups sessions by repository (its origin, `owner/repo`), then worktree or branch, then each session, labelled `claude` (orange) or `codex` (blue). An idle row is white.
 - A session is listed where it has been working, not where it started. That is the worktree it used most among the last 40 folders its transcript or rollout records.
 - The `1d 2d 3d 7d all` buttons, or `/sessions 2d | 12h | all`, list only the sessions active that recently. The choice is kept.
@@ -150,7 +161,7 @@ To change it, edit this folder, then run `/reload-plugins` in a session.
 
 ```sh
 claude plugin validate .
-claude plugin test .                                         # 145 tests
+claude plugin test .                                         # 153 tests
 npx -p typescript@5.6.3 tsc -p .                             # after one load, which lays down .claude-plugin/types
 node --experimental-strip-types tests/host-check.mjs [2d] [--slow]   # on this Mac: SQL, pipelines, a full collection, the move script on throwaway processes, workspaces and the relay on a private tmux server (reading no tmux.conf), the checkout script on throwaway repositories
 E2E_TRUSTED_DIR=<a trusted folder> node --experimental-strip-types tests/e2e-terminal.mjs    # a Terminal window: move a throwaway session to the background

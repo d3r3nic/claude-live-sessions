@@ -3,10 +3,11 @@
 // Run: node --experimental-strip-types tests/host-check.mjs
 // It opens Codex databases read-only, and prints no environment values.
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { registerHooks } from 'node:module'
+import { fileURLToPath } from 'node:url'
 // the plugin imports its own files without an extension, as its engine resolves them; Node needs `.ts`
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -916,6 +917,89 @@ except ChildProcessError: pass
 {
   const help = spawnSync('claude', ['--help'], { encoding: 'utf8', env: { ...process.env, CLAUDECODE: '' } }).stdout ?? ''
   check('lean work: the installed Claude takes --append-system-prompt, as a workspace\'s pane starts it', help.includes('--append-system-prompt <prompt>'), help.includes('--append-system-prompt <prompt>') ? '' : help.slice(0, 200))
+}
+
+// usage.pl with the real perl, on records of both kinds: a reply written over several records counted once, real JSON
+// in a tool call's input (a "usage", a "cwd") never taken for the reply's own, a record before the window and a line
+// still being written left out, a subagent's reply counted but never taken for the session's context; Codex's running
+// totals turned into what each count added (a repeat adds nothing, a lower count starts over), its latest limits; then
+// read on from the marks it gave, and from the start for a file now shorter than its mark
+{
+  const u = await import('../hooks/usage.ts')
+  const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'live-sessions-usage-')))
+  try {
+    const pl = join(dirname(fileURLToPath(import.meta.url)), '..', 'hooks', 'usage.pl')
+    const perl = (args, stdin = '') => spawnSync('/usr/bin/perl', [pl, ...args], { encoding: 'utf8', input: stdin })
+    const usage = (input, write, read, output, h1 = 0) => ({ input_tokens: input, cache_creation_input_tokens: write, cache_read_input_tokens: read, output_tokens: output, cache_creation: { ephemeral_1h_input_tokens: h1, ephemeral_5m_input_tokens: write - h1 }, iterations: [{ input_tokens: 777777 }] })
+    const reply = (id, at, use, extra = {}) => JSON.stringify({
+      parentUuid: 'p', isSidechain: extra.isSidechain ?? false,
+      message: { model: 'claude-opus-5-5', id, type: 'message', role: 'assistant', content: [{ type: 'tool_use', id: 't', name: 'X', input: { usage: { input_tokens: 999999 }, cwd: '/fake', timestamp: '2099-01-01T00:00:00Z' } }], stop_reason: 'tool_use', usage: use },
+      type: 'assistant', uuid: `u-${id}-${at}`, timestamp: at, cwd: '/w/a"b',
+    })
+    const claudeFile = join(scratch, 'session.jsonl')
+    const lines = [
+      reply('msg_A', '2026-10-09T15:01:00.000Z', usage(2, 300, 5000, 40, 200)),
+      reply('msg_A', '2026-10-09T15:01:02.000Z', usage(2, 300, 5000, 40, 200)),
+      JSON.stringify({ type: 'user', message: { role: 'user', content: 'x' }, toolUseResult: { messages: [{ role: 'assistant', id: 'msg_FAKE' }] }, timestamp: '2026-10-09T15:02:00.000Z' }),
+      reply('msg_B', '2026-10-09T14:59:00.000Z', usage(9, 9, 9, 9)),
+      reply('msg_D', '2026-10-09T15:12:00.000Z', usage(1, 0, 7000, 5)),
+      reply('msg_C', '2026-10-09T15:13:00.000Z', usage(3, 0, 100, 1), { isSidechain: true }),
+    ]
+    const partial = reply('msg_E', '2026-10-09T15:14:00.000Z', usage(4, 0, 4, 4))
+    writeFileSync(claudeFile, `${lines.join('\n')}\n${partial.slice(0, 120)}`)
+    const tokenCount = (at, totals, last, limits) => JSON.stringify({ timestamp: at, type: 'event_msg', payload: { type: 'token_count', info: { total_token_usage: { input_tokens: totals[0], cached_input_tokens: totals[1], cache_write_input_tokens: 0, output_tokens: totals[2], reasoning_output_tokens: 0, total_tokens: totals[0] + totals[2] }, last_token_usage: { input_tokens: last, cached_input_tokens: 0, output_tokens: 0, total_tokens: last }, model_context_window: 258400 }, rate_limits: limits ?? null } })
+    const rolloutFile = join(scratch, 'rollout-2026-10-09T15-00-00-x.jsonl')
+    writeFileSync(rolloutFile, [
+      JSON.stringify({ timestamp: '2026-10-09T14:58:00.000Z', type: 'session_meta', payload: { id: 'x', cwd: '/w1' } }),
+      tokenCount('2026-10-09T14:59:00.000Z', [60, 30, 5], 10),
+      tokenCount('2026-10-09T15:00:10.000Z', [100, 50, 10], 20, { limit_id: 'codex', primary: { used_percent: 12.5, window_minutes: 300, resets_at: 1791600000 }, secondary: { used_percent: 40.0, window_minutes: 10080, resets_at: 1791900000 } }),
+      JSON.stringify({ timestamp: '2026-10-09T15:10:00.000Z', type: 'turn_context', payload: { cwd: '/w2', model: 'm' } }),
+      tokenCount('2026-10-09T15:11:00.000Z', [300, 150, 30], 30),
+      tokenCount('2026-10-09T15:12:00.000Z', [300, 150, 30], 30),
+      tokenCount('2026-10-09T15:13:00.000Z', [50, 10, 5], 65),
+      '',
+    ].join('\n'))
+    const since = '2026-10-09T15:00:00.000Z'
+    const first = perl(['scan', since], `${claudeFile}\t0\t\n${rolloutFile}\t0\t\n`)
+    const want = [
+      `==> ${claudeFile}`,
+      'C\t2026-10-09T15:00\tclaude-opus-5-5\t/w/a\\"b\t2\t100\t200\t5000\t40',
+      'C\t2026-10-09T15:10\tclaude-opus-5-5\t/w/a\\"b\t4\t0\t0\t7100\t6',
+      `<== ${Buffer.byteLength(lines.join('\n')) + 1}\tmsg_C`,
+      `==> ${rolloutFile}`,
+      'X\t2026-10-09T15:00\t/w1\t40\t20\t5',
+      'X\t2026-10-09T15:10\t/w2\t250\t110\t25',
+      'L\t2026-10-09T15:00:10.000Z\t12.5\t300\t1791600000',
+      'L\t2026-10-09T15:00:10.000Z\t40\t10080\t1791900000',
+      `<== ${statSync(rolloutFile).size}\t50,10,5\t/w2`,
+      '',
+    ].join('\n')
+    check('usage: each reply once, its own usage and folder, by 10-minute slot; Codex what each count added, its limits; nothing before the window or still being written', first.status === 0 && first.stdout === want, first.stdout === want ? '' : JSON.stringify(first.stdout.slice(0, 600)) + first.stderr.slice(0, 200))
+    // the contexts: the session's last request of its own (not the subagent's), Codex's last count with its window
+    const ctx = perl(['ctx', claudeFile, rolloutFile, join(scratch, 'gone.jsonl')])
+    check('usage: each file\'s context: Claude\'s last main-thread request, Codex\'s last count and window; a file not there, none', ctx.stdout === `==> ${claudeFile}\nctx 7001\n==> ${rolloutFile}\nctx 65 258400\n==> ${join(scratch, 'gone.jsonl')}\n`, ctx.stdout.includes('ctx 7001\n') ? '' : JSON.stringify(ctx.stdout))
+    // into the plugin's state, priced
+    const state1 = u.applyScan(u.EMPTY_USAGE, first.stdout, Date.parse('2026-10-09T15:20:00Z'), f => (f === claudeFile ? '' : f === rolloutFile ? 'work' : undefined))
+    const slots = state1.slots
+    const cost15 = (2 * 4 + 100 * 5 + 200 * 8 + 5000 * 0.2 + 40 * 20) / 1e6
+    check('usage: priced into each account\'s slots, Codex\'s limits kept',
+      Math.abs((slots['claude\t\t/w/a"b']?.[String(Date.parse('2026-10-09T15:00:00Z'))] ?? 0) - cost15) < 1e-12 &&
+      Math.abs((slots['codex\twork\t/w2']?.[String(Date.parse('2026-10-09T15:10:00Z'))] ?? 0) - u.codexUnits(250, 110, 25)) < 1e-9 &&
+      state1.codexLimits.work?.['5h']?.used === 12.5 && state1.codexLimits.work?.['7d']?.resetsAt === 1791900000000,
+      state1.codexLimits.work?.['5h']?.used === 12.5 ? '' : JSON.stringify(state1).slice(0, 400))
+    // the reply being written finished, more of both added: read on from the marks, nothing counted twice
+    writeFileSync(claudeFile, `${lines.join('\n')}\n${partial}\n${reply('msg_E', '2026-10-09T15:14:05.000Z', usage(4, 0, 4, 4))}\n`)
+    writeFileSync(rolloutFile, `${readFileSync(rolloutFile, 'utf8')}${tokenCount('2026-10-09T15:21:00.000Z', [70, 20, 6], 70)}\n`)
+    const second = perl(['scan', since], u.scanInput([claudeFile, rolloutFile], state1))
+    check('usage: read on from the marks: only what was added',
+      second.stdout.split('\n').filter(l => /^[CX]\t/.test(l)).join('|') === 'C\t2026-10-09T15:10\tclaude-opus-5-5\t/w/a\\"b\t4\t0\t0\t4\t4|X\t2026-10-09T15:20\t/w2\t20\t10\t1',
+      JSON.stringify(second.stdout))
+    // a file now shorter than its mark: read from its start
+    const again = perl(['scan', since], `${claudeFile}\t99999999\tmsg_Z\n`)
+    check('usage: a file shorter than its mark is read from its start', again.stdout.split('\n').filter(l => l.startsWith('C\t')).length === 2, JSON.stringify(again.stdout))
+  } finally {
+    rmSync(scratch, { recursive: true, force: true })
+  }
 }
 
 // the ops screen, from a snapshot and event log of its own: every frame exactly the window's size (widths measured

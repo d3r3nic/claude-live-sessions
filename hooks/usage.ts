@@ -215,14 +215,20 @@ export function offsetOf(stdout: string): number {
 }
 
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
-/** A time as the Mac's clock shows it (`offset` minutes east of UTC): `15:00`, or `Thu 14:00` when not today. */
-export function clockSaid(at: number, now: number, offset: number): string {
+/**
+ * A time as the Mac's clock shows it (`offset` minutes east of UTC):
+ * `15:00`, or `Thu 14:00` when not today; with `isDated`, `Sun 4 Oct 08:40`
+ * (a window's start, a week back, is never read as the coming one).
+ */
+export function clockSaid(at: number, now: number, offset: number, isDated = false): string {
   const local = new Date(at + offset * 60_000)
   const today = new Date(now + offset * 60_000)
   const time = `${String(local.getUTCHours()).padStart(2, '0')}:${String(local.getUTCMinutes()).padStart(2, '0')}`
   const isToday = local.toISOString().slice(0, 10) === today.toISOString().slice(0, 10)
-  return isToday ? time : `${DAYS[local.getUTCDay()]} ${time}`
+  if (isToday) return time
+  return `${DAYS[local.getUTCDay()]}${isDated ? ` ${local.getUTCDate()} ${MONTHS[local.getUTCMonth()]}` : ''} ${time}`
 }
 
 /** A limit as one line: `5h 4% ↻15:00`, `7d 19% ↻Thu 14:00`. */
