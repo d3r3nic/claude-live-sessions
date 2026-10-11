@@ -7,7 +7,7 @@ import { accountOfFile, applyScan, claudeLimits, clockOf, currentLimits, EMPTY_U
 import type { Limit, UsageState } from './usage'
 import { AGENT_COMMANDS, afterOwner, afterStep, claudeKeep, COMPACT_FROM, cueOf, cutBytes, eventOf, EVENT_SCRIPT, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, tokensSaid, TURN_SCRIPT } from './relay'
 import type { RelayEvent, Side, Step } from './relay'
-import { branchOf, checkDue, DRIFT_EVERY, driftRequest, parseVerdict, recordFolderOf, RECORDS_SCRIPT } from './drift'
+import { branchOf, checkDue, DRIFT_EVERY, driftRequest, isDueAfterCompaction, parseVerdict, recordFolderOf, RECORDS_SCRIPT } from './drift'
 import { bringable, codexDir, envOfProfile, codexFlags, CODEX_MODE_SCRIPT, CODEX_TASK_SCRIPT, codexTaskState, JOB_COMMANDS, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, toggled, withThreads } from './bring'
 import {
   agentsOf,
@@ -42,6 +42,7 @@ import {
   parseWorktrees,
   WORKTREES_SCRIPT,
   defaultPlacement,
+  openedFontSize,
   isOnScreen,
   hideBinding,
   hidePath,
@@ -744,7 +745,7 @@ async function openWorkspace($: EngineInterface, ws: Workspace, at?: { window: s
 
 /**
  * The ops screen (ops/ops.mjs, beside this plugin's hooks) in a Terminal window of its own, filling the screen in
- * use (what the menu bar and Dock leave), in this tab's font size.
+ * use (what the menu bar and Dock leave), in half this tab's font size.
  */
 async function openOps($: EngineInterface) {
   const osascript = (script: string, ...args: string[]) =>
@@ -752,7 +753,7 @@ async function openOps($: EngineInterface) {
       .run(['/usr/bin/osascript', '-l', 'JavaScript', '-e', script, ...args], { timeoutMs: 10_000 })
       .catch((error: unknown) => ({ exitCode: -1, stdout: '', stderr: message(error) }))
   const seen = await screens($, osascript)
-  const place = seen === undefined ? undefined : { ...seen.screens[0]!, fontSize: seen.fontSize }
+  const place = seen === undefined ? undefined : { ...seen.screens[0]!, fontSize: openedFontSize(seen.fontSize) }
   const home = (await $.env.get('HOME')) ?? ''
   // the account this pane shows
   const command = `node --no-warnings ${shellQuote(`${$.plugin.root}/ops/ops.mjs`)} --account ${shellQuote(await shownAccount($, home))}`
@@ -790,7 +791,11 @@ async function openSession($: EngineInterface, target: NonNullable<Item['target'
   }
   const command = attachCommand(target.attach, target.profile, (await $.env.get('HOME')) ?? '')
   if (command === undefined) return
-  await osascript(OPEN_SCRIPT, command)
+  // most of the screen, in half this tab's font: never the profile's small default window
+  const seen = await screens($, (script, ...args) =>
+    $.process.run(['/usr/bin/osascript', '-l', 'JavaScript', '-e', script, ...args], { timeoutMs: 10_000 }).catch(() => ({ stdout: '' })))
+  const place = seen === undefined ? undefined : defaultPlacement(seen.screens[0]!, seen.fontSize)
+  await $.process.run(['/usr/bin/osascript', '-l', 'JavaScript', '-e', OPEN_SCRIPT, command, ...(place === undefined ? [] : [JSON.stringify(place)])], { timeoutMs: 10_000 })
 }
 
 /**
@@ -1193,11 +1198,11 @@ async function cycleRelay($: EngineInterface, id: string) {
 const BOXED_FROM = 60
 
 /** The context sizes, in tokens, a workspace's Claude may compact itself from, pressed round; 0 is off. */
-const COMPACT_STEPS = [100_000, 150_000, 200_000, 300_000, 400_000, 0]
+const COMPACT_STEPS = [200_000, 300_000, 400_000, 500_000, 0]
 const nextCompactFrom = (now: number) => COMPACT_STEPS[(COMPACT_STEPS.indexOf(now) + 1) % COMPACT_STEPS.length] ?? COMPACT_FROM
 const compactSaid = (n: number) => (n === 0 ? 'off' : tokensSaid(n))
 
-/** How large Claude's context may grow before it compacts itself at a hand-off: 100k, 150k, 200k, 300k, 400k tokens, off. */
+/** How large Claude's context may grow before it compacts itself at a hand-off: 200k, 300k, 400k, 500k tokens, off. */
 async function cycleCompactFrom($: EngineInterface, id: string) {
   const home = (await $.env.get('HOME')) ?? ''
   await changeWorkspaces($, home, list => list.map(ws => (ws.id === id ? { ...ws, compactFrom: nextCompactFrom(ws.compactFrom ?? COMPACT_FROM) } : ws)))
@@ -1240,7 +1245,7 @@ const toldAccount = new Set<string>()
  * the workspace, logged, and, unless on track, notified: the agents may need
  * the owner's help. Says what it found.
  */
-async function checkDrift($: EngineInterface, home: string, id: string): Promise<string> {
+async function checkDrift($: EngineInterface, home: string, id: string, isAfterCompaction = false): Promise<string> {
   if (checking.has(id)) return 'A check of that workspace is under way.'
   checking.add(id)
   try {
@@ -1262,8 +1267,13 @@ async function checkDrift($: EngineInterface, home: string, id: string): Promise
     // the passes counted when it began: the ones made while it runs count toward the next check
     const counted = ws.relay?.sinceCheck ?? 0
     // a check done or not, the next is at the next milestone (a failed one is never tried again at every hand-off)
+    // and a compaction is checked once, done or not (a failed check is not tried again at every hand-off)
     const restart = (more: Partial<Workspace>) =>
-      changeWorkspaces($, home, list => list.map(w => (w.id !== id ? w : { ...w, ...more, ...(w.relay === undefined ? {} : { relay: { ...w.relay, sinceCheck: Math.max(0, (w.relay.sinceCheck ?? 0) - counted) } }) })))
+      changeWorkspaces($, home, list => list.map(w => (w.id !== id ? w : {
+        ...w, ...more,
+        ...(w.relay === undefined ? {} : { relay: { ...w.relay, sinceCheck: Math.max(0, (w.relay.sinceCheck ?? 0) - counted) } }),
+        ...(isAfterCompaction && w.compacted !== undefined ? { compacted: { ...w.compacted, isChecked: true } } : {}),
+      })))
     const cues = await recentCues($, home, id)
     const latest = cues.filter(c => recordFolderOf(c) !== undefined).at(-1)
     const folder = latest === undefined ? undefined : recordFolderOf(latest)
@@ -1275,7 +1285,7 @@ async function checkDrift($: EngineInterface, home: string, id: string): Promise
       await restart({})
       return `${ws.name}: nothing to check yet: no hand-offs logged and no peer-coding records found.`
     }
-    const ask = driftRequest(ws, cues, records)
+    const ask = driftRequest(ws, cues, records, isAfterCompaction)
     const reply = await $.model
       .complete({ model: 'opus', system: ask.system, prompt: ask.prompt, maxTokens: 1200, effort: 'medium', timeoutMs: 180_000 })
       .catch((error: unknown) => ({ isAnswered: false as const, reason: message(error) }))
@@ -1285,12 +1295,12 @@ async function checkDrift($: EngineInterface, home: string, id: string): Promise
     if (verdict === undefined) {
       const why = reply.isAnswered ? 'no verdict in its reply' : `the model did not answer: ${reply.reason}${'error' in reply ? `, ${reply.error}` : ''}`
       await restart({})
-      await logEvent($, home, { kind: 'check', text: `${ws.name}: the check could not be done: ${why}`, workspace: id })
+      await logEvent($, home, { kind: 'check', text: `${ws.name}: ${isAfterCompaction ? 'after Claude compacted, ' : ''}the check could not be done: ${why}`, workspace: id })
       return `${ws.name}: the check could not be done: ${why}.`
     }
     const now = await $.clock.now()
     await restart({ check: { at: now, ...verdict } })
-    const said = `${ws.name}: ${verdict.status.replace('-', ' ')}: ${verdict.brief}${verdict.ask === undefined ? '' : ` Ask: ${verdict.ask}`}`
+    const said = `${ws.name}: ${isAfterCompaction ? 'after Claude compacted, ' : ''}${verdict.status.replace('-', ' ')}: ${verdict.brief}${verdict.ask === undefined ? '' : ` Ask: ${verdict.ask}`}`
     await logEvent($, home, { kind: verdict.status === 'on-track' ? 'check' : 'drift', text: said, workspace: id })
     if (verdict.status !== 'on-track') {
       await $.process
@@ -1396,8 +1406,10 @@ async function passCues(
       // a pass waiting on a scrolled-back pane says so once, not at every collection
       if (outcome === 'in-mode' && next?.status === ws.relay?.status) return
       await saveAfter(step, outcome)
-      // a milestone: what the agents are doing, held against what the workspace is for (one model call, unawaited)
-      if (checkDue(ws, step, outcome)) void checkDrift($, home, ws.id).catch(() => undefined)
+      // a milestone, or Claude's first hand-off since it compacted: what the agents are doing, held against what the
+      // workspace is for (one model call, unawaited)
+      const isAfterCompaction = isDueAfterCompaction(ws, step, outcome)
+      if (checkDue(ws, step, outcome) || isAfterCompaction) void checkDrift($, home, ws.id, isAfterCompaction).catch(() => undefined)
       const why = step.kind === 'pass' ? passFailure(outcome) : undefined
       if (step.kind === 'pass' && why !== undefined) {
         await $.process
@@ -1477,6 +1489,9 @@ async function compactAtHandOff($: EngineInterface, answer: string) {
   // logged once it has been done (not refused, not vetoed), with what its summary read from the cache and afresh
   const result = await $.session.compact({ instructions: claudeKeep(ws.name) }).catch(() => undefined)
   if (result === undefined || result.skip !== undefined) return
+  // kept on the workspace: a drift check follows its next hand-off
+  const at = await $.clock.now()
+  await changeWorkspaces($, home, list => list.map(w => (w.id === ws.id ? { ...w, compacted: { at, tokens, isChecked: false } } : w)))
   const spent = result.usage === undefined ? '' : `; it read ${tokensSaid(result.usage.cache_read_input_tokens)} tokens from the cache, ${tokensSaid(result.usage.input_tokens + result.usage.cache_creation_input_tokens)} afresh`
   await logEvent($, home, { kind: 'compact', text: `${ws.name}: Claude compacted at its hand-off (its context was ${tokensSaid(tokens)} tokens${spent})`, workspace: ws.id, agent: 'claude' })
 }
@@ -2279,6 +2294,11 @@ export const register: Register = on => {
                 <Box key={`ws-relay ${ws.key}`} flexDirection="row" width={inner - 2} columnGap={1} marginLeft={2}>
                   <Text dimColor wrap="truncate-end">{`relay: ${ws.relay.isWaiting ? `waits for you after ${RELAY_CAP} hand-offs` : ws.relay.status}`}</Text>
                   {ws.relay.isWaiting && <Button key={`relay-go ${ws.key}`} label="continue" onPress={() => void continueRelay($, ws.key)} />}
+                </Box>
+              )}
+              {ws.compacted !== undefined && (
+                <Box key={`ws-compacted ${ws.key}`} flexDirection="row" width={inner - 2} marginLeft={2}>
+                  <Text dimColor wrap="truncate-end">{ws.compacted}</Text>
                 </Box>
               )}
               {ws.check !== undefined && (

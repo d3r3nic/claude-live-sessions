@@ -969,6 +969,8 @@ export type WorkspaceView = {
   relay: { mode: 'auto' | 'notify' | 'off'; status: string; isWaiting: boolean; needsOwner: boolean }
   /** How large Claude's context may grow, in tokens, before it compacts itself at a hand-off; 0 is off. */
   compactFrom: number
+  /** Claude's last compaction at a hand-off, said for the owner, with whether a drift check has looked since. */
+  compacted?: string
   /** Hand-offs between drift checks (0: off), and the last check said for the owner ('' when none yet). */
   checkEvery: number
   check: { status: string; text: string; isOk: boolean } | undefined
@@ -1115,6 +1117,10 @@ export function viewOf(
       needsOwner: needsOwner(ws.relay),
     },
     compactFrom: ws.compactFrom ?? COMPACT_FROM,
+    ...(ws.compacted === undefined ? {} : {
+      compacted: `Claude compacted at its hand-off ${ago(o.now - ws.compacted.at)} ago, at ${tokensSaid(ws.compacted.tokens)}; ${
+        ws.compacted.isChecked ? 'a drift check has looked since' : (ws.checkEvery ?? DRIFT_EVERY) > 0 ? 'a drift check follows its next hand-off' : 'drift checks are off'}`,
+    }),
     checkEvery: ws.checkEvery ?? DRIFT_EVERY,
     check: ws.check === undefined ? undefined : {
       status: ws.check.status,

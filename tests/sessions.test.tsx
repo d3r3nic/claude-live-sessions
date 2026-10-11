@@ -56,7 +56,7 @@ import type { CodexProc, ThreadRow } from '../hooks/collect'
 import type { ClaudeSession, CodexSession, Snapshot, Workspace } from '../types'
 import { afterOwner, afterStep, claudeKeep, COMPACT_FROM, cueOf, cutBytes, eventOf, EVENT_SCRIPT, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_MAX_AGE_MS, TURN_SCRIPT, tokensSaid } from '../hooks/relay'
 import type { Side } from '../hooks/relay'
-import { branchOf, checkDue, checkFrom, driftRequest, parseVerdict, recordFolderOf, RECORDS_SCRIPT } from '../hooks/drift'
+import { branchOf, checkDue, checkFrom, driftRequest, isDueAfterCompaction, parseVerdict, recordFolderOf, RECORDS_SCRIPT } from '../hooks/drift'
 import { accountOfFile, applyScan, claudeCost, claudeLimits, clockSaid, codexUnits, currentLimits, EMPTY_USAGE, limitSaid, markKey, mergeLimits, offsetOf, OFFSETS_SCRIPT, parseContexts, priceOf, rankUsage, scanInput, sharedLimitsFrom, usageFrom, USAGE_FILES_SCRIPT, USAGE_KEEP_MS, wholeFiles } from '../hooks/usage'
 import { bringable, codexDir, codexFlags, CODEX_MODE_SCRIPT, CODEX_TASK_SCRIPT, codexTaskState, envOfProfile, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, threadFrom, toggled, withThreads } from '../hooks/bring'
 import {
@@ -73,6 +73,7 @@ import {
   rankProjects,
   sessionSetup,
   defaultPlacement,
+  openedFontSize,
   isOnScreen,
   hideBinding,
   hidePath,
@@ -921,11 +922,13 @@ describe('pane', () => {
     await $.session.start(START)
     await $.command.run(SESSIONS)
     const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(90) })
-    const osa = () => runs.filter(r => r[0] === '/usr/bin/osascript' && r[4] !== BACKGROUND_SCRIPT).map(r => [r[4] === FOCUS_SCRIPT ? 'focus' : 'open', r[5]])
+    const osa = () => runs.filter(r => r[0] === '/usr/bin/osascript' && r[4] !== BACKGROUND_SCRIPT && r[4] !== SCREEN_SCRIPT).map(r => [r[4] === FOCUS_SCRIPT ? 'focus' : 'open', r[5]])
     await ui.press({ key: 'open claude-101' })
     await ui.press({ key: 'open claude-102' })
     await ui.press({ key: 'open codex-1cdaec1d-0ec7-4f0a-811f-5c29c9bcb3b7' })
     expect(osa()).toEqual([['focus', 'ttys004'], ['open', 'claude attach a1b2c3d4'], ['focus', 'ttys045']])
+    // the background one in a window of most of the screen, in half this tab's font (12: 6), never the profile's small one
+    expect(JSON.parse(runs.find(r => r[5] === 'claude attach a1b2c3d4')![6]!)).toEqual({ x: 192, y: 136, width: 2176, height: 1199, fontSize: 6 })
     // this session, and a thread with no terminal, are not pressed to open
     expect(await ui.find({ key: 'open claude-104' })).toBeUndefined()
     expect(await ui.find({ key: 'open codex-b' })).toBeUndefined()
@@ -1508,15 +1511,19 @@ describe('workspaces', () => {
     const setUp = runs.filter(r => r[0] === 'tmux' && (r[1] === 'set-option' || r[1] === 'set-window-option'))
     // each of its windows, by id: the agents' windows whatever window is current
     expect(runs.find(r => r[0] === 'tmux' && r[1] === 'list-windows')).toEqual(['tmux', 'list-windows', '-t', '=ws-practice-rbac', '-F', '#{window_id}'])
-    expect(setUp.slice(0, 9)).toEqual(sessionSetup('ws-practice-rbac', ['@1', '@2'], true, 'Practice RBAC').map(a => ['tmux', ...a]))
+    expect(setUp.slice(0, 10)).toEqual(sessionSetup('ws-practice-rbac', ['@1', '@2'], true, 'Practice RBAC').map(a => ['tmux', ...a]))
     // the bar's left end names the workspace (a # doubled, as tmux reads it)
     expect(sessionSetup('x', [], false, 'A #1').find(a => a[3] === 'status-left')?.[4]).toBe(' A ##1 ')
     expect(sessionSetup('ws-practice-rbac', ['@1', '@2'], true, 'Practice RBAC').map(a => `${a[0]} ${a[2]} ${a[3]}`)).toEqual([
-      'set-option ws-practice-rbac mouse', 'set-option ws-practice-rbac status-left-length', 'set-option ws-practice-rbac status-left',
+      'set-option ws-practice-rbac mouse', 'set-option ws-practice-rbac status-position', 'set-option ws-practice-rbac status-left-length', 'set-option ws-practice-rbac status-left',
       'set-option ws-practice-rbac status-right-length', 'set-option ws-practice-rbac status-right',
       'set-window-option @1 pane-border-status', 'set-window-option @1 pane-border-format',
       'set-window-option @2 pane-border-status', 'set-window-option @2 pane-border-format',
     ])
+    // the bar at the top; one window: no window list (its `0:peers*` says nothing), two: theirs kept
+    expect(sessionSetup('x', ['@1'], false, 'A').filter(a => ['status-position', 'window-status-format', 'window-status-current-format'].includes(a[3]!)).map(a => `${a[0]} ${a[2]} ${a[3]} '${a[4]}'`))
+      .toEqual(["set-option x status-position 'top'", "set-window-option @1 window-status-format ''", "set-window-option @1 window-status-current-format ''"])
+    expect(sessionSetup('x', ['@1', '@2']).some(a => a[3] === 'window-status-format')).toBe(false)
     // its pane: its window, then the pane itself
     expect(runs.filter(r => r[0] === 'tmux' && (r[1] === 'select-window' || r[1] === 'select-pane'))).toEqual([['tmux', 'select-window', '-t', '%2'], ['tmux', 'select-pane', '-t', '%2']])
     await ui.unmount()
@@ -2605,8 +2612,8 @@ describe('bringing running sessions into a workspace', () => {
 })
 
 describe('the context guard', () => {
-  test('Claude compacts from 200k tokens unless set; what it keeps; a setting this does not read; tokens as said', async () => {
-    expect(COMPACT_FROM).toBe(200_000)
+  test('Claude compacts from 300k tokens unless set; what it keeps; a setting this does not read; tokens as said', async () => {
+    expect(COMPACT_FROM).toBe(300_000)
     // what Claude keeps: one line, whatever the workspace is called
     expect(claudeKeep('RBAC')).toBe('Peer-coding workspace "RBAC": keep what it is for, the peer-coding branch and its worktree, the round, where the peer-coding records are (CURRENT.md), what the owner decided, and the cue you last sent; the details stay in those records.')
     expect(claudeKeep('A\nB\u0007')).toMatch(/^Peer-coding workspace "A B ": keep/)
@@ -2691,6 +2698,8 @@ describe('the context guard', () => {
     expect(compacted).toEqual([claudeKeep('Practice RBAC')])
     // done: logged for the ops screen
     expect(world.events.at(-1)).toMatchObject({ kind: 'compact', workspace: 'practice-rbac', agent: 'claude', text: 'Practice RBAC: Claude compacted at its hand-off (its context was 437k tokens; it read 437k tokens from the cache, 3k afresh)' })
+    // kept on the workspace: a drift check follows its next hand-off
+    expect(JSON.parse(files.get(WORKSPACES)!).workspaces[0].compacted).toEqual({ at: expect.any(Number) as unknown as number, tokens: 437_000, isChecked: false })
     // vetoed (a hook, a turn begun): asked, not logged
     isVetoed = true
     await end(`Done.\n${READY_CODEX}`, 'turn-v1')
@@ -2804,7 +2813,7 @@ describe('the context guard', () => {
     expect(world.events.filter(e => e.kind === 'compact')).toEqual([])
   })
 
-  test('Claude compacts from, in a workspace\'s actions: 100k, 150k, 200k, 300k, 400k tokens, off', async ($, on) => {
+  test('Claude compacts from, in a workspace\'s actions: 200k, 300k, 400k, 500k tokens, off', async ($, on) => {
     const { files } = engine(on, machine, { termProgram: 'Apple_Terminal' })
     files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, relay: relayOn() }] }))
     await $.session.start(START)
@@ -2813,16 +2822,16 @@ describe('the context guard', () => {
     await reveal(ui, 'ws:practice-rbac')
     const label = async () => (await ui.find({ key: 'compact practice-rbac' }))?.props.label
     const seen: unknown[] = [await label()]
-    for (let i = 0; i < 6; i++) {
+    for (let i = 0; i < 5; i++) {
       await ui.press({ key: 'compact practice-rbac' })
       seen.push(JSON.parse(files.get(WORKSPACES)!).workspaces[0].compactFrom)
     }
     seen.push(await label())
-    expect(seen).toEqual(['Claude compacts from: 200k → 300k', 300_000, 400_000, 0, 100_000, 150_000, 200_000, 'Claude compacts from: 200k → 300k'])
+    expect(seen).toEqual(['Claude compacts from: 300k → 400k', 400_000, 500_000, 0, 200_000, 300_000, 'Claude compacts from: 300k → 400k'])
     await ui.press({ key: 'compact practice-rbac' })
     await ui.press({ key: 'compact practice-rbac' })
     await ui.press({ key: 'compact practice-rbac' })
-    expect(await label()).toBe('Claude compacts from: off → 100k')
+    expect(await label()).toBe('Claude compacts from: off → 200k')
     await ui.unmount()
   })
 })
@@ -2990,7 +2999,7 @@ describe('the drift check', () => {
     await reveal(ui, 'ws:practice-rbac')
     await Promise.all([ui.press({ key: 'compact practice-rbac' }), ui.press({ key: 'check-every practice-rbac' }), ui.press({ key: 'relay-bar practice-rbac' })])
     const saved = JSON.parse(files.get(WORKSPACES)!).workspaces[0]
-    expect([saved.compactFrom, saved.checkEvery, saved.relay.mode]).toEqual([300_000, 8, 'notify'])
+    expect([saved.compactFrom, saved.checkEvery, saved.relay.mode]).toEqual([400_000, 8, 'notify'])
     await ui.unmount()
   })
 
@@ -3023,6 +3032,64 @@ describe('the drift check', () => {
     await ui.press({ key: 'check dflt' })
     expect(toasts.at(-1)).toBe('Default one is checked from a Claude session of its own account (the default one).')
     expect(asked).toEqual([])
+    await ui.unmount()
+  })
+
+  test('after Claude compacts at a hand-off, a check follows its next hand-off, once, whatever the count: told to look at what the compaction may have lost', async ($, on) => {
+    // due: Claude's hand-off passed, a compaction not checked since, the checks on
+    const claudePass = { kind: 'pass', from: 'claude' }
+    const compacted = { at: NOW - 600_000, tokens: 437_000, isChecked: false }
+    expect(isDueAfterCompaction({ compacted }, claudePass, 'passed')).toBe(true)
+    expect([
+      isDueAfterCompaction({ compacted: { ...compacted, isChecked: true } }, claudePass, 'passed'),
+      isDueAfterCompaction({}, claudePass, 'passed'),
+      isDueAfterCompaction({ compacted }, { kind: 'pass', from: 'codex' }, 'passed'),
+      isDueAfterCompaction({ compacted }, claudePass, 'taken'),
+      isDueAfterCompaction({ compacted, checkEvery: 0 }, claudePass, 'passed'),
+      isDueAfterCompaction({ compacted }, { kind: 'tell', from: 'claude' }, 'told'),
+    ]).toEqual([false, false, false, false, false, false])
+    // kept as the workspaces file has it; one this does not read is dropped
+    expect(workspacesFrom({ workspaces: [{ ...practice, compacted }, { ...practice, id: 'b', compacted: { at: 'x', tokens: 1, isChecked: false } }, { ...practice, id: 'c', compacted: { at: 1, tokens: 1 } }] }).map(w => w.compacted))
+      .toEqual([compacted, undefined, undefined])
+    expect(driftRequest({ name: 'X', purpose: 'p' }, [], '', true).prompt).toContain('Claude compacted its context (a summary in place of its conversation) at its hand-off before its latest turn')
+    expect(driftRequest({ name: 'X', purpose: 'p' }, [], '').prompt).not.toContain('compacted')
+
+    const { files, clock } = engine(on, machine, { termProgram: 'Apple_Terminal', configDir: `${HOME}/.claude-work/` })
+    const asked: string[] = []
+    on('model.complete', async ($, e) => {
+      asked.push(String(e.prompt))
+      return { value: { isAnswered: true as const, text: '{"status": "on-track", "brief": "Fine."}', usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } }
+    })
+    const saved = () => JSON.parse(files.get(WORKSPACES)!).workspaces[0]
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, checkout: '/Users/u/dev/web-app', purpose: 'finish the console', relay: relayOn({ sinceCheck: 0 }), compacted }] }))
+    world.tmuxPanes = 'ws-practice-rbac\tpeers\t/dev/ttys022\t%1\tclaude\nws-practice-rbac\tpeers\t/dev/ttys045\t%2\tcodex\n'
+    world.tmuxOwner = String(NOW)
+    world.paneCommands = { '%1': 'claude', '%2': 'codex' }
+    // the pane says when Claude compacted, and that a check follows
+    await $.session.start(START)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    await $.command.run(SESSIONS)
+    expect((await ui.findAll({ type: 'Text' })).map(t => t.text)).toContain('Claude compacted at its hand-off 10m ago, at 437k; a drift check follows its next hand-off')
+    // Codex hands back: no check yet
+    world.turns = { 'session-104': `done\tturn-c0\t${new Date(NOW - 300_000).toISOString()}\tWorking.`, '/rollouts/a.jsonl': `done\tturn-x1\t${new Date(NOW - 60_000).toISOString()}\t${READY_CLAUDE}` }
+    await clock.advance(4_000)
+    await $.command.run(SESSIONS)
+    expect(asked).toEqual([])
+    // Claude's first hand-off since: checked, told what to look at; logged as after the compaction; once
+    world.turns = { 'session-104': `done\tturn-c1\t${new Date(NOW - 30_000).toISOString()}\t${READY_CODEX}`, '/rollouts/a.jsonl': `done\tturn-x1\t${new Date(NOW - 60_000).toISOString()}\t${READY_CLAUDE}` }
+    await clock.advance(4_000)
+    await $.command.run(SESSIONS)
+    await clock.advance(1_000)
+    expect(asked).toHaveLength(1)
+    expect(asked[0]).toContain('Claude compacted its context')
+    expect(saved().compacted).toEqual({ ...compacted, isChecked: true })
+    expect(world.events.find(e => e.kind === 'check')).toMatchObject({ text: 'Practice RBAC: after Claude compacted, on track: Fine.' })
+    expect((await ui.findAll({ type: 'Text' })).map(t => t.text)).toContain('Claude compacted at its hand-off 10m ago, at 437k; a drift check has looked since')
+    world.turns = { 'session-104': `done\tturn-c2\t${new Date(NOW).toISOString()}\t${READY_CODEX}`, '/rollouts/a.jsonl': `done\tturn-x2\t${new Date(NOW - 20_000).toISOString()}\t${READY_CLAUDE}` }
+    await clock.advance(4_000)
+    await $.command.run(SESSIONS)
+    await clock.advance(1_000)
+    expect(asked).toHaveLength(1)
     await ui.unmount()
   })
 
@@ -3156,11 +3223,13 @@ describe('hiding a workspace window', () => {
 })
 
 describe('workspace windows open where they were', () => {
-  test('placements: kept ones checked; the first is most of the screen, in the font of the window it is opened from', async () => {
+  test('placements: kept ones checked; the first is most of the screen, in half the font of the window it is opened from', async () => {
     expect(placementFrom({ x: 10.4, y: 20, width: 1200, height: 800, fontSize: 13 })).toEqual({ x: 10, y: 20, width: 1200, height: 800, fontSize: 13 })
     expect(placementFrom({ x: 0, y: 0, width: 1200, height: 800, fontSize: 200 })?.fontSize).toBe(0)
     for (const bad of [null, 'x', { x: 0, y: 0, width: 100, height: 800 }, { x: 'a', y: 0, width: 1200, height: 800 }, { y: 0, width: 1200, height: 800 }]) expect(placementFrom(bad)).toBeUndefined()
-    expect(defaultPlacement({ x: 0, y: 30, width: 2560, height: 1410 }, 14)).toEqual({ x: 192, y: 136, width: 2176, height: 1199, fontSize: 14 })
+    expect(defaultPlacement({ x: 0, y: 30, width: 2560, height: 1410 }, 14)).toEqual({ x: 192, y: 136, width: 2176, height: 1199, fontSize: 7 })
+    // half, 6 points at least; a size this does not read: the profile's
+    expect([openedFontSize(13), openedFontSize(9), openedFontSize(72), openedFontSize(0), openedFontSize(200)]).toEqual([7, 6, 36, 0, 0])
     expect(defaultPlacement({ x: 0, y: 30, width: 2560, height: 1410 }, 0).fontSize).toBe(0)
     // still showing: at least a quarter of it on a screen there is now
     const screens = [{ x: 0, y: 30, width: 2560, height: 1410 }]
@@ -3168,16 +3237,16 @@ describe('workspace windows open where they were', () => {
     expect(isOnScreen({ x: 2500, y: 100, width: 1000, height: 800, fontSize: 0 }, screens)).toBe(false)
   })
 
-  test('a new window opens where the workspace\'s was when hidden; else most of the screen, in this tab\'s font', async ($, on) => {
+  test('a new window opens where the workspace\'s was when hidden; else most of the screen, in half this tab\'s font', async ($, on) => {
     const { files, runs } = engine(on, machine, { termProgram: 'Apple_Terminal', selfId: 'session-104' })
     files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [practice] }))
     await $.session.start(START)
     await $.command.run(SESSIONS)
     const opens = () => runs.filter(r => r[0] === '/usr/bin/osascript' && r[4] === OPEN_SCRIPT).map(r => (r[6] === undefined ? undefined : JSON.parse(r[6])))
-    // never hidden: the screen, and the font of this session's tab (ttys022)
+    // never hidden: the screen, and half the font of this session's tab (ttys022: 12, so 6)
     await $.command.run({ ...SESSIONS, command: 'workspace', args: 'open practice-rbac' })
     expect(runs.find(r => r[4] === SCREEN_SCRIPT)?.[5]).toBe('ttys022')
-    expect(opens().at(-1)).toEqual({ x: 192, y: 136, width: 2176, height: 1199, fontSize: 12 })
+    expect(opens().at(-1)).toEqual({ x: 192, y: 136, width: 2176, height: 1199, fontSize: 6 })
     // hidden before: where it was
     world.started.clear()
     files.set(placementPath(HOME, 'ws-practice-rbac'), JSON.stringify({ x: 40, y: 60, width: 1500, height: 900, fontSize: 13 }))
@@ -3187,7 +3256,7 @@ describe('workspace windows open where they were', () => {
     world.started.clear()
     files.set(placementPath(HOME, 'ws-practice-rbac'), JSON.stringify({ x: 5200, y: -2000, width: 1500, height: 900, fontSize: 13 }))
     await $.command.run({ ...SESSIONS, command: 'workspace', args: 'open practice-rbac' })
-    expect(opens().at(-1)).toEqual({ x: 192, y: 136, width: 2176, height: 1199, fontSize: 12 })
+    expect(opens().at(-1)).toEqual({ x: 192, y: 136, width: 2176, height: 1199, fontSize: 6 })
     // on the second screen: kept
     world.started.clear()
     files.set(placementPath(HOME, 'ws-practice-rbac'), JSON.stringify({ x: 2700, y: 100, width: 1500, height: 900, fontSize: 13 }))
@@ -3197,7 +3266,7 @@ describe('workspace windows open where they were', () => {
     world.started.clear()
     files.set(placementPath(HOME, 'ws-practice-rbac'), '{"x": "far"}')
     await $.command.run({ ...SESSIONS, command: 'workspace', args: 'open practice-rbac' })
-    expect(opens().at(-1)).toEqual({ x: 192, y: 136, width: 2176, height: 1199, fontSize: 12 })
+    expect(opens().at(-1)).toEqual({ x: 192, y: 136, width: 2176, height: 1199, fontSize: 6 })
   })
 })
 

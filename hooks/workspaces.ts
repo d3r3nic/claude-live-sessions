@@ -166,12 +166,15 @@ export const BORDER_FORMAT =
  * (arguments) for the session `name` (titled `title` on its bar) and each of its `windows` (targets): the
  * mouse on in that session alone, so a click picks the side the keys go to
  * and the wheel scrolls the side under it (or reaches its agent, when the
- * agent takes the mouse); and each side's border naming its agent.
+ * agent takes the mouse); its bar at the top, the workspace's name first, and
+ * for one window no window list; and each side's border naming its agent.
  * tmux.conf and other sessions are left as they are.
  */
 export function sessionSetup(name: string, windows: readonly string[], canHide = false, title = ''): string[][] {
   return [
     ['set-option', '-t', name, 'mouse', 'on'],
+    // the bar at the top, the workspace's name first
+    ['set-option', '-t', name, 'status-position', 'top'],
     // the bar's left end: the workspace's own name (tmux reads `#` in it as a format: doubled)
     ...(title === '' ? [] : [['set-option', '-t', name, 'status-left-length', '50'], ['set-option', '-t', name, 'status-left', ` ${title.replace(/#/g, '##')} `]]),
     ['set-option', '-t', name, 'status-right-length', '60'],
@@ -179,6 +182,10 @@ export function sessionSetup(name: string, windows: readonly string[], canHide =
     ...windows.flatMap(window => [
       ['set-window-option', '-t', window, 'pane-border-status', 'top'],
       ['set-window-option', '-t', window, 'pane-border-format', BORDER_FORMAT],
+      // one window (its agents side by side): no window list, whose `0:peers*` says nothing
+      ...(windows.length === 1
+        ? [['set-window-option', '-t', window, 'window-status-format', ''], ['set-window-option', '-t', window, 'window-status-current-format', '']]
+        : []),
     ]),
   ]
 }
@@ -280,9 +287,20 @@ export function isOnScreen(place: Placement, screens: readonly Screen[]): boolea
 }
 
 /**
- * A workspace window's first place: most of the screen (85% of the part
- * the menu bar and Dock leave, centred), in the font size of the window it
- * is opened from, so it never opens small in a profile's larger font.
+ * The font a window this plugin opens gets: half the size of the one it is
+ * opened from (the owner's own zoomed out by half; 6 points at least), so
+ * a window of agents shows wide lines; 0 (as its profile has it) when that
+ * is not known.
+ */
+export function openedFontSize(fontSize: number): number {
+  return fontSize >= 6 && fontSize <= 72 ? Math.max(6, Math.round(fontSize / 2)) : 0
+}
+
+/**
+ * A new window's place (a workspace's first, a session opened in the
+ * background's, the ops screen's): most of the screen (85% of the part the
+ * menu bar and Dock leave, centred), in half the font size of the window it
+ * is opened from (openedFontSize), never a profile's small default window.
  */
 export function defaultPlacement(screen: Screen, fontSize: number): Placement {
   const width = Math.round(screen.width * 0.85)
@@ -292,7 +310,7 @@ export function defaultPlacement(screen: Screen, fontSize: number): Placement {
     y: Math.round(screen.y + (screen.height - height) / 2),
     width,
     height,
-    fontSize: fontSize >= 6 && fontSize <= 72 ? Math.round(fontSize) : 0,
+    fontSize: openedFontSize(fontSize),
   }
 }
 
@@ -458,6 +476,11 @@ export function workspacesFrom(raw: unknown): Workspace[] {
     // (`compactAt`) only as off
     const legacy = (ws as { compactAt?: unknown }).compactAt
     const compactFrom = Number.isInteger(ws.compactFrom) && ws.compactFrom! >= 0 && ws.compactFrom! <= 10_000_000 ? ws.compactFrom : legacy === 0 ? 0 : undefined
+    // Claude's last compaction at a hand-off (one this does not read is dropped)
+    const c = (ws as { compacted?: unknown }).compacted as { at?: unknown; tokens?: unknown; isChecked?: unknown } | undefined
+    const compacted = typeof c === 'object' && c !== null && Number.isFinite(c.at) && Number.isFinite(c.tokens) && typeof c.isChecked === 'boolean'
+      ? { at: c.at as number, tokens: c.tokens as number, isChecked: c.isChecked }
+      : undefined
     // likewise the drift check's interval, and its last verdict (one this does not read is dropped)
     const checkEvery = checkEveryFrom(ws.checkEvery)
     const check = checkFrom(ws.check)
@@ -465,12 +488,13 @@ export function workspacesFrom(raw: unknown): Workspace[] {
     const only = ws.only === 'claude' || ws.only === 'codex' ? ws.only : undefined
     // a branch only as git names one (it is shown, never run)
     const branch = branchFrom(ws.branch)
-    const { members: _, threads: __, compactAt: ___, compactFrom: ________, checkEvery: ____, check: _____, only: ______, branch: _______, ...rest } = ws as Workspace & { compactAt?: unknown }
+    const { members: _, threads: __, compactAt: ___, compactFrom: ________, compacted: _________, checkEvery: ____, check: _____, only: ______, branch: _______, ...rest } = ws as Workspace & { compactAt?: unknown }
     return {
       ...rest,
       ...(members !== undefined && members.length > 0 ? { members } : {}),
       ...(claude === undefined && codex === undefined ? {} : { threads: { ...(claude === undefined ? {} : { claude }), ...(codex === undefined ? {} : { codex }) } }),
       ...(compactFrom === undefined ? {} : { compactFrom }),
+      ...(compacted === undefined ? {} : { compacted }),
       ...(checkEvery === undefined ? {} : { checkEvery }),
       ...(check === undefined ? {} : { check }),
       ...(only === undefined ? {} : { only }),

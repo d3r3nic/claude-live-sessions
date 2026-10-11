@@ -101,11 +101,16 @@ export type Workspace = {
   threads?: { claude?: Thread; codex?: Thread }
   /**
    * How large Claude's context may grow, in tokens, before it compacts itself once its hand-off is passed (Codex
-   * compacts itself); 0 is off. Unset: COMPACT_FROM (200k).
+   * compacts itself); 0 is off. Unset: COMPACT_FROM (300k).
    */
   compactFrom?: number
   /** How many hand-offs in a row between two drift checks: DRIFT_EVERY (4) unless set; 0 is off. */
   checkEvery?: number
+  /**
+   * Claude's last compaction at a hand-off: when, how large its context was, and whether a drift check has run since
+   * (the next one after it is due at Claude's next hand-off).
+   */
+  compacted?: { at: number; tokens: number; isChecked: boolean }
   /** The last drift check: when, and its verdict for the owner. */
   check?: { at: number; status: 'on-track' | 'drifting' | 'unclear-need' | 'needs-owner'; brief: string; ask?: string }
 }
