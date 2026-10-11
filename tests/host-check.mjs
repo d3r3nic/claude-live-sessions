@@ -1345,7 +1345,16 @@ except ChildProcessError: pass
       '    print("left running")',
     ].join('\n'), process.execPath, '--no-warnings', opsFile]
     for (let k = 0; k < 8; k++) runs.push(spawnSync('python3', noSignalArgs, { encoding: 'utf8', timeout: 30_000, env }).stdout.trim())
-    check('ops: its terminal closed under it, it ends, with a hang-up or without (sixteen times over)', runs.every(x => x === 'ended'), JSON.stringify(runs))
+    // ...and while it waits for a snapshot of its version
+    const waitingSnap = join(scratch, 'old-snapshot.json')
+    writeFileSync(waitingSnap, JSON.stringify({ version: 6, snapshot: { claude: [], codex: [] } }))
+    for (let k = 0; k < 4; k++) runs.push(spawnSync('python3', closedArgs, { encoding: 'utf8', timeout: 20_000, env: { ...env, LIVE_SESSIONS_SNAPSHOT: waitingSnap } }).stdout.trim())
+    // (read without waiting on it: a screen waiting for a snapshot writes one line, then nothing)
+    const noSignalWaitingArgs = [noSignalArgs[0], noSignalArgs[1]
+      .replace("import os, pty, sys, time, subprocess, fcntl, termios, struct", "import os, pty, sys, time, subprocess, fcntl, termios, struct, select")
+      .replace("    try: os.read(master, 65536)", "    r, _, _ = select.select([master], [], [], 0.1)\n    if not r: continue\n    try: os.read(master, 65536)"), ...noSignalArgs.slice(2)]
+    for (let k = 0; k < 4; k++) runs.push(spawnSync('python3', noSignalWaitingArgs, { encoding: 'utf8', timeout: 30_000, env: { ...env, LIVE_SESSIONS_SNAPSHOT: waitingSnap } }).stdout.trim())
+    check('ops: its terminal closed under it, it ends, with a hang-up or without, drawing or waiting for a snapshot (twenty-four times over)', runs.length === 24 && runs.every(x => x === 'ended'), JSON.stringify(runs))
     // drawn live in a terminal (a private tmux pane): every row keeps its right border
     t('new-session', '-d', '-s', 'drawn', '-x', '100', '-y', '24', `env LIVE_SESSIONS_SNAPSHOT='${snapFile}' LIVE_SESSIONS_EVENTS='${events}' LIVE_SESSIONS_OSASCRIPT='${stub}' HOME='${scratch}' '${process.execPath}' --no-warnings '${opsFile}'`)
     await new Promise(res => setTimeout(res, 2_000))
@@ -1368,9 +1377,11 @@ except ChildProcessError: pass
     writeFileSync(snapFile, oldSnapshot)
     const quitWaiting = live(['os.write(fd, b"q")', 'drain(1.0)', 'open(os.environ["SNAP_PATH"], "w").write(os.environ["NEXT_SNAPSHOT"])', 'drain(2.5)'].join('\n'), arrives, ['--account', ''])
     writeFileSync(snapFile, oldSnapshot)
+    const ctrlCWaiting = live(['os.write(fd, b"\\x03")', 'drain(1.0)', 'open(os.environ["SNAP_PATH"], "w").write(os.environ["NEXT_SNAPSHOT"])', 'drain(2.5)'].join('\n'), arrives, ['--account', ''])
+    writeFileSync(snapFile, oldSnapshot)
     const keyDropped = bare(live(['os.write(fd, b"a")', 'drain(1.0)', 'open(os.environ["SNAP_PATH"], "w").write(os.environ["NEXT_SNAPSHOT"])', 'drain(2.5)'].join('\n'), arrives, ['--account', '']))
-    check('ops: while it waits, q closes it; another key is dropped, never acted on once it draws',
-      quitWaiting.includes('Waiting for it; q closes') && !quitWaiting.includes('\x1b[?1049h') && keyDropped.includes('ACCOUNT default') && !keyDropped.includes('ALL ACCOUNTS'),
+    check('ops: while it waits, q or Ctrl-C closes it; another key is dropped, never acted on once it draws',
+      quitWaiting.includes('Waiting for it; q closes') && !quitWaiting.includes('\x1b[?1049h') && ctrlCWaiting.includes('Waiting for it') && !ctrlCWaiting.includes('\x1b[?1049h') && keyDropped.includes('ACCOUNT default') && !keyDropped.includes('ALL ACCOUNTS'),
       `${quitWaiting.includes('\x1b[?1049h')} ${keyDropped.includes('ACCOUNT default')} ${keyDropped.includes('ALL ACCOUNTS')}`)
     writeFileSync(snapFile, snapshot())
     // the relay's event log: 40 sessions writing at once, past the point where it moves to .1: every line whole, none lost
@@ -1425,6 +1436,19 @@ except ChildProcessError: pass
     writeFileSync(join(counted, 'node'), `#!/bin/sh\ncase " $* " in *" --loads "*) echo probe >> '${probes}';; esac\nexec -a node '${process.execPath}' "$@"\n`)
     execFileSync('/bin/chmod', ['+x', join(counted, 'node')])
     const probesSoFar = () => (existsSync(probes) ? readFileSync(probes, 'utf8').trim().split('\n').filter(Boolean).length : 0)
+    // a screen waiting for a snapshot of its version when its new code does not load; its own counting `node`
+    const opsWaiting = copyOf('plugin-waiting')
+    const relayOfWaiting = join(dirname(dirname(opsWaiting)), 'hooks', 'relay.ts')
+    const waitingSnap = join(scratch, 'waiting-snapshot.json')
+    writeFileSync(waitingSnap, JSON.stringify({ version: 6, snapshot: { claude: [], codex: [] } }))
+    const countedWait = join(scratch, 'counted-wait')
+    mkdirSync(countedWait)
+    const probesWait = join(scratch, 'probes-wait.log')
+    writeFileSync(join(countedWait, 'node'), `#!/bin/sh\ncase " $* " in *" --loads "*) echo probe >> '${probesWait}';; esac\nexec -a node '${process.execPath}' "$@"\n`)
+    execFileSync('/bin/chmod', ['+x', join(countedWait, 'node')])
+    const waitProbes = () => (existsSync(probesWait) ? readFileSync(probesWait, 'utf8').trim().split('\n').filter(Boolean).length : 0)
+    // a screen whose folder goes back to code from before a screen could start again in place (no `--loads`)
+    const opsOld = copyOf('plugin-old')
     const nodeLink = join(bin, 'node-link')
     symlinkSync(process.execPath, nodeLink)
     const snap = join(scratch, 'snapshot.json')
@@ -1434,6 +1458,8 @@ except ChildProcessError: pass
     t('new-session', '-d', '-s', 'agents', `exec env ${path} claude agents`)
     t('new-session', '-d', '-s', 'ops', '-x', '120', '-y', '30', `exec env LIVE_SESSIONS_SNAPSHOT='${snap}' LIVE_SESSIONS_EVENTS='${join(scratch, 'events.jsonl')}' HOME='${scratch}' node --no-warnings '${opsCopy}' --account ''`)
     t('new-session', '-d', '-s', 'kept', '-x', '120', '-y', '30', `exec env LIVE_SESSIONS_SNAPSHOT='${snap}' LIVE_SESSIONS_EVENTS='${join(scratch, 'events.jsonl')}' HOME='${scratch}' '${nodeLink}' --no-warnings '${opsKept}' --account ''`)
+    t('new-session', '-d', '-s', 'waiting', '-x', '200', '-y', '30', `exec env PATH='${countedWait}':"$PATH" LIVE_SESSIONS_SNAPSHOT='${waitingSnap}' LIVE_SESSIONS_EVENTS='${join(scratch, 'events.jsonl')}' HOME='${scratch}' node --no-warnings '${opsWaiting}' --account ''`)
+    t('new-session', '-d', '-s', 'old', '-x', '200', '-y', '30', `exec env LIVE_SESSIONS_SNAPSHOT='${snap}' LIVE_SESSIONS_EVENTS='${join(scratch, 'events.jsonl')}' HOME='${scratch}' node --no-warnings '${opsOld}' --account ''`)
     t('new-session', '-d', '-s', 'broken', '-x', '160', '-y', '30', `exec env PATH='${counted}':"$PATH" LIVE_SESSIONS_SNAPSHOT='${snap}' LIVE_SESSIONS_EVENTS='${join(scratch, 'events.jsonl')}' HOME='${scratch}' node --no-warnings '${opsBroken}' --account ''`)
     await new Promise(res => setTimeout(res, 2_000))
     const ttyOf = name => t('display-message', '-p', '-t', `=${name}:`, '#{pane_tty}').stdout.trim().replace('/dev/', '')
@@ -1459,7 +1485,13 @@ except ChildProcessError: pass
     // its code changed into code that does not load: it goes on as it was, and says so
     const brokenPid = pidOf('broken')
     writeFileSync(relayOfBroken, `${relayText}\n<<<<<<< HEAD\n`)
+    writeFileSync(relayOfWaiting, `${relayText}\n<<<<<<< HEAD\n`)
+    writeFileSync(opsOld, readFileSync(opsOld, 'utf8').replace("if (process.argv.includes('--loads')) {\n  process.stdout.write('loads\\n')", "if (false) {\n  process.stdout.write('loads\\n')"))
     await new Promise(res => setTimeout(res, 7_000))
+    const waitingSaid = t('capture-pane', '-p', '-t', '=waiting:').stdout
+    const oldDrawn = t('capture-pane', '-p', '-t', '=old:').stdout
+    // the snapshot of its version arrives: the screen draws, still saying its new code does not load
+    writeFileSync(waitingSnap, readFileSync(snap))
     const brokenDrawn = t('capture-pane', '-p', '-t', '=broken:').stdout
     const brokenProbes = probesSoFar()
     // mended (and changed again): it starts again in place with the code that loads
@@ -1473,6 +1505,14 @@ except ChildProcessError: pass
       `${JSON.stringify(opsIn)} ${JSON.stringify(opsAfter)} ${drawn.includes('OPS ANEW')} ${toggled.includes('ALL ACCOUNTS')} ${drawn.includes('ALL ACCOUNTS')}`)
     await new Promise(res => setTimeout(res, 7_000))
     const mendedDrawn = t('capture-pane', '-p', '-t', '=broken:').stdout
+    const waitedDrawn = t('capture-pane', '-p', '-t', '=waiting:').stdout
+    check('shown: a screen waiting for its snapshot whose new code does not load says so, once; drawn when the snapshot comes, it still says so',
+      /the plugin's new code does not load \(SyntaxError.*still waiting/.test(waitingSaid.replace(/\n/g, ' ')) && waitProbes() === 1 &&
+      waitedDrawn.includes('LIVE//SESSIONS :: OPS') && /╚.*the plugin's new code does not load/.test(waitedDrawn),
+      `probes ${waitProbes()} ${JSON.stringify(waitingSaid.split('\n').filter(l => /does not load/.test(l)).map(l => l.slice(0, 90)))} ${JSON.stringify(waitedDrawn.split('\n').filter(l => /╚|SESSIONS ::/.test(l)).map(l => l.trim().slice(0, 100)))}`)
+    check('shown: a screen whose folder goes back to code that cannot start it again in place says so, never waiting on it',
+      oldDrawn.includes('LIVE//SESSIONS :: OPS') && /╚.*the plugin there cannot start this screen again in place/.test(oldDrawn),
+      JSON.stringify(oldDrawn.split('\n').filter(l => /╚/.test(l)).map(l => l.trim().slice(0, 120))))
     check('shown: an ops screen whose new code does not load goes on as it was and says why; once mended, it starts again in place with it',
       /╚.*the plugin's new code does not load \(SyntaxError/.test(brokenDrawn) && brokenDrawn.includes('LIVE//SESSIONS :: OPS') &&
       mendedDrawn.includes('LIVE//SESSIONS :: OPS MENDED') && !mendedDrawn.includes('does not load') && pidOf('broken') === brokenPid &&

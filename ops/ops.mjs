@@ -405,24 +405,33 @@ if (process.argv.includes('--frame')) {
   const restartWith = () => {
     const node = nodeToRestart()
     if (node === undefined) return { why: 'the plugin changed: q, then Ops screen in /sessions, shows it' }
-    const tried = spawnSync(node, [...process.execArgv, process.argv[1], '--loads'], { encoding: 'utf8', input: '', timeout: 20_000 })
+    // `--frame` too: code from before `--loads` draws one frame and ends, never a live screen into a pipe; a probe that
+    // hangs is ended (one that loads answers in well under a second)
+    const tried = spawnSync(node, [...process.execArgv, process.argv[1], '--loads', '--frame', '--plain'], { encoding: 'utf8', input: '', timeout: 5_000, killSignal: 'SIGKILL' })
     if (tried.stdout === 'loads\n') return { node }
-    const said = clean(`${tried.stdout ?? ''}\n${tried.stderr ?? ''}\n${tried.error?.message ?? ''}`.split('\n').find(l => l.trim() !== '') ?? `exit ${tried.status}`)
+    if (tried.status === 0) return { why: 'the plugin there cannot start this screen again in place: q, then Ops screen in /sessions, shows it' }
+    const said = clean(strip(`${tried.stderr ?? ''}\n${tried.stdout ?? ''}\n${tried.error?.message ?? ''}`).split('\n').find(l => l.trim() !== '') ?? `exit ${tried.status}`)
     return { why: `the plugin's new code does not load (${said.slice(0, 120)}): this screen goes on as it was` }
   }
   const startAgain = node => process.execve(node, [process.argv0, ...process.execArgv, ...process.argv.slice(1)], { ...process.env, LIVE_SESSIONS_OPS_VIEW: account })
+  // said while the screen is older than the plugin's and cannot start again
+  let stale = ''
   let loaded = load()
   if (loaded === undefined) {
     // none of this version yet (an update: sessions not reloaded still write the one before): said, and waited for
     process.stdout.write(`No snapshot of this version at ${SNAPSHOT} yet: open /sessions in Claude Code once (with this plugin's version). Waiting for it; q closes.\n`)
-    // keys while it waits: q or Ctrl-C closes, any other is dropped, never left for the screen once it draws
+    // keys while it waits: q or Ctrl-C closes, any other is dropped, never left for the screen once it draws; its
+    // terminal gone (closed, with or without a hang-up), it ends
     process.stdin.setRawMode?.(true)
     const onKey = d => {
       if (!d.includes(113) && !d.includes(3)) return
       process.stdin.setRawMode?.(false)
       process.exit(0)
     }
+    const onGone = () => process.exit(0)
     process.stdin.on('data', onKey)
+    process.stdin.on('end', onGone)
+    process.stdin.on('error', onGone)
     while ((loaded = load()) === undefined) {
       await new Promise(res => setTimeout(res, 1_000))
       const code = changedCode()
@@ -430,17 +439,19 @@ if (process.argv.includes('--frame')) {
       const next = restartWith()
       if (next.node === undefined) {
         refusedCode = code
+        stale = next.why
+        process.stdout.write(`${next.why}; still waiting.\n`)
         continue
       }
       process.stdin.setRawMode?.(false)
       startAgain(next.node)
     }
     process.stdin.off('data', onKey)
+    process.stdin.off('end', onGone)
+    process.stdin.off('error', onGone)
   }
   let tick = 0
-  let note = ''
-  // said while the screen is older than the plugin's and cannot start again
-  let stale = ''
+  let note = stale
   let noteUntil = 0
   let shown = { targets: [] }
   // its own screen, no cursor, no wrapping (a long line is cut, never pushed onto the next), and the mouse taken,
