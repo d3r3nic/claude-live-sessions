@@ -1119,11 +1119,11 @@ export function viewOf(
     compactFrom: ws.compactFrom ?? COMPACT_FROM,
     // said as it will go: a check needs the checks on, a purpose to check against and the relay passing hand-offs
     ...(ws.compacted === undefined ? {} : {
-      compacted: `Claude's context was compacted ${ago(o.now - ws.compacted.at)} ago, at ${tokensSaid(ws.compacted.tokens)}; ${
+      compacted: `Claude's context was compacted ${ago(o.now - ws.compacted.at)} ago${ws.compacted.tokens > 0 ? `, at ${tokensSaid(ws.compacted.tokens)}` : ''}; ${
         ws.compacted.isChecked ? 'a drift check has looked since'
         : (ws.checkEvery ?? DRIFT_EVERY) <= 0 ? 'drift checks are off'
         : ws.purpose === undefined ? 'no drift check: the workspace has no purpose to check against'
-        : ws.relay?.mode !== 'auto' ? 'a drift check follows its next hand-off once the relay is on'
+        : ws.relay?.mode !== 'auto' ? 'a drift check follows its next hand-off once the relay is on auto'
         : 'a drift check follows its next hand-off'}`,
     }),
     checkEvery: ws.checkEvery ?? DRIFT_EVERY,

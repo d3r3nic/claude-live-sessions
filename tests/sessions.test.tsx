@@ -3142,11 +3142,13 @@ describe('the drift check', () => {
   test('what the box says of a check after a compaction: one that will run, or why none will', async () => {
     const compacted = { at: NOW - 60_000, tokens: 300_000, isChecked: false }
     const said = (ws: Partial<Workspace>) => viewOf({ ...snapshotOf(), workspaces: [{ ...practice, purpose: 'p', relay: relayOn(), compacted, ...ws }] }, { home: HOME, now: NOW, windowMs: 0, selfId: '', order: {} }).workspaces[0]?.compacted
+    // a compaction whose size its record did not say: no size
+    expect(said({ compacted: { ...compacted, tokens: 0 } })).toBe('Claude\'s context was compacted 1m ago; a drift check follows its next hand-off')
     expect([said({}), said({ checkEvery: 0 }), said({ purpose: undefined }), said({ relay: relayOn({ mode: 'notify' }) }), said({ compacted: { ...compacted, isChecked: true } })]).toEqual([
       'Claude\'s context was compacted 1m ago, at 300k; a drift check follows its next hand-off',
       'Claude\'s context was compacted 1m ago, at 300k; drift checks are off',
       'Claude\'s context was compacted 1m ago, at 300k; no drift check: the workspace has no purpose to check against',
-      'Claude\'s context was compacted 1m ago, at 300k; a drift check follows its next hand-off once the relay is on',
+      'Claude\'s context was compacted 1m ago, at 300k; a drift check follows its next hand-off once the relay is on auto',
       'Claude\'s context was compacted 1m ago, at 300k; a drift check has looked since',
     ])
   })
