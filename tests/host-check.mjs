@@ -270,7 +270,7 @@ if (process.argv.includes('--slow')) {
     check('workspace: Codex under its environment\'s home', file('codex.env').includes(`CODEX_HOME=${fakeHome}/.codex-checkenv`))
     check('workspace: no Claude Code session markers reach the agents', !/^(CLAUDECODE|CLAUDE_CODE_CHILD_SESSION)=/m.test(file('claude.env') + file('codex.env')))
     check('workspace: both may work in the worktrees folder; Codex without its update offer, in workspace-write', file('codex.args') === '-c\ncheck_for_update_on_startup=false\n--sandbox\nworkspace-write\n--add-dir\n/x/app-worktrees\n--\nSay you are ready.\n', JSON.stringify(file('codex.args')))
-    check('workspace: Claude takes the first prompt as it is, as one argument after --, running nothing in it', file('claude.args') === `--add-dir\n/x/app-worktrees\n--\n${prompt}\n` && !existsSync(`${scratch}/RAN`), JSON.stringify(file('claude.args').slice(0, 60)))
+    check('workspace: Claude takes how to work as one argument, and the first prompt as it is, as one argument after --, running nothing in it', file('claude.args') === `--append-system-prompt\n${w.leanWork(true)}\n--add-dir\n/x/app-worktrees\n--\n${prompt}\n` && !existsSync(`${scratch}/RAN`), JSON.stringify(file('claude.args').slice(0, 60)))
     check('workspace: each first prompt is taken once', !existsSync(w.promptPath(fakeHome, 'check', 'claude')) && !existsSync(w.promptPath(fakeHome, 'check', 'codex')))
     check('workspace: marked as started for this workspace', spawnSync('tmux', ['-L', socket, '-f', '/dev/null', 'show-options', '-t', 'ws-check', '-qv', w.OWNER_OPTION], { encoding: 'utf8' }).stdout.trim() === '1234')
     // used by hand: the mouse on in this session, and each side's border naming its agent
@@ -468,7 +468,7 @@ except ChildProcessError: pass
     for (let i = 0; i < 30 && !(existsSync(`${scratch}/d-claude.args`) && existsSync(`${scratch}/d-codex.args`)); i++) await new Promise(r => setTimeout(r, 200))
     check('workspace: a default one runs under no other account, whatever the tmux server holds', !/^(CLAUDE_CONFIG_DIR|CODEX_HOME)=/m.test(file('d-claude.env') + file('d-codex.env')) && file('d-claude.env') !== '')
     check('workspace: a folder with # in its name is the folder it starts in', file('d-claude.pwd').trim().endsWith('C#{session_name}'), file('d-claude.pwd').trim().split('/').pop())
-    check('workspace: no checkout, no first prompt: nothing more on the command line', file('d-claude.args').trim() === '' && file('d-codex.args') === '-c\ncheck_for_update_on_startup=false\n--sandbox\nworkspace-write\n')
+    check('workspace: no checkout, no first prompt: nothing more on the command line than how Claude works', file('d-claude.args') === `--append-system-prompt\n${w.leanWork(true)}\n` && file('d-codex.args') === '-c\ncheck_for_update_on_startup=false\n--sandbox\nworkspace-write\n')
     // opened again while it runs: nothing new is created
     spawnSync(process.env.SHELL ?? '/bin/zsh', ['-c', line], { encoding: 'utf8' })
     const again = Object.values(w.parsePanes(spawnSync('tmux', ['-L', socket, '-f', '/dev/null', 'list-panes', '-a', '-F', w.PANES_FORMAT], { encoding: 'utf8' }).stdout)).length
@@ -911,44 +911,11 @@ except ChildProcessError: pass
   }
 }
 
-// Claude's prompt cache, read with the real jq from transcripts of each kind: its life from the last reply that wrote
-// to the cache (one that only read says nothing); when the last reply's request was sent, from the record just before
-// that reply began (a reply written over several records counts from its first); a line cut by tail and a subagent's
-// records skipped
+// how a workspace's Claude is told to work lean: the installed Claude takes it as a flag (its help names it, with no
+// conversation started and no model called)
 {
-  const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'live-sessions-cache-')))
-  try {
-    const t = s => `2026-10-10T20:${s}.000Z`
-    const reply = (id, at, creation, extra = {}) => JSON.stringify({ type: 'assistant', uuid: `u-${id}-${at}`, timestamp: t(at), ...extra, message: { id, usage: { input_tokens: 2, cache_read_input_tokens: 9000, ...(creation === undefined ? {} : { cache_creation: creation }) } } })
-    const said = (at, extra = {}) => JSON.stringify({ type: 'user', timestamp: t(at), ...extra, message: { content: 'x' } })
-    const read = (name, lines) => {
-      const file = join(scratch, name)
-      writeFileSync(file, `${lines.join('\n')}\n`)
-      return spawnSync('/bin/sh', ['-c', r.CACHE_SCRIPT, 'sh', file], { encoding: 'utf8' }).stdout
-    }
-    const hour = r.cacheOf(read('hour.jsonl', [
-      '{"type":"assistant","message":{"usage":{"cache_creation":{"ephemeral_5m_input_t',
-      said('00:00'),
-      reply('m1', '00:30', { ephemeral_5m_input_tokens: 10, ephemeral_1h_input_tokens: 0 }),
-      said('01:00'),
-      reply('m2', '01:40', { ephemeral_1h_input_tokens: 1582, ephemeral_5m_input_tokens: 0 }),
-      said('02:00', { isSidechain: true }),
-      reply('s1', '02:10', { ephemeral_5m_input_tokens: 99 }, { isSidechain: true }),
-      // the final reply, written over two records; nothing written to the cache by it
-      reply('m3', '03:30', { ephemeral_1h_input_tokens: 0, ephemeral_5m_input_tokens: 0 }),
-      reply('m3', '03:50', undefined),
-      JSON.stringify({ type: 'system', timestamp: t('03:51'), subtype: 'turn_duration' }),
-    ]))
-    const five = r.cacheOf(read('five.jsonl', [said('00:00'), reply('a', '00:10', { ephemeral_1h_input_tokens: 7 }), said('05:00'), reply('b', '05:20', { ephemeral_5m_input_tokens: 4 })]))
-    const none = r.cacheOf(read('none.jsonl', [reply('a', '00:10', undefined)]))
-    const missing = r.cacheOf(spawnSync('/bin/sh', ['-c', r.CACHE_SCRIPT, 'sh', join(scratch, 'gone.jsonl')], { encoding: 'utf8' }).stdout)
-    // the final reply m3 began after the last record before it: m2 (01:40), the sidechain's skipped
-    check('compaction: a prompt cache\'s life from the last reply that wrote to it, timed from the request of the last reply; nothing when none says or there is no transcript',
-      JSON.stringify([hour, five, none, missing]) === JSON.stringify([{ lifeMs: 3_600_000, sentAt: Date.parse(t('01:40')), replyId: 'u-m3-03:30' }, { lifeMs: 300_000, sentAt: Date.parse(t('05:00')), replyId: 'u-b-05:20' }, { replyId: 'u-a-00:10' }, {}]),
-      JSON.stringify([hour, five, none, missing]))
-  } finally {
-    rmSync(scratch, { recursive: true, force: true })
-  }
+  const help = spawnSync('claude', ['--help'], { encoding: 'utf8', env: { ...process.env, CLAUDECODE: '' } }).stdout ?? ''
+  check('lean work: the installed Claude takes --append-system-prompt, as a workspace\'s pane starts it', help.includes('--append-system-prompt <prompt>'), help.includes('--append-system-prompt <prompt>') ? '' : help.slice(0, 200))
 }
 
 // the ops screen, from a snapshot and event log of its own: every frame exactly the window's size (widths measured

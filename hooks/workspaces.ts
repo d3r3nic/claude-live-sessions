@@ -125,22 +125,24 @@ export const promptPath = (home: string, id: string, tool: 'claude' | 'codex') =
  * An agent with a conversation to resume (`threads`) resumes it, from the
  * folder it ran in, with the flags that keep its permissions.
  */
-function paneScript(tool: 'claude' | 'codex', ws: Pick<Workspace, 'id' | 'env' | 'checkout' | 'threads'>, home: string, bin?: string): string {
+function paneScript(tool: 'claude' | 'codex', ws: Pick<Workspace, 'id' | 'env' | 'checkout' | 'threads' | 'only'>, home: string, bin?: string): string {
   // (an id from the workspaces file reaches the line only as threadFrom read it: letters, digits, dashes)
   const thread = ws.threads?.[tool]
   const addDir = ws.checkout === undefined ? '' : ` --add-dir ${shellWord(`${ws.checkout}-worktrees`)}`
   const prompt = shellWord(promptPath(home, ws.id, tool))
   const flags = (thread?.flags ?? []).map(f => ` ${shellWord(f)}`).join('')
   const start = agentStart(tool, ws.env, home, bin)
+  // Claude's way of working, in its system prompt (before --add-dir, which takes every value up to `--`)
+  const lean = tool === 'claude' ? ` --append-system-prompt ${shellWord(leanWork(ws.only === undefined))}` : ''
   const agent =
     thread === undefined
-      ? `${start}${tool === 'codex' ? ` ${UPDATE_OFF} --sandbox workspace-write` : ''}${addDir} \${p:+--} \${p:+"$p"}`
+      ? `${start}${tool === 'codex' ? ` ${UPDATE_OFF} --sandbox workspace-write` : lean}${addDir} \${p:+--} \${p:+"$p"}`
       : tool === 'claude'
         // a Claude conversation is kept under the folder it started in: resumed from there, unless a live Claude
         // session has it open (its registry entry, its process there): then it says so and leaves a shell
         ? `open=; for f in ${shellWord(`${home}/.claude${ws.env === '' ? '' : `-${ws.env}`}`)}/sessions/*.json; do grep -q '"sessionId":"${thread.id}"' "$f" 2>/dev/null && kill -0 "$(basename "$f" .json)" 2>/dev/null && open=1; done; ` +
           `if [ -n "$open" ]; then echo 'This conversation is open in another Claude session; close it there, then open the workspace again.'; ` +
-          `else cd ${shellWord(thread.dir)} && ${start} --resume ${thread.id}${flags}${addDir} \${p:+--} \${p:+"$p"}; fi`
+          `else cd ${shellWord(thread.dir)} && ${start} --resume ${thread.id}${flags}${lean}${addDir} \${p:+--} \${p:+"$p"}; fi`
         : `${start} resume ${UPDATE_OFF}${thread.flags?.includes('--sandbox') === true ? '' : ' --sandbox workspace-write'}${flags}${addDir} -C ${shellWord(thread.dir)} -- ${thread.id} \${p:+"$p"}`
   const run = `p=$(cat ${prompt} 2>/dev/null) && rm -f ${prompt}; ${agent}`
   return `/bin/sh -c ${shellWord(`${run}; exec "$SHELL" -l`)}`
@@ -452,8 +454,10 @@ export function workspacesFrom(raw: unknown): Workspace[] {
     // a conversation to resume is run: one this does not read is dropped, and that agent starts new
     const claude = threadFrom('claude', (ws.threads as Record<string, unknown> | undefined)?.claude)
     const codex = threadFrom('codex', (ws.threads as Record<string, unknown> | undefined)?.codex)
-    // a compaction setting this does not read is left out: the default stands
-    const compactAt = Number.isInteger(ws.compactAt) && ws.compactAt! >= 0 && ws.compactAt! <= 100 ? ws.compactAt : undefined
+    // a compaction setting this does not read is left out: the default stands; one of the earlier percent lines
+    // (`compactAt`) only as off
+    const legacy = (ws as { compactAt?: unknown }).compactAt
+    const compactFrom = Number.isInteger(ws.compactFrom) && ws.compactFrom! >= 0 && ws.compactFrom! <= 10_000_000 ? ws.compactFrom : legacy === 0 ? 0 : undefined
     // likewise the drift check's interval, and its last verdict (one this does not read is dropped)
     const checkEvery = checkEveryFrom(ws.checkEvery)
     const check = checkFrom(ws.check)
@@ -461,12 +465,12 @@ export function workspacesFrom(raw: unknown): Workspace[] {
     const only = ws.only === 'claude' || ws.only === 'codex' ? ws.only : undefined
     // a branch only as git names one (it is shown, never run)
     const branch = branchFrom(ws.branch)
-    const { members: _, threads: __, compactAt: ___, checkEvery: ____, check: _____, only: ______, branch: _______, ...rest } = ws
+    const { members: _, threads: __, compactAt: ___, compactFrom: ________, checkEvery: ____, check: _____, only: ______, branch: _______, ...rest } = ws as Workspace & { compactAt?: unknown }
     return {
       ...rest,
       ...(members !== undefined && members.length > 0 ? { members } : {}),
       ...(claude === undefined && codex === undefined ? {} : { threads: { ...(claude === undefined ? {} : { claude }), ...(codex === undefined ? {} : { codex }) } }),
-      ...(compactAt === undefined ? {} : { compactAt }),
+      ...(compactFrom === undefined ? {} : { compactFrom }),
       ...(checkEvery === undefined ? {} : { checkEvery }),
       ...(check === undefined ? {} : { check }),
       ...(only === undefined ? {} : { only }),
@@ -589,6 +593,28 @@ export function headOf(stdout: string): { isMain: boolean; branch?: string; isDe
   return { isMain: where === 'main', ...(branch === undefined ? {} : { branch }), isDefault: branch !== undefined && branch === branchFrom(byOrigin) }
 }
 
+/**
+ * How a workspace's agents work, to spend fewer tokens at the same quality:
+ * every request re-reads the whole conversation, so fewer, fuller requests
+ * and less output cost less. A pair hands over at milestones too, as far as
+ * the peer-coding rules leave a turn's size to it. Claude has it in its
+ * system prompt (`--append-system-prompt`), which no compaction drops; one
+ * brought in also in its first prompt, as a conversation keeps the system
+ * prompt it began with until it compacts (Claude Code's system-prompt
+ * snapshot). Codex has it in its first prompt, which its compactions keep.
+ */
+export function leanWork(isPair: boolean): string {
+  return [
+    'Work lean here: every request re-reads this whole conversation, so fewer, fuller steps and less output cost less.',
+    ...(isPair ? ['Hand over at milestones, a complete piece of the purpose your peer can review, not after each small step, as far as the peer-coding rules leave that to you.'] : []),
+    'Make independent reads and checks in one step (several tool calls at once, or one command).',
+    'Read the part of a file you need, and not again unless it changed.',
+    'Run a test suite once per set of changes, printing only failures and the summary; keep evidence as short summaries, not full logs.',
+    'Between steps, write one short line at most, and only when your direction changes.',
+    'Never skip a check, a test or a review to save tokens.',
+  ].join(' ')
+}
+
 /** Step 2 of a first prompt when the owner chose the branch: go on with it there, and start no other. */
 const goOnStep = (ws: Pick<Workspace, 'branch' | 'dir'>) =>
   `Go on with the branch the owner chose, ${ws.branch}, in its worktree ${ws.dir}: the work there is under way. Start no other branch.`
@@ -618,8 +644,9 @@ export function setupPrompt(ws: Pick<Workspace, 'name' | 'purpose' | 'checkout' 
 /**
  * Codex's first prompt in a workspace made for a purpose: who it is, that
  * Claude is getting things ready, and that the relay will bring Claude's
- * hand-off. Its short answer is its first finished turn, which the relay
- * waits for before it types anything into Codex's pane.
+ * hand-off, and how to work (leanWork). Its short answer is its first
+ * finished turn, which the relay waits for before it types anything into
+ * Codex's pane.
  */
 export function peerPrompt(ws: Pick<Workspace, 'name' | 'purpose' | 'threads'>): string {
   const claude = ws.threads?.claude === undefined ? 'Claude runs in the pane beside you' : 'Claude runs in the pane beside you, in its own conversation, which the owner brought in,'
@@ -627,6 +654,8 @@ export function peerPrompt(ws: Pick<Workspace, 'name' | 'purpose' | 'threads'>):
     `This is the workspace "${ws.name}". What it is for: ${ws.purpose ?? ''}`,
     '',
     `You are Codex, one of two peers here; ${claude} and is getting peer coding ready now, under the peer-coding rules. ${RELAY_FOR_CODEX}`,
+    '',
+    leanWork(true),
     '',
     'Nothing to do until then: reply with one short line saying you are ready.',
   ].join('\n')
@@ -651,6 +680,8 @@ export function joinPrompt(ws: Pick<Workspace, 'name' | 'purpose' | 'checkout' |
       '',
       `${moved} You are Codex, one of two peers here; ${claude} and is getting peer coding ready now, under the peer-coding rules. ${RELAY_FOR_CODEX}`,
       '',
+      leanWork(true),
+      '',
       'Nothing to do until then: reply with one short line saying you are ready. When Claude\'s hand-off comes, align with it, and add what you know from your own work above that it does not say.',
     ].join('\n')
   }
@@ -659,6 +690,8 @@ export function joinPrompt(ws: Pick<Workspace, 'name' | 'purpose' | 'checkout' |
     `This is the workspace "${ws.name}". What it is for: ${ws.purpose ?? ''}`,
     '',
     `${moved} You are Claude, one of two peers here; ${codex}. ${RELAY_FOR_CLAUDE}`,
+    '',
+    leanWork(true),
     '',
     'From here, work as a peer under the peer-coding rules, using the peer-coding skill:',
     '1. If this repository is not set up for peer coding in the current layout, set it up. Record the owner\'s decisions you already know and ask for the rest with NEEDS USER.',
@@ -682,6 +715,8 @@ export function soloPrompt(ws: Pick<Workspace, 'name' | 'purpose' | 'checkout' |
     '',
     `${isBrought ? 'The owner moved this conversation into the workspace: everything above stays yours. ' : ''}You are ${tool === 'claude' ? 'Claude' : 'Codex'}, the only agent here: the owner chose to work with you alone, so there is no peer and no relay, and the owner gives you each next step.`,
     '',
+    // a new Claude has it in its system prompt
+    ...(tool === 'codex' || isBrought ? [leanWork(false), ''] : []),
     'Get ready for this purpose:',
     ws.branch !== undefined
       ? `1. ${goOnStep(ws)}${isBrought ? ' Work of yours not committed yet stays where it is: ask the owner before moving any of it.' : ''}`

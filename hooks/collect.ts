@@ -1,6 +1,6 @@
 // Pure parsing and matching: no `$`, so the tests drive it directly.
 import type { ClaudeSession, CodexSession, Place, Snapshot, Workspace } from '../types'
-import { COMPACT_AT, RELAY_CAP } from './relay'
+import { COMPACT_FROM, RELAY_CAP } from './relay'
 import { DRIFT_EVERY } from './drift'
 import { tmuxName } from './workspaces'
 
@@ -960,8 +960,8 @@ export type WorkspaceView = {
    * that they have not typed anything since, a pane left scrolled back), never with the relay off.
    */
   relay: { mode: 'auto' | 'notify' | 'off'; status: string; isWaiting: boolean; needsOwner: boolean }
-  /** How full Claude's context may get, in percent, before it compacts itself at a hand-off; 0 is off. */
-  compactAt: number
+  /** How large Claude's context may grow, in tokens, before it compacts itself at a hand-off; 0 is off. */
+  compactFrom: number
   /** Hand-offs between drift checks (0: off), and the last check said for the owner ('' when none yet). */
   checkEvery: number
   check: { status: string; text: string; isOk: boolean } | undefined
@@ -1105,7 +1105,7 @@ export function viewOf(
       isWaiting: ws.relay !== undefined && ws.relay.mode === 'auto' && ws.relay.streak >= RELAY_CAP && ws.relay.status === 'waits for you',
       needsOwner: needsOwner(ws.relay),
     },
-    compactAt: ws.compactAt ?? COMPACT_AT,
+    compactFrom: ws.compactFrom ?? COMPACT_FROM,
     checkEvery: ws.checkEvery ?? DRIFT_EVERY,
     check: ws.check === undefined ? undefined : {
       status: ws.check.status,

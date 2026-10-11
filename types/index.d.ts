@@ -93,10 +93,10 @@ export type Workspace = {
    */
   threads?: { claude?: Thread; codex?: Thread }
   /**
-   * How full Claude's context may get, in percent, before it compacts itself once its hand-off is passed (Codex compacts itself);
-   * 0 is off. Unset: COMPACT_AT (50).
+   * How large Claude's context may grow, in tokens, before it compacts itself once its hand-off is passed (Codex
+   * compacts itself); 0 is off. Unset: COMPACT_FROM (200k).
    */
-  compactAt?: number
+  compactFrom?: number
   /** How many hand-offs in a row between two drift checks: DRIFT_EVERY (4) unless set; 0 is off. */
   checkEvery?: number
   /** The last drift check: when, and its verdict for the owner. */

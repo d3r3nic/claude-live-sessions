@@ -189,61 +189,18 @@ export function relaySteps(ws: Pick<Workspace, 'name' | 'relay'> & Partial<Pick<
 }
 
 /**
- * How full Claude's context may get, in percent, before it compacts itself once its hand-off is passed
- * (compactAtHandOff, by compactPlan). Codex compacts itself, by its own measure: the relay never types /compact
- * into it.
+ * How large Claude's context may grow, in tokens, before it compacts itself once its hand-off is passed
+ * (compactAtHandOff): every request re-reads the whole context, so from here a compaction costs less than the
+ * requests after it save. Codex compacts itself, by its own measure: the relay never types /compact into it.
+ * Nothing waits here for an idle Claude: Claude Code (2.1.294 on) compacts an idle conversation itself, about 55
+ * minutes after its last activity, before its prompt cache expires.
  */
-export const COMPACT_AT = 50
-/** From this full (or the workspace's own line, if higher), Claude compacts as soon as its hand-off is passed. */
-export const COMPACT_NOW_AT = 80
+export const COMPACT_FROM = 200_000
 
-/**
- * Claude's prompt cache, from its transcript "$1", two lines: how long it
- * lives, the lifetime of the last cache write its replies record (`1h` or
- * `5m`; empty if none says); when its last reply's request was sent, the
- * time of the record just before that reply began (a prompt, a tool's
- * result, a reply before it), from which the cache's life counts; and that
- * reply's first record (its uuid, as the relay names a turn), so a time
- * read before the reply was written is known for another's. The last 400 lines; a line
- * cut by `tail` and a subagent's records skipped.
- */
-export const CACHE_SCRIPT = [
-  "tail -n 400 \"$1\" 2>/dev/null | /usr/bin/jq -R -n -r '",
-  '  reduce (inputs | fromjson? | select(type == "object" and .isSidechain != true)) as $o ({life: null, last: null, sent: null, mid: null, first: null};',
-  // a reply's first record: its request went out after the record before it, whatever that was
-  '    (if $o.type == "assistant" and ($o.message.id // "") != (.mid // "") then .sent = .last | .mid = ($o.message.id // "") | .first = $o.uuid else . end)',
-  '    | (if $o.type == "assistant" then ($o.message.usage.cache_creation // {}) as $c',
-  '        | (if ($c.ephemeral_1h_input_tokens // 0) > 0 then .life = "1h" elif ($c.ephemeral_5m_input_tokens // 0) > 0 then .life = "5m" else . end)',
-  '      else . end)',
-  '    | (if ($o.timestamp | type) == "string" then .last = $o.timestamp else . end))',
-  '  | "\\(.life // "")\\n\\(.sent // "")\\n\\(.first // "")"',
-  "' 2>/dev/null",
-].join('\n')
-
-/** CACHE_SCRIPT's answer: the cache's life in ms, when the last reply's request was sent, and that reply's id; each if its records say. */
-export function cacheOf(stdout: string): { lifeMs?: number; sentAt?: number; replyId?: string } {
-  const [life = '', sent = '', reply = ''] = stdout.split('\n').map(l => l.trim())
-  const lifeMs = life === '1h' ? 3_600_000 : life === '5m' ? 300_000 : undefined
-  const sentAt = /^\d{4}-\d\d-\d\dT/.test(sent) ? Date.parse(sent) : Number.NaN
-  return { ...(lifeMs === undefined ? {} : { lifeMs }), ...(Number.isNaN(sentAt) ? {} : { sentAt }), ...(reply === '' ? {} : { replyId: reply }) }
-}
-
-/**
- * When a workspace's Claude, whose hand-off was just passed, compacts: at
- * once when its context is near the window (COMPACT_NOW_AT, or the
- * workspace's line if higher); else, from the workspace's line up, just
- * before its prompt cache expires (`cacheMs` after its last request was
- * sent; 5 minutes if its records do not say), if it is still idle then: a hand-back within
- * the cache's life keeps its whole context, read cheaply from the cache,
- * and a compaction made while the cache is still warm reads it cheaply
- * too. It starts 5 minutes before an hour's cache ends, 90 seconds before
- * a shorter one's. Below the line, or with the line off (0): never.
- */
-export function compactPlan(at: number, percent: number, cacheMs: number | undefined): { when: 'now' } | { when: 'before-expiry'; afterMs: number } | undefined {
-  if (at <= 0 || percent < at) return undefined
-  if (percent >= Math.max(at, COMPACT_NOW_AT)) return { when: 'now' }
-  const life = cacheMs ?? 300_000
-  return { when: 'before-expiry', afterMs: Math.max(0, life - (life >= 3_600_000 ? 300_000 : 90_000)) }
+/** Tokens as the pane and the event log say them: `200k`, `1.2M`. */
+export function tokensSaid(n: number): string {
+  const k = Math.round(n / 1000)
+  return k >= 1000 ? `${Math.round(n / 100_000) / 10}M` : `${k}k`
 }
 
 /** What Claude is told to keep when it compacts in a workspace: the rest is in the peer-coding records. */

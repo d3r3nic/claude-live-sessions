@@ -53,13 +53,14 @@ import {
 } from '../hooks/collect'
 import type { CodexProc, ThreadRow } from '../hooks/collect'
 import type { ClaudeSession, CodexSession, Snapshot, Workspace } from '../types'
-import { afterOwner, afterStep, cacheOf, CACHE_SCRIPT, claudeKeep, COMPACT_AT, COMPACT_NOW_AT, compactPlan, cueOf, cutBytes, eventOf, EVENT_SCRIPT, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_MAX_AGE_MS, TURN_SCRIPT } from '../hooks/relay'
+import { afterOwner, afterStep, claudeKeep, COMPACT_FROM, cueOf, cutBytes, eventOf, EVENT_SCRIPT, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_MAX_AGE_MS, TURN_SCRIPT, tokensSaid } from '../hooks/relay'
 import type { Side } from '../hooks/relay'
 import { branchOf, checkDue, checkFrom, driftRequest, parseVerdict, recordFolderOf, RECORDS_SCRIPT } from '../hooks/drift'
 import { bringable, codexDir, codexFlags, CODEX_MODE_SCRIPT, CODEX_TASK_SCRIPT, codexTaskState, envOfProfile, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, threadFrom, toggled, withThreads } from '../hooks/bring'
 import {
   absoluteDir,
   agentStart,
+  leanWork,
   assigned,
   checkoutResult,
   CHECKOUT_SCRIPT,
@@ -143,8 +144,6 @@ const local = (line: string) =>
 
 /** What a test changes about the machine; engine() resets it. */
 const world = {
-  /** What CACHE_SCRIPT prints: the life of Claude's prompt cache (`1h`, `5m`), then when its last request was sent. */
-  cache: '',
   /** What BRANCH_SCRIPT prints for each folder: main or linked, then the branch checked out (none: a detached HEAD). */
   heads: {} as Record<string, string>,
   /** A folder whose worktree lookup takes 5 s. */
@@ -217,7 +216,6 @@ const world = {
   codexTaskAnswer: undefined as (() => string) | undefined,
 }
 const resetWorld = () => {
-  world.cache = ''
   world.heads = { '/Users/u/dev/web-app': 'main\nmain\n', '/Users/u/dev/build': 'linked\nfix/build\n' }
   world.slowWorktrees = ''
   world.moreWorktrees = ''
@@ -318,7 +316,6 @@ function machine(argv: readonly string[], env: unknown): Run {
           ? ok(`worktree /Users/u/dev/web-app\0HEAD 1111\0branch refs/heads/main\0\0worktree /Users/u/dev/build\0HEAD 2222\0branch refs/heads/fix/build\0\0worktree /Users/u/dev/web-app-worktrees/probe\0HEAD 3333\0detached\0\0${world.moreWorktrees}`)
           : { exitCode: 128, stdout: '', stderr: 'fatal: not a git repository\n' }
       }
-      if (argv[2] === CACHE_SCRIPT) return ok(world.cache)
       if (argv[2] === BRANCH_SCRIPT) return world.heads[args[0] ?? ''] === undefined ? { exitCode: 1, stdout: '', stderr: '' } : ok(world.heads[args[0]!]!)
       // build is a worktree of web-app's
       if (argv[2] === CHECKOUT_SCRIPT && args[0] === '/Users/u/dev/build') return ok('ok /Users/u/dev/web-app\n')
@@ -2306,14 +2303,29 @@ describe('bringing running sessions into a workspace', () => {
     const line = openCommand(ws, HOME)
     expect(line).toContain(nested(`open=; for f in '/Users/u/.claude'/sessions/*.json; do grep -q '"sessionId":"session-101"' "$f" 2>/dev/null && kill -0 "$(basename "$f" .json)" 2>/dev/null && open=1; done; `))
     expect(line).toContain(nested(`if [ -n "$open" ]; then echo 'This conversation is open in another Claude session; close it there, then open the workspace again.'; else cd '/Users/u/dev/web-app/src' && env `))
-    expect(line).toContain(nested(` claude --resume session-101 '--permission-mode' 'plan' --add-dir '/Users/u/dev/web-app-worktrees' \${p:+--} \${p:+"$p"}; fi; exec`))
+    expect(line).toContain(nested(` claude --resume session-101 '--permission-mode' 'plan' --append-system-prompt '${leanWork(true)}' --add-dir '/Users/u/dev/web-app-worktrees' \${p:+--} \${p:+"$p"}; fi; exec`))
     expect(line).toContain(nested(` codex resume -c check_for_update_on_startup=false '--sandbox' 'danger-full-access' '--ask-for-approval' 'never' --add-dir '/Users/u/dev/web-app-worktrees' -C '/Users/u/dev/web-app' -- ${RESUMED_A} \${p:+"$p"}; exec`))
     // a named environment's Claude registry
     expect(openCommand({ ...ws, env: 'work' }, HOME)).toContain(nested(`for f in '/Users/u/.claude-work'/sessions/*.json;`))
     // no sandbox kept: the workspace's own; an agent with no conversation starts new
     const plain = openCommand({ ...ws, threads: { codex: { id: RESUMED_A, dir: '/Users/u/dev/web-app' } } }, HOME)
     expect(plain).toContain(nested(` codex resume -c check_for_update_on_startup=false --sandbox workspace-write --add-dir '/Users/u/dev/web-app-worktrees' -C '/Users/u/dev/web-app' -- ${RESUMED_A} `))
-    expect(plain).toContain(nested(` claude --add-dir '/Users/u/dev/web-app-worktrees' \${p:+--}`))
+    expect(plain).toContain(nested(` claude --append-system-prompt '${leanWork(true)}' --add-dir '/Users/u/dev/web-app-worktrees' \${p:+--}`))
+    // Codex has it in its first prompt, never as a flag; a Claude alone has it without the hand-overs
+    expect(line.match(/--append-system-prompt/g)).toHaveLength(1)
+    expect(openCommand({ ...ws, threads: undefined, only: 'claude' }, HOME)).toContain(nested(` claude --append-system-prompt '${leanWork(false)}' --add-dir`))
+  })
+
+  test('how the agents work: fewer, fuller requests and less output, never fewer checks; a pair hands over at milestones', async () => {
+    expect(leanWork(true)).toBe('Work lean here: every request re-reads this whole conversation, so fewer, fuller steps and less output cost less. Hand over at milestones, a complete piece of the purpose your peer can review, not after each small step, as far as the peer-coding rules leave that to you. Make independent reads and checks in one step (several tool calls at once, or one command). Read the part of a file you need, and not again unless it changed. Run a test suite once per set of changes, printing only failures and the summary; keep evidence as short summaries, not full logs. Between steps, write one short line at most, and only when your direction changes. Never skip a check, a test or a review to save tokens.')
+    expect(leanWork(false)).toBe(leanWork(true).replace(' Hand over at milestones, a complete piece of the purpose your peer can review, not after each small step, as far as the peer-coding rules leave that to you.', ''))
+    // Codex's first prompts carry it (its compactions keep them); a brought-in Claude's too (its conversation keeps the
+    // system prompt it began with until it compacts); a new Claude's not (its system prompt has it)
+    const ws = { ...practice, purpose: 'roles for admins', checkout: '/Users/u/dev/web-app' }
+    const brought = { ...ws, threads: { codex: { id: 'a', dir: '/x' }, claude: { id: 'b', dir: '/x' } } }
+    for (const prompt of [peerPrompt(ws), joinPrompt(brought, 'codex'), joinPrompt(brought, 'claude')]) expect(prompt).toContain(`\n\n${leanWork(true)}\n\n`)
+    for (const prompt of [soloPrompt(ws, 'codex'), soloPrompt(brought, 'codex'), soloPrompt(brought, 'claude')]) expect(prompt).toContain(`\n\n${leanWork(false)}\n\nGet ready for this purpose:`)
+    for (const prompt of [setupPrompt(ws), soloPrompt(ws, 'claude')]) expect(prompt).not.toContain('Work lean')
   })
 
   test('first prompts: a brought-in agent keeps what it knows and goes on as a peer; uncommitted work is the owner\'s call', async () => {
@@ -2560,13 +2572,19 @@ describe('bringing running sessions into a workspace', () => {
 })
 
 describe('the context guard', () => {
-  test('Claude compacts at 50% unless set; what it keeps; a setting this does not read', async () => {
-    expect(COMPACT_AT).toBe(50)
+  test('Claude compacts from 200k tokens unless set; what it keeps; a setting this does not read; tokens as said', async () => {
+    expect(COMPACT_FROM).toBe(200_000)
     // what Claude keeps: one line, whatever the workspace is called
     expect(claudeKeep('RBAC')).toBe('Peer-coding workspace "RBAC": keep what it is for, the peer-coding branch and its worktree, the round, where the peer-coding records are (CURRENT.md), what the owner decided, and the cue you last sent; the details stay in those records.')
     expect(claudeKeep('A\nB\u0007')).toMatch(/^Peer-coding workspace "A B ": keep/)
-    // a saved setting this does not read: the default stands
-    expect(workspacesFrom({ workspaces: [{ ...practice, compactAt: 70 }, { ...practice, id: 'b', compactAt: 'half' }, { ...practice, id: 'c', compactAt: 150 }] }).map(w => w.compactAt)).toEqual([70, undefined, undefined])
+    // a saved setting this does not read: the default stands; an earlier percent line only as off
+    const read = workspacesFrom({ workspaces: [
+      { ...practice, compactFrom: 300_000 }, { ...practice, id: 'b', compactFrom: 'half' }, { ...practice, id: 'c', compactFrom: -1 }, { ...practice, id: 'd', compactFrom: 2.5 },
+      { ...practice, id: 'e', compactAt: 70 }, { ...practice, id: 'f', compactAt: 0 }, { ...practice, id: 'g', compactAt: 70, compactFrom: 0 },
+    ] })
+    expect(read.map(w => w.compactFrom)).toEqual([300_000, undefined, undefined, undefined, undefined, 0, 0])
+    expect(read.some(w => 'compactAt' in w)).toBe(false)
+    expect([tokensSaid(200_000), tokensSaid(437_499), tokensSaid(999_499), tokensSaid(999_600), tokensSaid(1_250_000), tokensSaid(3_000)]).toEqual(['200k', '437k', '999k', '1M', '1.3M', '3k'])
   })
 
   test('turns: how full Codex\'s context is, from its last count', async () => {
@@ -2604,16 +2622,16 @@ describe('the context guard', () => {
     expect(world.events.filter(e => e.kind === 'compact')).toEqual([])
   })
 
-  test('a workspace\'s Claude near the window compacts itself as soon as its hand-off to Codex is passed', async ($, on) => {
+  test('a workspace\'s Claude whose context has grown to the line compacts itself as soon as its hand-off to Codex is passed', async ($, on) => {
     const { files, clock } = engine(on, machine, { termProgram: 'Apple_Terminal', selfId: 'session-104' })
-    let percent = 85
-    on('session.usage', async () => ({ value: { startedAt: NOW, context: { tokens: percent * 10_000, window: 1_000_000, percent }, rateLimits: [] } }))
+    let tokens: number | undefined = 437_000
+    on('session.usage', async () => ({ value: { startedAt: NOW, context: { ...(tokens === undefined ? {} : { tokens, percent: Math.round(tokens / 10_000) }), window: 1_000_000 }, rateLimits: [] } }))
     const compacted: (string | undefined)[] = []
-    // the engine's compaction, recorded: done (a summary left), or vetoed
+    // the engine's compaction, recorded: done (a summary left, what it read), or vetoed
     let isVetoed = false
     on('session.compact', async ($, e) => {
       compacted.push(e.instructions)
-      return isVetoed ? { skip: 'vetoed by the test' } : { messages: [{ role: 'user' as const, text: 'summary', toolUses: [] }] }
+      return isVetoed ? { skip: 'vetoed by the test' } : { messages: [{ role: 'user' as const, text: 'summary', toolUses: [] }], usage: { input_tokens: 2_000, output_tokens: 3_000, cache_read_input_tokens: 437_000, cache_creation_input_tokens: 1_000 } }
     })
     // the engine's own end of a turn
     on('turn.complete', async ($, e) => ({ text: e.answer }))
@@ -2638,7 +2656,7 @@ describe('the context guard', () => {
     await wait(4_000)
     expect(compacted).toEqual([claudeKeep('Practice RBAC')])
     // done: logged for the ops screen
-    expect(world.events.at(-1)).toMatchObject({ kind: 'compact', workspace: 'practice-rbac', agent: 'claude', text: 'Practice RBAC: Claude compacted (its context was 85% full)' })
+    expect(world.events.at(-1)).toMatchObject({ kind: 'compact', workspace: 'practice-rbac', agent: 'claude', text: 'Practice RBAC: Claude compacted at its hand-off (its context was 437k tokens; it read 437k tokens from the cache, 3k afresh)' })
     // vetoed (a hook, a turn begun): asked, not logged
     isVetoed = true
     await end(`Done.\n${READY_CODEX}`, 'turn-v1')
@@ -2676,138 +2694,53 @@ describe('the context guard', () => {
     world.turns = { 'session-104': `busy\tturn-c5\t${new Date(NOW).toISOString()}\t` }
     files.set(`${ledger}/pass-turn-c4`, '')
     await wait(4_000)
-    // below the line: no
-    percent = 40
-    await end(`Done.\n${READY_CODEX}`, 'turn-c6')
-    files.set(`${ledger}/pass-turn-c6`, '')
-    await wait(4_000)
-    expect(compacted).toHaveLength(3)
-    // the relay in notify mode, or the guard off: no
-    percent = 90
-    for (const relay of [relayOn({ mode: 'notify' }), relayOn()]) {
-      files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, checkout: '/Users/u/dev/web-app', relay, ...(relay.mode === 'auto' ? { compactAt: 0 } : {}) }] }))
-      await clock.advance(4_000)
-      await $.command.run(SESSIONS)
-      await end(`Done.\n${READY_CODEX}`, `turn-n-${relay.mode}`)
-      files.set(`${ledger}/pass-turn-n-${relay.mode}`, '')
+    // below the line (a token short of it), or no count yet: no
+    for (const now of [COMPACT_FROM - 1, undefined]) {
+      tokens = now
+      await end(`Done.\n${READY_CODEX}`, `turn-c6-${now}`)
+      files.set(`${ledger}/pass-turn-c6-${now}`, '')
       await wait(4_000)
     }
     expect(compacted).toHaveLength(3)
-  })
-
-  test('when Claude compacts: at once near the window; else just before its prompt cache expires; never below the line', async () => {
-    expect([COMPACT_AT, COMPACT_NOW_AT]).toEqual([50, 80])
-    // near the window (80%, or the workspace's line if higher): at once
-    expect(compactPlan(50, 85, 3_600_000)).toEqual({ when: 'now' })
-    expect(compactPlan(50, 80, 3_600_000)).toEqual({ when: 'now' })
-    expect(compactPlan(90, 85, 3_600_000)).toBeUndefined()
-    expect(compactPlan(90, 92, 3_600_000)).toEqual({ when: 'now' })
-    // from the line up: 5 minutes before an hour's cache ends, 90 seconds before a 5-minute one's (also when unknown)
-    expect(compactPlan(50, 79, 3_600_000)).toEqual({ when: 'before-expiry', afterMs: 3_300_000 })
-    expect(compactPlan(50, 61, 300_000)).toEqual({ when: 'before-expiry', afterMs: 210_000 })
-    expect(compactPlan(50, 61, undefined)).toEqual({ when: 'before-expiry', afterMs: 210_000 })
-    // below the line, or the line off: never
-    expect(compactPlan(50, 49, 3_600_000)).toBeUndefined()
-    expect(compactPlan(0, 99, 3_600_000)).toBeUndefined()
-    // the cache's life and when the last reply's request was sent, from what Claude's records say
-    expect(cacheOf('1h\n2026-10-10T20:00:00.000Z\nturn-1\n')).toEqual({ lifeMs: 3_600_000, sentAt: Date.parse('2026-10-10T20:00:00.000Z'), replyId: 'turn-1' })
-    expect(cacheOf('5m\n\n\n')).toEqual({ lifeMs: 300_000 })
-    expect([cacheOf(''), cacheOf('2h\nsoon\n')]).toEqual([{}, {}])
-  })
-
-  test('below the window, a workspace\'s Claude compacts just before its cache expires, if still idle; a hand-back, a prompt or a command first keeps it whole', { timeoutMs: 60_000 }, async ($, on) => {
-    const { files, clock } = engine(on, machine, { termProgram: 'Apple_Terminal', selfId: 'session-104' })
-    let percent = 61
-    on('session.usage', async () => ({ value: { startedAt: NOW, context: { tokens: percent * 10_000, window: 1_000_000, percent }, rateLimits: [] } }))
-    const compacted: (string | undefined)[] = []
-    on('session.compact', async ($, e) => {
-      compacted.push(e.instructions)
-      return { messages: [{ role: 'user' as const, text: 'summary', toolUses: [] }], usage: { input_tokens: 2_000, output_tokens: 3_000, cache_read_input_tokens: 610_000, cache_creation_input_tokens: 1_000 } }
-    })
-    on('turn.complete', async ($, e) => ({ text: e.answer }))
-    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, checkout: '/Users/u/dev/web-app', relay: relayOn() }] }))
-    world.tmuxPanes = 'ws-practice-rbac\tpeers\t/dev/ttys022\t%1\tclaude\nws-practice-rbac\tpeers\t/dev/ttys045\t%2\tcodex\n'
-    world.tmuxOwner = String(NOW)
-    await $.session.start(START)
-    await $.command.run(SESSIONS)
-    // the pane closed again, so the hours waited are collected at the status line's pace, not the pane's
-    await $.command.run(SESSIONS)
-    const ledger = '/Users/u/Library/Application Support/live-sessions/relayed'
-    // the engine's time, kept here as the clock is moved
-    let at = NOW
-    const move = async (ms: number) => {
-      await clock.advance(ms)
-      at += ms
-    }
-    const minutes = async (n: number) => {
-      for (let m = 0; m < n; m++) await move(60_000)
-    }
-    const iso = (ms: number) => new Date(ms).toISOString()
-    // a hand-off whose reply took `took` to come (its request sent then), on a cache of `life`; passed at once unless said
-    const handOff = async (id: string, o: { life?: string; took?: number; isPassed?: boolean } = {}) => {
-      world.cache = `${o.life ?? '1h'}\n${iso(at - (o.took ?? 60_000))}\n${id}\n`
-      world.turns = { 'session-104': `done\t${id}\t${iso(at)}\t${READY_CODEX}` }
-      if (o.isPassed !== false) files.set(`${ledger}/pass-${id}`, '')
-      await $.turn.complete({ answer: `Done.\n${READY_CODEX}`, durationMs: 1_000, isAborted: false, turnId: id, reason: 'answer' })
-    }
-    // its hand-off passed at 61%, an hour's cache, its reply a minute long: compacted 55 minutes after the request was
-    // sent (54 after the reply), not before; what its summary read from the cache is logged
-    await handOff('turn-e1')
-    await minutes(53)
-    expect(compacted).toEqual([])
-    await minutes(2)
-    expect(compacted).toEqual([claudeKeep('Practice RBAC')])
-    expect(world.events.at(-1)).toMatchObject({ kind: 'compact', agent: 'claude', text: 'Practice RBAC: Claude compacted (before its prompt cache expired, idle 54m; its context was 61% full; it read 610k tokens from the cache, 3k afresh)' })
-    // Codex hands back within the hour (a new turn of Claude's): its context stays whole
-    await handOff('turn-e2')
-    await minutes(20)
-    world.turns = { 'session-104': `done\tturn-e3\t${iso(at)}\tWorking on it.` }
-    await minutes(40)
-    // a command typed to it after its reply (/model): the same turn, but not idle
-    await handOff('turn-e4')
-    await minutes(10)
-    world.turns = { 'session-104': `done\tturn-e4\t${iso(at - 600_000)}\t${READY_CODEX}\t${iso(at)}` }
-    await minutes(50)
-    // a turn under way when the time comes
-    await handOff('turn-e5')
-    await minutes(10)
-    world.turns = { 'session-104': `busy\tturn-e6\t${iso(at)}\t` }
-    await minutes(50)
-    // cleared into another conversation while it waited
-    await handOff('turn-e7')
-    await minutes(10)
-    world.sessionId = 'session-new'
-    await minutes(50)
-    world.sessionId = undefined
-    // compacted meanwhile by other means (the owner's /compact): below the line at the time
-    await handOff('turn-e8')
-    await minutes(10)
-    percent = 12
-    await minutes(50)
-    percent = 61
-    expect(compacted).toHaveLength(1)
-    // a 5-minute cache, or none its records name: 3.5 minutes after the request was sent, however late the relay passed it
-    for (const life of ['5m', '']) {
-      const before = compacted.length
-      await handOff(`turn-f-${life || 'unknown'}`, { life, isPassed: false })
-      await move(90_000)
-      files.set(`${ledger}/pass-turn-f-${life || 'unknown'}`, '')
-      await move(50_000)
-      expect(compacted.length).toBe(before)
-      await move(20_000)
-      expect(compacted.length).toBe(before + 1)
-    }
-    // its request sent long before (a reply that took 7 minutes on a 5-minute cache): made at the pass, and said to
-    // be after the cache expired
-    await handOff('turn-g1', { life: '5m', took: 420_000 })
-    await move(4_000)
+    // at the line: yes
+    tokens = COMPACT_FROM
+    await end(`Done.\n${READY_CODEX}`, 'turn-c7')
+    files.set(`${ledger}/pass-turn-c7`, '')
+    await wait(4_000)
     expect(compacted).toHaveLength(4)
-    expect(world.events.at(-1)?.text).toMatch(/^Practice RBAC: Claude compacted \(after its prompt cache expired, idle 0m; its context was 61% full/)
+    // compacted meanwhile by other means (the owner's /compact) while it waited for the pass: no
+    tokens = 437_000
+    await end(`Done.\n${READY_CODEX}`, 'turn-c8')
+    await wait(2_000)
+    tokens = 15_000
+    files.set(`${ledger}/pass-turn-c8`, '')
+    await wait(4_000)
+    expect(compacted).toHaveLength(4)
+    // the workspace's own line: from 300k, so not at 250k; the relay in notify mode, or the guard off: no
+    tokens = 250_000
+    for (const [relay, line] of [[relayOn(), 300_000], [relayOn({ mode: 'notify' }), undefined], [relayOn(), 0]] as const) {
+      files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, checkout: '/Users/u/dev/web-app', relay, ...(line === undefined ? {} : { compactFrom: line }) }] }))
+      await clock.advance(4_000)
+      await $.command.run(SESSIONS)
+      await end(`Done.\n${READY_CODEX}`, `turn-n-${relay.mode}-${line}`)
+      files.set(`${ledger}/pass-turn-n-${relay.mode}-${line}`, '')
+      await wait(4_000)
+    }
+    expect(compacted).toHaveLength(4)
+    // its own line reached: yes
+    tokens = 300_000
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, checkout: '/Users/u/dev/web-app', relay: relayOn(), compactFrom: 300_000 }] }))
+    await clock.advance(4_000)
+    await $.command.run(SESSIONS)
+    await end(`Done.\n${READY_CODEX}`, 'turn-n-own')
+    files.set(`${ledger}/pass-turn-n-own`, '')
+    await wait(4_000)
+    expect(compacted).toHaveLength(5)
   })
 
-  test('the cache\'s facts are read once the reply is on record, and its time counts only if it is that reply\'s', { timeoutMs: 60_000 }, async ($, on) => {
+  test('an idle Claude is left to Claude Code: below the line nothing waits for its cache, however long it waits', { timeoutMs: 60_000 }, async ($, on) => {
     const { files, clock } = engine(on, machine, { termProgram: 'Apple_Terminal', selfId: 'session-104' })
-    on('session.usage', async () => ({ value: { startedAt: NOW, context: { tokens: 610_000, window: 1_000_000, percent: 61 }, rateLimits: [] } }))
+    on('session.usage', async () => ({ value: { startedAt: NOW, context: { tokens: 150_000, window: 1_000_000, percent: 15 }, rateLimits: [] } }))
     const compacted: (string | undefined)[] = []
     on('session.compact', async ($, e) => {
       compacted.push(e.instructions)
@@ -2819,48 +2752,16 @@ describe('the context guard', () => {
     world.tmuxOwner = String(NOW)
     await $.session.start(START)
     await $.command.run(SESSIONS)
-    await $.command.run(SESSIONS)
-    const ledger = '/Users/u/Library/Application Support/live-sessions/relayed'
-    let at = NOW
-    const move = async (ms: number) => {
-      await clock.advance(ms)
-      at += ms
-    }
-    const iso = (ms: number) => new Date(ms).toISOString()
-    const end = async (id: string) => {
-      world.turns = { 'session-104': `done\t${id}\t${iso(at)}\t${READY_CODEX}` }
-      await $.turn.complete({ answer: `Done.\n${READY_CODEX}`, durationMs: 1_000, isAborted: false, turnId: id, reason: 'answer' })
-    }
-    // at the turn's end its reply is not on record yet (the last cache write a 5-minute one, the time another reply's);
-    // by the pass it is: an hour's cache, its request a minute before. Compacted 55 minutes after that, not at once.
-    world.cache = `5m\n${iso(at - 5_400_000)}\nturn-old\n`
-    await end('turn-a1')
-    await move(4_000)
-    world.cache = `1h\n${iso(at - 64_000)}\nturn-a1\n`
-    files.set(`${ledger}/pass-turn-a1`, '')
-    await move(240_000)
+    world.turns = { 'session-104': `done\tturn-i1\t${new Date(NOW).toISOString()}\t${READY_CODEX}` }
+    files.set('/Users/u/Library/Application Support/live-sessions/relayed/pass-turn-i1', '')
+    await $.turn.complete({ answer: `Done.\n${READY_CODEX}`, durationMs: 1_000, isAborted: false, turnId: 'turn-i1', reason: 'answer' })
+    // two hours idle, its hand-off passed: nothing from here
+    for (let m = 0; m < 120; m++) await clock.advance(60_000)
     expect(compacted).toEqual([])
-    for (let m = 0; m < 52; m++) await move(60_000)
-    expect(compacted).toHaveLength(1)
-    // a time that is another reply's (the reply's first record not in what was read): the turn's end stands in, so not
-    // at once, and never said to be after the cache expired
-    world.cache = `1h\n${iso(at - 5_400_000)}\nturn-old\n`
-    await end('turn-a2')
-    files.set(`${ledger}/pass-turn-a2`, '')
-    await move(10_000)
-    expect(compacted).toHaveLength(1)
-    for (let m = 0; m < 55; m++) await move(60_000)
-    expect(compacted).toHaveLength(2)
-    expect(world.events.at(-1)?.text).toMatch(/before its prompt cache expired/)
-    // a send time later than the turn's end (clocks that disagree): the turn's end, so no later than 3.5 minutes on 5
-    world.cache = `5m\n${iso(at + 600_000)}\nturn-a3\n`
-    await end('turn-a3')
-    files.set(`${ledger}/pass-turn-a3`, '')
-    await move(215_000)
-    expect(compacted).toHaveLength(3)
+    expect(world.events.filter(e => e.kind === 'compact')).toEqual([])
   })
 
-  test('Claude compacts at, in a workspace\'s actions: 50, 60, 70, 80 percent, off', async ($, on) => {
+  test('Claude compacts from, in a workspace\'s actions: 100k, 150k, 200k, 300k, 400k tokens, off', async ($, on) => {
     const { files } = engine(on, machine, { termProgram: 'Apple_Terminal' })
     files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, relay: relayOn() }] }))
     await $.session.start(START)
@@ -2869,11 +2770,16 @@ describe('the context guard', () => {
     await reveal(ui, 'ws:practice-rbac')
     const label = async () => (await ui.find({ key: 'compact practice-rbac' }))?.props.label
     const seen: unknown[] = [await label()]
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 6; i++) {
       await ui.press({ key: 'compact practice-rbac' })
-      seen.push(JSON.parse(files.get(WORKSPACES)!).workspaces[0].compactAt)
+      seen.push(JSON.parse(files.get(WORKSPACES)!).workspaces[0].compactFrom)
     }
-    expect(seen).toEqual(['Claude compacts at: 50% → 60%', 60, 70, 80, 0, 50])
+    seen.push(await label())
+    expect(seen).toEqual(['Claude compacts from: 200k → 300k', 300_000, 400_000, 0, 100_000, 150_000, 200_000, 'Claude compacts from: 200k → 300k'])
+    await ui.press({ key: 'compact practice-rbac' })
+    await ui.press({ key: 'compact practice-rbac' })
+    await ui.press({ key: 'compact practice-rbac' })
+    expect(await label()).toBe('Claude compacts from: off → 100k')
     await ui.unmount()
   })
 })
@@ -3041,7 +2947,7 @@ describe('the drift check', () => {
     await reveal(ui, 'ws:practice-rbac')
     await Promise.all([ui.press({ key: 'compact practice-rbac' }), ui.press({ key: 'check-every practice-rbac' }), ui.press({ key: 'relay-bar practice-rbac' })])
     const saved = JSON.parse(files.get(WORKSPACES)!).workspaces[0]
-    expect([saved.compactAt, saved.checkEvery, saved.relay.mode]).toEqual([60, 8, 'notify'])
+    expect([saved.compactFrom, saved.checkEvery, saved.relay.mode]).toEqual([300_000, 8, 'notify'])
     await ui.unmount()
   })
 

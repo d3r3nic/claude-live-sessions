@@ -3,7 +3,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { ClaudeSession, CodexSession, Place, Relay, Snapshot, Thread, Workspace } from '../types'
 import type { Screen } from './workspaces'
-import { AGENT_COMMANDS, afterOwner, afterStep, cacheOf, CACHE_SCRIPT, claudeKeep, COMPACT_AT, compactPlan, cueOf, cutBytes, eventOf, EVENT_SCRIPT, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_SCRIPT } from './relay'
+import { AGENT_COMMANDS, afterOwner, afterStep, claudeKeep, COMPACT_FROM, cueOf, cutBytes, eventOf, EVENT_SCRIPT, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, tokensSaid, TURN_SCRIPT } from './relay'
 import type { RelayEvent, Side, Step } from './relay'
 import { branchOf, checkDue, DRIFT_EVERY, driftRequest, parseVerdict, recordFolderOf, RECORDS_SCRIPT } from './drift'
 import { bringable, codexDir, envOfProfile, codexFlags, CODEX_MODE_SCRIPT, CODEX_TASK_SCRIPT, codexTaskState, JOB_COMMANDS, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, toggled, withThreads } from './bring'
@@ -1166,14 +1166,15 @@ async function cycleRelay($: EngineInterface, id: string) {
 /** From this many columns a workspace is drawn in a box (its border and padding take 4); narrower, a session row would not fit in one. */
 const BOXED_FROM = 60
 
-/** The context fills a workspace's Claude may compact itself at, pressed round; 0 is off. */
-const COMPACT_STEPS = [50, 60, 70, 80, 0]
-const nextCompactAt = (now: number) => COMPACT_STEPS[(COMPACT_STEPS.indexOf(now) + 1) % COMPACT_STEPS.length] ?? COMPACT_AT
+/** The context sizes, in tokens, a workspace's Claude may compact itself from, pressed round; 0 is off. */
+const COMPACT_STEPS = [100_000, 150_000, 200_000, 300_000, 400_000, 0]
+const nextCompactFrom = (now: number) => COMPACT_STEPS[(COMPACT_STEPS.indexOf(now) + 1) % COMPACT_STEPS.length] ?? COMPACT_FROM
+const compactSaid = (n: number) => (n === 0 ? 'off' : tokensSaid(n))
 
-/** How full Claude's context may get before it compacts itself at a hand-off: 50, 60, 70, 80 percent, off. */
-async function cycleCompactAt($: EngineInterface, id: string) {
+/** How large Claude's context may grow before it compacts itself at a hand-off: 100k, 150k, 200k, 300k, 400k tokens, off. */
+async function cycleCompactFrom($: EngineInterface, id: string) {
   const home = (await $.env.get('HOME')) ?? ''
-  await changeWorkspaces($, home, list => list.map(ws => (ws.id === id ? { ...ws, compactAt: nextCompactAt(ws.compactAt ?? COMPACT_AT) } : ws)))
+  await changeWorkspaces($, home, list => list.map(ws => (ws.id === id ? { ...ws, compactFrom: nextCompactFrom(ws.compactFrom ?? COMPACT_FROM) } : ws)))
   await refresh($, 0)
 }
 
@@ -1395,20 +1396,20 @@ async function logEvent($: EngineInterface, home: string, event: RelayEvent) {
 
 /**
  * In a Claude session that is a workspace's agent: once a turn of its ends
- * with a hand-off to Codex (READY FOR CODEX) and the relay is on (auto), it
- * compacts itself, told what to keep, between turns (refused while one
- * runs), as compactPlan says: at once, after the relay has passed that
- * hand-off (its ledger step), when its context is near the window; else,
- * from the workspace's `compactAt` line up, just before its prompt cache
- * expires, if that turn is still its last then (no hand-back, nothing typed
- * to it) and it is still that conversation. Never after a cue for the owner
- * (NEEDS USER, SCOPE CLOSED): it waits for the owner's answer. A wait cut
- * by a reload of this plugin or the session's end leaves it as it is.
+ * with a hand-off to Codex (READY FOR CODEX), the relay is on (auto) and its
+ * context has grown to the workspace's `compactFrom` line (COMPACT_FROM
+ * unless set), it compacts itself, told what to keep, as soon as the relay
+ * has passed that hand-off (its ledger step), while Codex works and its
+ * prompt cache is warm: every request of its next turn then re-reads a small
+ * context, not the whole. Between turns only (refused while one runs), while
+ * that turn is still its last and it is still that conversation. Never after
+ * a cue for the owner (NEEDS USER, SCOPE CLOSED): it waits for the owner's
+ * answer. An idle Claude is left to Claude Code, which compacts it before
+ * its prompt cache expires.
  */
 async function compactAtHandOff($: EngineInterface, answer: string) {
   const cue = answer.split('\n').map(cueOf).filter(c => c !== undefined).at(-1)
   if (cue?.kind !== 'ready' || cue.to !== 'codex') return
-  const endedAt = await $.clock.now()
   const home = (await $.env.get('HOME')) ?? ''
   const id = await $.session.id()
   const snap = await read($, snapshot)
@@ -1417,11 +1418,13 @@ async function compactAtHandOff($: EngineInterface, answer: string) {
   const ws = pane === undefined ? undefined : snap.workspaces.find(w => tmuxName(w) === pane.session)
   // a workspace of one agent has no hand-off to wait for, even with a relay turned on there by hand
   if (self === undefined || ws === undefined || pane?.window !== 'claude' || ws.only !== undefined || ws.relay?.mode !== 'auto') return
-  const at = ws.compactAt ?? COMPACT_AT
-  const { context } = await $.session.usage()
-  if (context.percent === undefined) return
-  // below the line, or the line off: nothing to wait for
-  if (compactPlan(at, context.percent, undefined) === undefined) return
+  const line = ws.compactFrom ?? COMPACT_FROM
+  // below the line, or the line off: nothing to do
+  const isOver = async () => {
+    const { tokens } = (await $.session.usage()).context
+    return line > 0 && tokens !== undefined && tokens >= line ? tokens : undefined
+  }
+  if ((await isOver()) === undefined) return
   const file = transcriptPath(`${home}/.${self.profile}`, self.startCwd, id)
   // its last turn, as the relay reads its records: that turn (once its reply is written), still its last, until the
   // relay has taken up its hand-off (its ledger step); not in two minutes (Codex at work, the relay waiting for you):
@@ -1439,36 +1442,16 @@ async function compactAtHandOff($: EngineInterface, answer: string) {
     if (waited >= 120_000) return
     await $.clock.sleep(2_000)
   }
-  // its cache, read once its reply is on record (the relay has passed it): when that reply's request was sent counts
-  // only if the time is that reply's (else the turn's end stands in)
-  const cache = cacheOf((await $.process.run(['/bin/sh', '-c', CACHE_SCRIPT, 'sh', file], { timeoutMs: 20_000 }).catch(() => ({ stdout: '' }))).stdout)
-  const plan = compactPlan(at, context.percent, cache.lifeMs)
-  if (plan === undefined) return
-  let said = `its context was ${Math.round(context.percent)}% full`
-  if (plan.when === 'before-expiry') {
-    // the cache's life counts from when its last request was sent (its reply took a while to come): from then,
-    // idle until just before it expires; a hand-back, a prompt, a command typed to it or another conversation
-    // since, and it is left
-    const sentAt = Math.min(cache.replyId === turnId ? cache.sentAt ?? endedAt : endedAt, endedAt)
-    const wait = sentAt + plan.afterMs - (await $.clock.now())
-    if (wait > 0) await $.clock.sleep(wait)
-    const turn = await lastTurn()
-    if (turn?.state !== 'done' || turn.id !== turnId || (turn.typedAt !== undefined && turn.typedAt > turn.at)) return
-    const now = await $.session.usage()
-    if (now.context.percent === undefined || now.context.percent < at) return
-    // woken late (the Mac asleep, the process held up): still made, as the next turn would pay more, and said so
-    const idle = (await $.clock.now()) - sentAt
-    const when = idle < (cache.lifeMs ?? 300_000) ? 'before its prompt cache expired' : 'after its prompt cache expired'
-    said = `${when}, idle ${Math.round(((await $.clock.now()) - endedAt) / 60_000)}m; its context was ${Math.round(now.context.percent)}% full`
-  }
-  // still the same conversation (not cleared or resumed into another while it waited)
+  // still the same conversation (not cleared or resumed into another while it waited), and still over the line (not
+  // compacted meanwhile by other means, as the owner's /compact)
   if ((await $.session.id()) !== id) return
+  const tokens = await isOver()
+  if (tokens === undefined) return
   // logged once it has been done (not refused, not vetoed), with what its summary read from the cache and afresh
   const result = await $.session.compact({ instructions: claudeKeep(ws.name) }).catch(() => undefined)
   if (result === undefined || result.skip !== undefined) return
-  const k = (n: number) => `${Math.round(n / 1000)}k`
-  const spent = result.usage === undefined ? '' : `; it read ${k(result.usage.cache_read_input_tokens)} tokens from the cache, ${k(result.usage.input_tokens + result.usage.cache_creation_input_tokens)} afresh`
-  await logEvent($, home, { kind: 'compact', text: `${ws.name}: Claude compacted (${said}${spent})`, workspace: ws.id, agent: 'claude' })
+  const spent = result.usage === undefined ? '' : `; it read ${tokensSaid(result.usage.cache_read_input_tokens)} tokens from the cache, ${tokensSaid(result.usage.input_tokens + result.usage.cache_creation_input_tokens)} afresh`
+  await logEvent($, home, { kind: 'compact', text: `${ws.name}: Claude compacted at its hand-off (its context was ${tokensSaid(tokens)} tokens${spent})`, workspace: ws.id, agent: 'claude' })
 }
 
 /** Forgets a workspace (the command's `rm` and the pane's Remove): its tmux session keeps running. */
@@ -1519,7 +1502,7 @@ async function tick($: EngineInterface, hasStatusLine: boolean) {
 }
 
 export const register: Register = on => {
-  // a workspace's Claude compacts itself after a hand-off, when its context is full enough: never holds up the turn
+  // a workspace's Claude compacts itself after a hand-off, when its context has grown large enough: never holds up the turn
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
     if (e.agentId === undefined && e.reason === 'answer') void compactAtHandOff($, e.answer).catch(() => undefined)
@@ -1982,7 +1965,7 @@ export const register: Register = on => {
                     ? []
                     : [
                         <Button key={`relay-bar ${ws.key}`} label={`Relay: ${ws.relay.mode} → ${RELAY_NEXT[ws.relay.mode]}`} onPress={() => void cycleRelay($, ws.key)} />,
-                        <Button key={`compact ${ws.key}`} label={`Claude compacts at: ${ws.compactAt === 0 ? 'off' : `${ws.compactAt}%`} → ${nextCompactAt(ws.compactAt) === 0 ? 'off' : `${nextCompactAt(ws.compactAt)}%`}`} onPress={() => void cycleCompactAt($, ws.key)} />,
+                        <Button key={`compact ${ws.key}`} label={`Claude compacts from: ${compactSaid(ws.compactFrom)} → ${compactSaid(nextCompactFrom(ws.compactFrom))}`} onPress={() => void cycleCompactFrom($, ws.key)} />,
                         <Button key={`check ${ws.key}`} label="Check now" onPress={() => void checkNow($, ws.key)} />,
                         <Button key={`check-every ${ws.key}`} label={`Check: ${everyLabel(ws.checkEvery)} → ${everyLabel(nextCheckEvery(ws.checkEvery))}`} onPress={() => void cycleCheckEvery($, ws.key)} />,
                       ]),
