@@ -192,8 +192,8 @@ export function relaySteps(ws: Pick<Workspace, 'name' | 'relay'> & Partial<Pick<
  * How large Claude's context may grow, in tokens, before it compacts itself once its hand-off is passed
  * (compactAtHandOff): every request re-reads the whole context, so from here a compaction costs less than the
  * requests after it save. Codex compacts itself, by its own measure: the relay never types /compact into it.
- * Nothing waits here for an idle Claude: compacted at its hand-off, it waits below the line, so a cache that expires
- * meanwhile costs at most a re-read of that. Claude Code has also been seen compacting idle conversations itself,
+ * Nothing waits here for an idle Claude: after a hand-off it compacted at, it waits below the line, so a cache that
+ * expires meanwhile costs at most a re-read of that. Claude Code has also been seen compacting idle conversations itself,
  * about 55 minutes after their last activity (2026-10-10 on, 2.1.294-2.1.296), but not every time, so nothing here
  * counts on it.
  */

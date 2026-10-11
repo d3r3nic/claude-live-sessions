@@ -2749,7 +2749,7 @@ describe('the context guard', () => {
     expect(compacted).toHaveLength(6)
   })
 
-  test('an idle Claude is left to Claude Code: below the line nothing waits for its cache, however long it waits', { timeoutMs: 60_000 }, async ($, on) => {
+  test('an idle Claude below the line is left as it is: nothing waits for its cache, however long it waits', { timeoutMs: 60_000 }, async ($, on) => {
     const { files, clock } = engine(on, machine, { termProgram: 'Apple_Terminal', selfId: 'session-104' })
     on('session.usage', async () => ({ value: { startedAt: NOW, context: { tokens: 150_000, window: 1_000_000, percent: 15 }, rateLimits: [] } }))
     const compacted: (string | undefined)[] = []
