@@ -1,8 +1,10 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { ClaudeSession, CodexSession, Place, Relay, Snapshot, Thread, Workspace } from '../types'
+import type { ClaudeSession, CodexSession, Place, Relay, SessionContext, Snapshot, Thread, UsageView, Workspace } from '../types'
 import type { Screen } from './workspaces'
+import { accountOfFile, applyScan, claudeLimits, clockOf, currentLimits, EMPTY_USAGE, limitSaid, markKey, mergeLimits, offsetOf, OFFSETS_SCRIPT, parseContexts, rankUsage, scanInput, sharedLimitsFrom, usageFrom, USAGE_FILES_SCRIPT, USAGE_KEEP_MS, WINDOW_MS, wholeFiles } from './usage'
+import type { Limit, UsageState } from './usage'
 import { AGENT_COMMANDS, afterOwner, afterStep, claudeKeep, COMPACT_FROM, cueOf, cutBytes, eventOf, EVENT_SCRIPT, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, tokensSaid, TURN_SCRIPT } from './relay'
 import type { RelayEvent, Side, Step } from './relay'
 import { branchOf, checkDue, DRIFT_EVERY, driftRequest, parseVerdict, recordFolderOf, RECORDS_SCRIPT } from './drift'
@@ -279,6 +281,24 @@ async function recentDirs($: EngineInterface, files: readonly string[], now: num
   return dirs
 }
 
+/**
+ * Each file's context at its last request (usage.pl ctx, over its last 256
+ * KB): one run for all of them, read again at most every CONTEXT_MAX_AGE_MS.
+ */
+async function contextsOf($: EngineInterface, files: readonly string[], now: number) {
+  if (files.length === 0) return new Map<string, SessionContext>()
+  const key = [...files].sort().join('\n')
+  if (contextRead?.key === key && now - contextRead.at < CONTEXT_MAX_AGE_MS) return contextRead.contexts
+  const out = await $.process
+    .run(['/usr/bin/perl', `${$.plugin.root}/hooks/usage.pl`, 'ctx', ...files], { timeoutMs: 20_000 })
+    .catch(() => undefined)
+  const contexts = parseContexts(out?.stdout ?? '')
+  if (out !== undefined) contextRead = { key, at: now, contexts }
+  return contexts
+}
+let contextRead: { key: string; at: number; contexts: Map<string, SessionContext> } | undefined
+const CONTEXT_MAX_AGE_MS = 10_000
+
 async function codexThreads(
   $: EngineInterface,
   codexHome: string,
@@ -389,8 +409,14 @@ async function collect($: EngineInterface, home: string, now: number): Promise<S
   const recentOf = (key: string) => recent.get(fileOf.get(key) ?? '') ?? []
   const allDirs = [...claudeRows.map(s => s.cwd), ...started.map(s => s.cwd), ...[...recent.values()].flat()]
   const known = await placesOf($, allDirs, now, problems)
-  const claude = claudeRows.map(s => ({ ...s, cwd: workDir(s.cwd, recentOf(`claude-${s.pid}`), known) }))
-  const codex = started.map(s => ({ ...s, cwd: workDir(s.cwd, recentOf(`codex-${s.key}`), known) }))
+  // and how large its context is, as its records say
+  const contexts = await contextsOf($, [...new Set(fileOf.values())], now)
+  const contextOf = (key: string) => {
+    const context = contexts.get(fileOf.get(key) ?? '')
+    return context === undefined ? {} : { context }
+  }
+  const claude = claudeRows.map(s => ({ ...s, cwd: workDir(s.cwd, recentOf(`claude-${s.pid}`), known), ...contextOf(`claude-${s.pid}`) }))
+  const codex = started.map(s => ({ ...s, cwd: workDir(s.cwd, recentOf(`codex-${s.key}`), known), ...contextOf(`codex-${s.key}`) }))
   const places = Object.fromEntries(
     [...claude, ...codex].map(s => [s.cwd, known[s.cwd] ?? { repo: '', name: '', tree: s.cwd, branch: '' }] as const),
   )
@@ -1497,9 +1523,181 @@ const isPaneVisible = async ($: EngineInterface) =>
 async function tick($: EngineInterface, hasStatusLine: boolean) {
   const isVisible = await isPaneVisible($)
   if (!isVisible && !hasStatusLine) return
+  // this account's Claude limits, for every account's panes; the usage, while a pane shows it
+  void shareLimits($).catch(() => undefined)
+  if (isVisible) void refreshUsage($).catch(() => undefined)
   const maxAgeMs = isVisible ? VISIBLE_MAX_AGE_MS : IDLE_MAX_AGE_MS
   if ((await $.clock.now()) - lastAttemptAt < maxAgeMs) return
   await refresh($, maxAgeMs)
+}
+
+/** Where the usage read so far is kept, and each account's Claude limits, for every session on the Mac. */
+const usagePath = (home: string) => `${home}/Library/Caches/live-sessions/usage.json`
+const limitsPath = (home: string) => `${home}/Library/Caches/live-sessions/limits.json`
+/** The usage is read again at most this often (by any session: one read lately is taken as it is). */
+const USAGE_MAX_AGE_MS = 120_000
+/** A session's own Claude limits are written for the others at most this often. */
+const LIMITS_EVERY_MS = 60_000
+/** How many files usage.pl reads in one run (its output stays far below what a run may print). */
+const SCAN_BATCH = 100
+/** The projects listed per tool and window; the rest are counted. */
+const USAGE_ROWS = 8
+
+const EMPTY_VIEW: UsageView = { at: 0, problem: '', offset: 0, offsets: {}, accounts: {} }
+const usageShown = atom({ plugin: 'live-sessions', key: 'usageShown' } as const, false)
+const usageWindow = atom({ plugin: 'live-sessions', key: 'usageWindow' } as const, '7d' as '5h' | '7d')
+const usage = atom({ plugin: 'live-sessions', key: 'usage' } as const, EMPTY_VIEW)
+
+const readJson = async ($: EngineInterface, path: string): Promise<unknown> => {
+  const text = await $.fs.read(path).catch(() => undefined)
+  if (text === undefined) return undefined
+  try {
+    return JSON.parse(text) as unknown
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * This session's account's Claude limits, as its last response reported
+ * them, written for the panes of every account (a session reads only its
+ * own): when they changed, or a minute on.
+ */
+let limitsSharedAt = 0
+let limitsShared = ''
+async function shareLimits($: EngineInterface) {
+  const now = await $.clock.now()
+  const home = (await $.env.get('HOME')) ?? ''
+  const own = await ownEnv($, home)
+  if (own === undefined) return
+  const limits = claudeLimits(await $.session.usage().then(u => u.rateLimits).catch(() => []), now)
+  const said = JSON.stringify(Object.entries(limits).map(([w, l]) => [w, l?.used, l?.resetsAt]))
+  if (Object.keys(limits).length === 0 || (said === limitsShared && now - limitsSharedAt < LIMITS_EVERY_MS)) return
+  limitsSharedAt = now
+  limitsShared = said
+  // with what the account's other sessions read: within a window the highest (an idle session holds an older one)
+  const all = sharedLimitsFrom(await readJson($, limitsPath(home)))
+  const merged = mergeLimits(all[own], limits)
+  const reading = (l: Partial<Record<string, Limit>> | undefined) => JSON.stringify(Object.entries(l ?? {}).map(([w, r]) => [w, r?.used, r?.resetsAt]))
+  if (reading(merged) !== reading(all[own])) await $.fs.write(limitsPath(home), `${JSON.stringify({ ...all, [own]: merged })}\n`)
+}
+
+/**
+ * The usage as the pane shows it: the counts read on from where they were
+ * left (usage.pl, a batch of files at a time; none read again within
+ * USAGE_MAX_AGE_MS, by any session), then each account's limits and, per
+ * tool and window, its projects. One read at a time.
+ */
+let usageRun: Promise<void> | undefined
+let usageReadAt = 0
+async function refreshUsage($: EngineInterface, isAsked = false) {
+  const now = await $.clock.now()
+  if (usageRun !== undefined || (!isAsked && now - usageReadAt < USAGE_MAX_AGE_MS)) return usageRun
+  usageReadAt = now
+  usageRun = (async () => {
+    const home = (await $.env.get('HOME')) ?? ''
+    let state: UsageState = usageFrom(await readJson($, usagePath(home)))
+    let problem = ''
+    if (now - state.at >= USAGE_MAX_AGE_MS) {
+      const configDirs = (await $.fs.list(home).catch(() => []))
+        .filter(d => d.kind === 'dir' && /^\.(claude|codex)(-[\w.-]+)?$/.test(d.name))
+        .map(d => `${home}/${d.name}`)
+      const listed = await $.process.run(['/bin/sh', '-c', USAGE_FILES_SCRIPT, 'sh', ...configDirs], { timeoutMs: 60_000 }).catch(() => undefined)
+      const files = (listed?.stdout ?? '').split('\n').filter(f => f.startsWith('/') && accountOfFile(home, f) !== undefined)
+      const since = new Date(now - USAGE_KEEP_MS).toISOString()
+      for (let i = 0; i < files.length && listed !== undefined; i += SCAN_BATCH) {
+        const batch = files.slice(i, i + SCAN_BATCH)
+        const out = await $.process
+          .run(['/usr/bin/perl', `${$.plugin.root}/hooks/usage.pl`, 'scan', since], { stdin: scanInput(batch, state), timeoutMs: 300_000 })
+          .catch((error: unknown) => ({ exitCode: -1, stdout: '', stderr: message(error), isStdoutTruncated: false }))
+        const isCut = out.isStdoutTruncated === true
+        // a failed run is not taken: its files are read from where they were, next time
+        if (out.exitCode !== 0 && !isCut) {
+          problem = `usage: ${firstLine(out.stderr) || `perl exited ${out.exitCode}`}`
+          break
+        }
+        // one cut short (more than a run may print): the files it finished are taken, the rest read on next time
+        const taken = isCut ? wholeFiles(out.stdout) : out.stdout
+        if (isCut && taken === '') problem = 'usage: too much output from one file'
+        state = applyScan(state, taken, now, f => accountOfFile(home, f))
+      }
+      if (listed === undefined) problem = 'usage: the transcripts could not be listed'
+      // a file no longer listed (older than 8 days, gone) is forgotten; a rollout archived meanwhile keeps its mark
+      const listedKeys = new Set(files.map(markKey))
+      if (listed !== undefined) state = { ...state, files: Object.fromEntries(Object.entries(state.files).filter(([f]) => listedKeys.has(f))) }
+      if (state !== EMPTY_USAGE) await $.fs.write(usagePath(home), `${JSON.stringify(state)}\n`).catch(() => undefined)
+    }
+    // each folder named for its project: its repository, else the folder
+    const dirs = [...new Set(Object.keys(state.slots).map(k => k.split('\t').slice(2).join('\t')))]
+    const places = await placesOf($, dirs, now, [])
+    const own = await ownEnv($, home)
+    const live = claudeLimits(await $.session.usage().then(u => u.rateLimits).catch(() => []), now)
+    const shared = sharedLimitsFrom(await readJson($, limitsPath(home)))
+    const placeOf = (dir: string) => {
+      const place = places[dir]
+      return place !== undefined && place.repo !== '' ? { key: place.repo, name: place.name } : { key: dir, name: dir.startsWith(`${home}/`) ? `~${dir.slice(home.length)}` : dir === home ? '~' : dir }
+    }
+    const accounts = [...new Set([...(await read($, snapshot)).envs, ...Object.keys(state.codexLimits), ...Object.keys(shared), ...(own === undefined ? [] : [own])])]
+    const view: UsageView = { at: state.at, problem, offset: 0, offsets: {}, accounts: {} }
+    for (const account of accounts) {
+      const limits = {
+        claude: currentLimits(account === own ? mergeLimits(shared[account], live) : shared[account], now),
+        codex: currentLimits(state.codexLimits[account], now),
+      }
+      const ranks: UsageView['accounts'][string]['ranks'] = {}
+      for (const tool of ['claude', 'codex'] as const) {
+        for (const window of ['5h', '7d'] as const) {
+          const limit = limits[tool][window]
+          const ranked = rankUsage(state, { tool, account, window, now, placeOf, ...(limit === undefined ? {} : { limit }) })
+          if (ranked.rows.length > 0) ranks[`${tool} ${window}`] = { since: ranked.since, rows: ranked.rows.slice(0, USAGE_ROWS), more: Math.max(0, ranked.rows.length - USAGE_ROWS) }
+        }
+      }
+      view.accounts[account] = { limits, ranks }
+    }
+    // the Mac's offset from UTC at each time said (now, each reset, each window's start), as daylight saving has it then
+    const times = [now, now - WINDOW_MS['5h'], now - WINDOW_MS['7d'], ...Object.values(view.accounts).flatMap(a => [
+      ...Object.values(a.limits.claude), ...Object.values(a.limits.codex),
+    ].flatMap(l => (l?.resetsAt === undefined ? [] : [l.resetsAt])).concat(Object.values(a.ranks).map(r => r.since)))]
+    const unique = [...new Set(times)]
+    const offsets = await $.process.run(['/bin/sh', '-c', OFFSETS_SCRIPT, 'sh', ...unique.map(t => String(Math.floor(t / 1000)))], { timeoutMs: 10_000 }).catch(() => undefined)
+    const lines = (offsets?.stdout ?? '').split('\n')
+    unique.forEach((t, i) => {
+      view.offsets[String(t)] = offsetOf(lines[i] ?? '')
+    })
+    view.offset = view.offsets[String(now)] ?? 0
+    await update($, usage, () => view)
+  })().finally(() => {
+    usageRun = undefined
+  })
+  return usageRun
+}
+
+/** The usage as text (`/sessions usage`): each shown account's limits, then its projects' parts in the window. */
+function usageText(used: UsageView, account: string, window: '5h' | '7d', now: number): string {
+  if (used.at === 0) return `Usage: not counted yet${used.problem === '' ? '' : ` (${used.problem})`}.`
+  const accounts = account === ALL_ACCOUNTS ? Object.keys(used.accounts).sort((a, b) => a.localeCompare(b)) : [account]
+  const clock = clockOf(used, now)
+  const lines = accounts.flatMap(a => (['claude', 'codex'] as const).flatMap(tool => {
+    const of = used.accounts[a]
+    const rank = of?.ranks[`${tool} ${window}`]
+    const limit = of?.limits[tool][window]
+    const head = `${tool === 'claude' ? 'Claude' : 'Codex'} (${a || 'default'}), ${window}${limit === undefined ? '' : `: ${limitSaid(window, limit, now, clock.offsetAt)}`}`
+    if (rank === undefined) return limit === undefined ? [] : [`${head}; nothing counted since ${clock.said(now - WINDOW_MS[window], true)}`]
+    const rows = rank.rows.map(r => `${r.name} ${Math.round(r.share * 100)}%${r.ofLimit === undefined ? '' : ` (≈ ${r.ofLimit < 1 ? '<1' : Math.round(r.ofLimit)}% of the limit)`}`)
+    return [`${head}; since ${clock.said(rank.since, true)}: ${rows.join(', ')}${rank.more === 0 ? '' : `, +${rank.more} more`}`]
+  }))
+  return [...lines, ...(used.problem === '' ? [] : [`! ${used.problem}`])].join('\n') || `Usage: nothing counted in this ${window} window.`
+}
+
+async function toggleUsage($: EngineInterface) {
+  const next = await update($, usageShown, now => !now)
+  await $.store.set('usageShown', next)
+  if (next) void refreshUsage($, true).catch(() => undefined)
+}
+
+async function setUsageWindow($: EngineInterface, window: '5h' | '7d') {
+  await update($, usageWindow, () => window)
+  await $.store.set('usageWindow', window)
 }
 
 export const register: Register = on => {
@@ -1517,7 +1715,7 @@ export const register: Register = on => {
     await $.command.register({
       name: 'sessions',
       description: 'Show or hide the live Claude Code and Codex sessions on this Mac',
-      argumentHint: '[2d | 12h | all | reset]',
+      argumentHint: '[2d | 12h | all | reset | usage [5h | 7d]]',
     })
     await $.command.register({
       name: 'workspace',
@@ -1528,6 +1726,10 @@ export const register: Register = on => {
     if (typeof kept === 'number' && kept >= 0) await update($, activeWindow, () => kept)
     const keptAll = await $.store.get('allAccounts')
     if (typeof keptAll === 'boolean') await update($, allAccounts, () => keptAll)
+    const keptUsage = await $.store.get('usageShown')
+    if (typeof keptUsage === 'boolean') await update($, usageShown, () => keptUsage)
+    const keptWindow = await $.store.get('usageWindow')
+    if (keptWindow === '5h' || keptWindow === '7d') await update($, usageWindow, () => keptWindow)
     const keptOrder = orderFrom(await $.store.get('order'))
     if (keptOrder !== undefined) await update($, manualOrder, () => keptOrder)
     // a status line only where a person sees one; a pane wherever one is opened
@@ -1580,12 +1782,18 @@ export const register: Register = on => {
   })
 
   on('command.run', { command: 'sessions' }, async ($, e) => {
+    const usageAsked = /^usage(?:\s+(5h|7d))?$/i.exec(e.args.trim())
+    if (usageAsked !== null) {
+      await refresh($, VISIBLE_MAX_AGE_MS)
+      await refreshUsage($, true)
+      return { text: usageText(await read($, usage), await shownAccount($, (await $.env.get('HOME')) ?? ''), (usageAsked[1]?.toLowerCase() ?? (await read($, usageWindow))) as '5h' | '7d', await $.clock.now()) }
+    }
     if (e.args.trim().toLowerCase() === 'reset') {
       await resetOrder($)
     } else if (e.args.trim() !== '') {
       const ms = windowFrom(e.args)
       if (ms === undefined) {
-        return { text: 'Usage: /sessions [2d | 12h | all]: list the sessions active that recently; /sessions reset: back to the automatic order.' }
+        return { text: 'Usage: /sessions [2d | 12h | all]: list the sessions active that recently; /sessions reset: back to the automatic order; /sessions usage [5h | 7d]: each project\'s part of each account\'s limits.' }
       }
       await setWindow($, ms)
     } else if (await isPaneVisible($)) {
@@ -1595,6 +1803,8 @@ export const register: Register = on => {
     await refresh($, VISIBLE_MAX_AGE_MS)
     await learnBackground($)
     const opened = await $.ui.open({ id: PANE, title: TITLE })
+    // its limits (and usage) read as it opens, not at the next tick
+    void refreshUsage($).catch(() => undefined)
     const windowMs = await read($, activeWindow)
     const showing = windowMs === 0 ? 'all sessions' : `active in the last ${windowLabel(windowMs)}`
     if (opened.isPlaced) return { text: `Sessions pane opened (${showing}).` }
@@ -1615,13 +1825,15 @@ export const register: Register = on => {
     const width = e.props.bodyColumns
     const height = e.props.scroll.bodyRows
     const hasWhere = width >= 64
+    // each session's context, where a row has room for it
+    const hasContext = width >= 80
     const order = await read($, manualOrder)
     const view = viewOf(snap, { home, now, windowMs, selfId, order })
     // a press reaches another Terminal tab or window, so only inside Terminal.app
     const canOpen = (await $.env.get('TERM_PROGRAM')) === 'Apple_Terminal'
     const hasMove = hasWhere && canOpen
     // a session row's title, in a row `w` wide
-    const titleWidthAt = (w: number) => Math.max(8, w - (6 + 7 + 10 + (hasWhere ? 9 : 0) + 5 + 10))
+    const titleWidthAt = (w: number) => Math.max(8, w - (6 + 7 + 10 + (hasWhere ? 9 : 0) + (hasContext ? 10 : 0) + 5 + 10))
     const elements = $.ui.resolve(e)
     const Input = 'Input' in elements ? elements.Input : undefined
     const Select = 'Select' in elements ? elements.Select : undefined
@@ -1732,6 +1944,11 @@ export const register: Register = on => {
               <Text dimColor wrap="truncate-end">{i.where}</Text>
             </Box>
           )}
+          {hasContext && (
+            <Box width={9} flexShrink={0} marginLeft={1}>
+              <Text dimColor wrap="truncate-end">{i.context === undefined ? '' : i.context}</Text>
+            </Box>
+          )}
           <Box width={4} flexShrink={0} marginLeft={1}>
             <Text dimColor wrap="truncate-end">{ago(now - i.lastActive)}</Text>
           </Box>
@@ -1792,6 +2009,64 @@ export const register: Register = on => {
 
     const working = [...view.workspaces.flatMap(w => w.items), ...view.repos.flatMap(r => r.trees.flatMap(t => t.items))]
       .filter(i => i.state === 'working').length
+
+    // each shown account's limits, as last read; under them, while asked for, its projects' parts of them
+    const used = await read($, usage)
+    const isUsageShown = await read($, usageShown)
+    const usedIn = await read($, usageWindow)
+    const usageAccounts = account === ALL_ACCOUNTS ? Object.keys(used.accounts).sort((a, b) => a.localeCompare(b)) : [account]
+    const accountName = (a: string) => a || 'default'
+    const clock = clockOf(used, now)
+    const asOf = (l: { at: number }) => (now - l.at > 3_600_000 ? ` (${ago(now - l.at)} ago)` : '')
+    const limitsLine = (a: string) => {
+      const of = used.accounts[a]
+      if (of === undefined) return ''
+      const part = (tool: 'claude' | 'codex', label: string) => {
+        const said = (['5h', '7d'] as const).flatMap(w => {
+          const l = of.limits[tool][w]
+          return l === undefined ? [] : [`${limitSaid(w, l, now, clock.offsetAt)}${tool === 'codex' ? asOf(l) : ''}`]
+        })
+        return said.length === 0 ? [] : [`${label} ${said.join(' · ')}`]
+      }
+      return [...part('claude', 'Claude'), ...part('codex', 'Codex')].join(' │ ')
+    }
+    const limitRows = usageAccounts.map(a => ({ a, line: limitsLine(a) })).filter(r => r.line !== '')
+    const usagePanel = (): Element[] => [
+      <Box key="usage-head" flexDirection="row" width={width} columnGap={1}>
+        <Text bold>Usage by project</Text>
+        {(['5h', '7d'] as const).map(w => (
+          <Button key={`usage-window ${w}`} label={w} {...(w === usedIn ? { variant: 'primary' as const } : {})} onPress={() => void setUsageWindow($, w)} />
+        ))}
+        <Text dimColor wrap="truncate-end">{used.at === 0 ? 'reading…' : `counted ${ago(now - used.at)} ago · each project's share of the account's use, and about how much of the limit that is`}</Text>
+      </Box>,
+      ...(used.problem === '' ? [] : [<Text key="usage-problem" color="error" wrap="truncate-end">{`! ${used.problem}`}</Text>]),
+      ...usageAccounts.flatMap(a => (['claude', 'codex'] as const).flatMap(tool => {
+        const rank = used.accounts[a]?.ranks[`${tool} ${usedIn}`]
+        if (rank === undefined) return []
+        const limit = used.accounts[a]?.limits[tool][usedIn]
+        const label = `${tool === 'claude' ? 'Claude' : 'Codex'} · ${accountName(a)} · since ${clock.said(rank.since, true)}${limit === undefined ? ' · its limit not read yet' : ` · ${Math.round(limit.used)}% of the ${usedIn} limit used`}`
+        return [
+          <Text key={`usage ${a} ${tool}`} color={TOOL_COLOR[tool]} wrap="truncate-end">{`  ${label}`}</Text>,
+          ...rank.rows.map(r => (
+            <Box key={`usage ${a} ${tool} ${r.key}`} flexDirection="row" width={width}>
+              <Box flexGrow={1} flexShrink={1} marginLeft={4}>
+                <Text wrap="truncate-end">{r.name}</Text>
+              </Box>
+              <Box width={5} flexShrink={0} marginLeft={1}>
+                <Text>{`${Math.round(r.share * 100)}%`.padStart(4)}</Text>
+              </Box>
+              <Box width={16} flexShrink={0} marginLeft={1}>
+                <Text dimColor>{r.ofLimit === undefined ? '' : `≈ ${r.ofLimit < 1 ? '<1' : Math.round(r.ofLimit)}% of limit`}</Text>
+              </Box>
+            </Box>
+          )),
+          ...(rank.more === 0 ? [] : [<Text key={`usage ${a} ${tool} more`} dimColor>{`    +${rank.more} more`}</Text>]),
+        ]
+      })),
+      ...(used.at !== 0 && usageAccounts.every(a => used.accounts[a] === undefined || (used.accounts[a]!.ranks[`claude ${usedIn}`] === undefined && used.accounts[a]!.ranks[`codex ${usedIn}`] === undefined))
+        ? [<Text key="usage-none" dimColor>{`  nothing counted in this ${usedIn} window`}</Text>]
+        : []),
+    ]
     const hidden = view.total - view.shown
     return (
       <Box flexDirection="column" width={width} minHeight={height} backgroundColor={paint}>
@@ -1823,6 +2098,20 @@ export const register: Register = on => {
             <Button key="reset-order" label="reset order" onPress={() => void resetOrder($)} />
           )}
         </Box>
+        <Box key="limits" flexDirection="row" width={width} columnGap={1}>
+          <Button key="usage" label={isUsageShown ? 'hide usage' : 'usage by project'} {...(isUsageShown ? { variant: 'primary' as const } : {})} onPress={() => void toggleUsage($)} />
+          <Box flexDirection="column" flexGrow={1} flexShrink={1}>
+            {limitRows.length === 0 && <Text dimColor wrap="truncate-end">{used.at === 0 ? 'limits: reading…' : 'limits: not read yet'}</Text>}
+            {limitRows.map(r => (
+              <Text key={`limits ${r.a}`} dimColor wrap="truncate-end">{account === ALL_ACCOUNTS ? `${accountName(r.a)}: ${r.line}` : r.line}</Text>
+            ))}
+          </Box>
+        </Box>
+        {isUsageShown && (
+          <Box key="usage-panel" flexDirection="column" width={width} marginTop={1}>
+            {usagePanel()}
+          </Box>
+        )}
         <Box key="workspaces" flexDirection="column" width={width} marginTop={1}>
           <Box flexDirection="row" width={width} columnGap={1}>
             <Text bold>Workspaces</Text>

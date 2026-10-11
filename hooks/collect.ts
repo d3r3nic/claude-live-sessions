@@ -1,6 +1,6 @@
 // Pure parsing and matching: no `$`, so the tests drive it directly.
-import type { ClaudeSession, CodexSession, Place, Snapshot, Workspace } from '../types'
-import { COMPACT_FROM, RELAY_CAP } from './relay'
+import type { ClaudeSession, CodexSession, Place, SessionContext, Snapshot, Workspace } from '../types'
+import { COMPACT_FROM, RELAY_CAP, tokensSaid } from './relay'
 import { DRIFT_EVERY } from './drift'
 import { tmuxName } from './workspaces'
 
@@ -919,6 +919,11 @@ export const isSnapshot = (v: unknown): v is Snapshot => {
 }
 
 /** One session as the pane lists it, Claude's or Codex's alike. */
+/** A session's context said short: `437k`, or `117k/258k` with its window where its records say (Codex's). */
+export function contextSaid(c: SessionContext): string {
+  return c.window === undefined || c.window <= 0 ? tokensSaid(c.tokens) : `${tokensSaid(c.tokens)}/${tokensSaid(c.window)}`
+}
+
 export type Item = {
   key: string
   tool: 'claude' | 'codex'
@@ -938,6 +943,8 @@ export type Item = {
   memberId?: string
   /** For an idle Claude session in a terminal tab: what moving it to the background starts from. */
   move?: { pid: number; tty: string; profile: string; sessionId: string; startCwd: string }
+  /** Its context at its last request, said short: `437k`, `117k/258k` (with the window when its records say). */
+  context?: string
 }
 export type TreeView = { key: string; label: string; path: string; items: Item[] }
 export type WorkspaceView = {
@@ -1005,6 +1012,7 @@ export function viewOf(
         state: claudeState(s, o.now),
         where: s.tty === '??' ? 'detached' : s.tty,
         lastActive: s.since,
+        ...(s.context === undefined ? {} : { context: contextSaid(s.context) }),
         ...(!isSelf && s.kind !== 'bg' && s.isForeground && claudeState(s, o.now) === 'idle' && /^ttys\d+$/.test(s.tty) &&
         paneOf(s.tty) === undefined &&
         backgroundCommand(s, o.home, []) !== undefined
@@ -1037,6 +1045,7 @@ export function viewOf(
       state: s.updatedAt > 0 && o.now - s.updatedAt < WORKING_MS ? 'working' : 'idle',
       where: s.surface === 'terminal' ? s.tty : s.surface,
       lastActive: s.lastActive,
+      ...(s.context === undefined ? {} : { context: contextSaid(s.context) }),
       ...(s.surface !== 'terminal' || !/^ttys\d+$/.test(s.tty)
         ? {}
         : inWorkspace(s.tty) !== undefined

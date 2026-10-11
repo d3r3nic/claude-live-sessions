@@ -21,7 +21,12 @@ export type ClaudeSession = {
   isForeground: boolean
   /** When the status last changed (its last turn began or ended), ms since the epoch. */
   since: number
+  /** Its context at its last request, in tokens, as its transcript records it (none read yet: unset). */
+  context?: SessionContext
 }
+
+/** A session's context at its last request: its size in tokens, and its window when the records say. */
+export type SessionContext = { tokens: number; window?: number }
 
 /** One Codex session: an open `codex` terminal, or a thread active in the last half hour. */
 export type CodexSession = {
@@ -45,6 +50,8 @@ export type CodexSession = {
   startedAt?: number
   match?: 'held' | 'resume' | 'folder'
   isExec?: boolean
+  /** Its context at its last request, in tokens, and its window, as its rollout records them (none read yet: unset). */
+  context?: SessionContext
 }
 
 /** Where a working directory sits. */
@@ -143,6 +150,27 @@ export type Snapshot = {
   problems: string[]
 }
 
+/** A plan limit's reading: how much of it is used, in percent, when it resets, and when it was read (ms). */
+export type UsageLimit = { used: number; resetsAt?: number; at: number }
+
+/** One project's part of an account's use of one tool in a window, and about how much of the limit that is. */
+export type UsageRow = { key: string; name: string; share: number; ofLimit?: number }
+
+/** What the pane shows of usage, per account ('' the default): its limits, and per `<tool> <window>` its projects. */
+export type UsageView = {
+  /** When the counts were last read; 0 before the first. */
+  at: number
+  /** Why they could not be read, if they could not ('' otherwise). */
+  problem: string
+  /** The Mac's clock, minutes east of UTC, now, and at each time the view says (by its ms), as daylight saving has it then. */
+  offset: number
+  offsets: Record<string, number>
+  accounts: Record<string, {
+    limits: { claude: Partial<Record<'5h' | '7d', UsageLimit>>; codex: Partial<Record<'5h' | '7d', UsageLimit>> }
+    ranks: Record<string, { since: number; rows: UsageRow[]; more: number }>
+  }>
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'live-sessions': {
@@ -169,6 +197,12 @@ declare module 'claude-code' {
       assigning: { key: string; member: string }
       /** A workspace is being made: a second create waits for it instead of making another. */
       creating: boolean
+      /** The usage by project shown under the limits; kept across sessions. */
+      usageShown: boolean
+      /** Which limit window it is shown for; kept across sessions. */
+      usageWindow: '5h' | '7d'
+      /** The limits and the usage by project, as last read. */
+      usage: UsageView
     }
   }
 }
