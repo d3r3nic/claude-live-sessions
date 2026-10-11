@@ -183,6 +183,19 @@ export function shownIn(procs: Iterable<Proc>, isIt: (p: Proc) => boolean): stri
   return ttys
 }
 
+/**
+ * An absolute path as Node resolves a script's (no `.`, `..` or repeated `/`): a screen's command line is the same
+ * before and after it starts again in place, where Node passes the path it resolved.
+ */
+export function normalPath(path: string): string {
+  const parts: string[] = []
+  for (const part of path.split('/')) {
+    if (part === '..') parts.pop()
+    else if (part !== '' && part !== '.') parts.push(part)
+  }
+  return `/${parts.join('/')}`
+}
+
 /** An id that goes into a shell command as it is: letters, digits and dashes only. */
 const SAFE_ID = /^[A-Za-z0-9-]{1,64}$/
 /** A string as one shell word. */

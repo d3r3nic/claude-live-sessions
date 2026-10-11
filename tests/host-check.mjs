@@ -1026,12 +1026,22 @@ except ChildProcessError: pass
       // the file exactly 256 KB longer than where the cut is wanted
       writeFileSync(cutFile, `${base}${padOf(at + 262144 - Buffer.byteLength(base) - Buffer.byteLength(padOf(0)) - 1)}\n`)
     }
+    // the last 256 KB begin exactly where the last reply begins: it is read whole
+    const atLineFile = join(scratch, 'compacted-at-line.jsonl')
+    const atLineHead = `${JSON.stringify({ type: 'user', isSidechain: false, message: { role: 'user', content: 'before' } })}\n`
+    {
+      const last = `${reply('msg_J', '2026-10-09T15:26:00.000Z', usage(7, 0, 70, 1))}\n`
+      const padOf = n => JSON.stringify({ type: 'user', isSidechain: false, message: { role: 'user', content: 'x'.repeat(n) }, timestamp: '2026-10-09T15:27:00.000Z' })
+      writeFileSync(atLineFile, `${atLineHead}${last}${padOf(262144 - Buffer.byteLength(last) - Buffer.byteLength(padOf(0)) - 1)}\n`)
+    }
+    const atLineStarts = statSync(atLineFile).size - 262144 === Buffer.byteLength(atLineHead)
     const cutAt = statSync(cutFile).size - 262144
     const cutStarts = readFileSync(cutFile).subarray(cutAt, cutAt + 46).toString()
-    const told = perl(['ctx', ...compactedFiles, cutFile])
-    const toldWant = `==> ${compactedFiles[0]}\nctx compacted\n==> ${compactedFiles[1]}\nctx 7001\n==> ${compactedFiles[2]}\nctx 2003\n==> ${compactedFiles[3]}\nctx 605\n==> ${cutFile}\n`
-    check('usage: a context compacted since its last request is said so; a subagent\'s compaction, a quoted one, such JSON in a tool call or a record cut by the window is not; a request since gives its size',
-      told.stdout === toldWant && cutStarts === '{"type":"system","subtype":"compact_boundary",', told.stdout === toldWant && cutStarts === '{"type":"system","subtype":"compact_boundary",' ? '' : `${JSON.stringify(told.stdout)} ${JSON.stringify(cutStarts)}`)
+    const told = perl(['ctx', ...compactedFiles, cutFile, atLineFile])
+    const toldWant = `==> ${compactedFiles[0]}\nctx compacted\n==> ${compactedFiles[1]}\nctx 7001\n==> ${compactedFiles[2]}\nctx 2003\n==> ${compactedFiles[3]}\nctx 605\n==> ${cutFile}\n==> ${atLineFile}\nctx 77\n`
+    const toldOk = told.stdout === toldWant && cutStarts === '{"type":"system","subtype":"compact_boundary",' && atLineStarts
+    check('usage: a context compacted since its last request is said so; a subagent\'s compaction, a quoted one, such JSON in a tool call or a record cut by the window is not; a request since gives its size; one that begins where the window does is read whole',
+      toldOk, toldOk ? '' : `${JSON.stringify(told.stdout)} ${JSON.stringify(cutStarts)} ${atLineStarts}`)
     // into the plugin's state, priced; the rollout's mark by its name
     const state1 = u.applyScan(u.EMPTY_USAGE, first.stdout, Date.parse('2026-10-09T15:20:00Z'), f => (f === claudeFile || f === copyFile ? '' : f === rolloutFile ? 'work' : undefined))
     const slots = state1.slots
@@ -1346,11 +1356,22 @@ except ChildProcessError: pass
     // drawn, waited for; one of this version, once written, is drawn
     writeFileSync(snapFile, JSON.stringify({ version: 6, snapshot: { claude: [], codex: [] } }))
     const old = live('os.write(fd, b"\\r")')
-    const waited = live(['open(os.environ["SNAP_PATH"], "w").write(os.environ["NEXT_SNAPSHOT"])', 'drain(2.5)'].join('\n'), { SNAP_PATH: snapFile, NEXT_SNAPSHOT: snapshot() })
+    const oldSnapshot = JSON.stringify({ version: 6, snapshot: { claude: [], codex: [] } })
+    const arrives = { SNAP_PATH: snapFile, NEXT_SNAPSHOT: snapshot() }
+    const waited = live(['open(os.environ["SNAP_PATH"], "w").write(os.environ["NEXT_SNAPSHOT"])', 'drain(2.5)'].join('\n'), arrives)
     const waitedFor = waited.slice(waited.indexOf('No snapshot of this version'))
     check('ops: a snapshot of another version is said and never drawn, nothing broken; waited for, one of this version is drawn',
       old.includes('No snapshot of this version') && old.includes('Waiting for it') && !old.includes('\x1b[?1049h') && waited.includes('No snapshot of this version') && waitedFor.includes('\x1b[?1049h') && waitedFor.includes('LIVE//SESSIONS'),
       `${old.includes('Waiting for it')} ${waitedFor.includes('LIVE//SESSIONS')}`)
+    // keys while it waits: q closes it then; another is dropped, never acted on once it draws (here `a`, which would
+    // show every account)
+    writeFileSync(snapFile, oldSnapshot)
+    const quitWaiting = live(['os.write(fd, b"q")', 'drain(1.0)', 'open(os.environ["SNAP_PATH"], "w").write(os.environ["NEXT_SNAPSHOT"])', 'drain(2.5)'].join('\n'), arrives, ['--account', ''])
+    writeFileSync(snapFile, oldSnapshot)
+    const keyDropped = bare(live(['os.write(fd, b"a")', 'drain(1.0)', 'open(os.environ["SNAP_PATH"], "w").write(os.environ["NEXT_SNAPSHOT"])', 'drain(2.5)'].join('\n'), arrives, ['--account', '']))
+    check('ops: while it waits, q closes it; another key is dropped, never acted on once it draws',
+      quitWaiting.includes('Waiting for it; q closes') && !quitWaiting.includes('\x1b[?1049h') && keyDropped.includes('ACCOUNT default') && !keyDropped.includes('ALL ACCOUNTS'),
+      `${quitWaiting.includes('\x1b[?1049h')} ${keyDropped.includes('ACCOUNT default')} ${keyDropped.includes('ALL ACCOUNTS')}`)
     writeFileSync(snapFile, snapshot())
     // the relay's event log: 40 sessions writing at once, past the point where it moves to .1: every line whole, none lost
     const log = join(scratch, 'log', 'events.jsonl')
@@ -1393,6 +1414,17 @@ except ChildProcessError: pass
     const opsCopy = copyOf('plugin')
     // a screen whose Node is gone by the time its code changes (a Node updated away): started through a link to it
     const opsKept = copyOf('plugin-kept')
+    // a screen whose new code does not load (a pull stopped on a conflict), then is mended
+    const opsBroken = copyOf('plugin-broken')
+    const relayOfBroken = join(dirname(dirname(opsBroken)), 'hooks', 'relay.ts')
+    const relayText = readFileSync(relayOfBroken, 'utf8')
+    // its `node` a stand-in that counts the screen's checks of whether new code loads, then runs Node as `node`
+    const counted = join(scratch, 'counted')
+    mkdirSync(counted)
+    const probes = join(scratch, 'probes.log')
+    writeFileSync(join(counted, 'node'), `#!/bin/sh\ncase " $* " in *" --loads "*) echo probe >> '${probes}';; esac\nexec -a node '${process.execPath}' "$@"\n`)
+    execFileSync('/bin/chmod', ['+x', join(counted, 'node')])
+    const probesSoFar = () => (existsSync(probes) ? readFileSync(probes, 'utf8').trim().split('\n').filter(Boolean).length : 0)
     const nodeLink = join(bin, 'node-link')
     symlinkSync(process.execPath, nodeLink)
     const snap = join(scratch, 'snapshot.json')
@@ -1402,6 +1434,7 @@ except ChildProcessError: pass
     t('new-session', '-d', '-s', 'agents', `exec env ${path} claude agents`)
     t('new-session', '-d', '-s', 'ops', '-x', '120', '-y', '30', `exec env LIVE_SESSIONS_SNAPSHOT='${snap}' LIVE_SESSIONS_EVENTS='${join(scratch, 'events.jsonl')}' HOME='${scratch}' node --no-warnings '${opsCopy}' --account ''`)
     t('new-session', '-d', '-s', 'kept', '-x', '120', '-y', '30', `exec env LIVE_SESSIONS_SNAPSHOT='${snap}' LIVE_SESSIONS_EVENTS='${join(scratch, 'events.jsonl')}' HOME='${scratch}' '${nodeLink}' --no-warnings '${opsKept}' --account ''`)
+    t('new-session', '-d', '-s', 'broken', '-x', '160', '-y', '30', `exec env PATH='${counted}':"$PATH" LIVE_SESSIONS_SNAPSHOT='${snap}' LIVE_SESSIONS_EVENTS='${join(scratch, 'events.jsonl')}' HOME='${scratch}' node --no-warnings '${opsBroken}' --account ''`)
     await new Promise(res => setTimeout(res, 2_000))
     const ttyOf = name => t('display-message', '-p', '-t', `=${name}:`, '#{pane_tty}').stdout.trim().replace('/dev/', '')
     const pidOf = name => Number(t('display-message', '-p', '-t', `=${name}:`, '#{pane_pid}').stdout.trim())
@@ -1423,13 +1456,29 @@ except ChildProcessError: pass
     // its Node gone, then its code changed: it goes on as it was, and says so
     rmSync(nodeLink)
     writeFileSync(opsKept, readFileSync(opsKept, 'utf8').replace('LIVE//SESSIONS :: OPS', 'LIVE//SESSIONS :: OPS ANEW'))
-    await new Promise(res => setTimeout(res, 6_000))
+    // its code changed into code that does not load: it goes on as it was, and says so
+    const brokenPid = pidOf('broken')
+    writeFileSync(relayOfBroken, `${relayText}\n<<<<<<< HEAD\n`)
+    await new Promise(res => setTimeout(res, 7_000))
+    const brokenDrawn = t('capture-pane', '-p', '-t', '=broken:').stdout
+    const brokenProbes = probesSoFar()
+    // mended (and changed again): it starts again in place with the code that loads
+    writeFileSync(relayOfBroken, relayText)
+    writeFileSync(opsBroken, readFileSync(opsBroken, 'utf8').replace('LIVE//SESSIONS :: OPS', 'LIVE//SESSIONS :: OPS MENDED'))
     const opsAfter = c.shownIn(listed(), p => p.args === opsArgs && p.pid === opsPid)
     const drawn = t('capture-pane', '-p', '-t', '=ops:').stdout
     check('shown: an ops screen is found by its command line, the same once it has started again in place with new code; every account still shown',
       JSON.stringify(opsIn) === JSON.stringify([ttyOf('ops')]) && JSON.stringify(opsAfter) === JSON.stringify([ttyOf('ops')]) && drawn.includes('LIVE//SESSIONS :: OPS ANEW') &&
       toggled.includes('ALL ACCOUNTS') && drawn.includes('ALL ACCOUNTS'),
       `${JSON.stringify(opsIn)} ${JSON.stringify(opsAfter)} ${drawn.includes('OPS ANEW')} ${toggled.includes('ALL ACCOUNTS')} ${drawn.includes('ALL ACCOUNTS')}`)
+    await new Promise(res => setTimeout(res, 7_000))
+    const mendedDrawn = t('capture-pane', '-p', '-t', '=broken:').stdout
+    check('shown: an ops screen whose new code does not load goes on as it was and says why; once mended, it starts again in place with it',
+      /╚.*the plugin's new code does not load \(SyntaxError/.test(brokenDrawn) && brokenDrawn.includes('LIVE//SESSIONS :: OPS') &&
+      mendedDrawn.includes('LIVE//SESSIONS :: OPS MENDED') && !mendedDrawn.includes('does not load') && pidOf('broken') === brokenPid &&
+      // checked once while the code stayed as it was (never again every 2 s), and once more when it changed
+      brokenProbes === 1 && probesSoFar() === 2,
+      `probes ${brokenProbes}/${probesSoFar()} ${JSON.stringify([brokenDrawn, mendedDrawn].map(d => d.split('\n').filter(l => /does not load|could not load|SESSIONS ::/.test(l)).map(l => l.trim().slice(0, 110))))}`)
     const keptDrawn = t('capture-pane', '-p', '-t', '=kept:').stdout
     check('shown: an ops screen whose Node is gone when its code changes goes on as it was and says so',
       t('has-session', '-t', '=kept').status === 0 && keptDrawn.includes('the plugin changed: q, then Ops screen in /sessions, shows it') && !keptDrawn.includes('OPS ANEW') && keptDrawn.includes('LIVE//SESSIONS :: OPS'),

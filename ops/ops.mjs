@@ -8,14 +8,18 @@ import { spawnSync } from 'node:child_process'
 import * as nodeModule from 'node:module'
 import { fileURLToPath } from 'node:url'
 
-/** Said, and left on screen until a key (the window it runs in closes with it). */
-async function fail(text) {
+/** Said, and left on screen until a key (the window it runs in closes with it); asked whether it loads, said alone. */
+async function fail(text, reason = text) {
+  if (process.argv.includes('--loads')) {
+    process.stdout.write(`${reason}\n`)
+    process.exit(1)
+  }
   process.stdout.write(`${text}\nPress return to close.\n`)
   await new Promise(res => process.stdin.once('data', res))
   process.exit(1)
 }
 // it runs the plugin's own TypeScript as it is: Node 22.18 or later (type stripping on, module hooks there)
-if (typeof nodeModule.registerHooks !== 'function') await fail(`The ops screen needs Node 22.18 or later; this is Node ${process.versions.node}.`)
+if (typeof nodeModule.registerHooks !== 'function') await fail(`The ops screen needs Node 22.18 or later; this is Node ${process.versions.node}.`, `it needs Node 22.18 or later; this is Node ${process.versions.node}`)
 // the plugin imports its own files without an extension, as its engine resolves them; Node needs `.ts`
 nodeModule.registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -33,7 +37,12 @@ try {
   w = await import(new URL('../hooks/workspaces.ts', import.meta.url).href)
   r = await import(new URL('../hooks/relay.ts', import.meta.url).href)
 } catch (error) {
-  await fail(`The ops screen needs Node 22.18 or later, which runs TypeScript as it is; this is Node ${process.versions.node} (${String(error).split('\n')[0]}).`)
+  await fail(`The ops screen could not load its code (${String(error).split('\n')[0]}). It needs Node 22.18 or later, which runs TypeScript as it is; this is Node ${process.versions.node}.`, String(error).split('\n')[0])
+}
+// asked only whether its code loads with this Node (before a screen starts again in place with it): it does
+if (process.argv.includes('--loads')) {
+  process.stdout.write('loads\n')
+  process.exit(0)
 }
 
 const HOME = process.env.HOME
@@ -380,27 +389,56 @@ if (process.argv.includes('--frame')) {
   // window and command line, so an open window never shows an older screen than the plugin's
   const startedCode = codeAt()
   let codeCheckedAt = Date.now()
-  /** Whether its code changed since it started, the change settled for 2 s (an update writes several files); every 2 s. */
-  const isCodeChanged = () => {
-    if (Date.now() - codeCheckedAt < 2_000) return false
+  // code it found it could not start again with: tried again only once it changes again
+  let refusedCode = 0
+  /** Its code's time when it changed since it started (or was last refused), settled for 2 s (an update writes several files); else 0. Looked at every 2 s. */
+  const changedCode = () => {
+    if (Date.now() - codeCheckedAt < 2_000) return 0
     codeCheckedAt = Date.now()
     const code = codeAt()
-    return code > startedCode && Date.now() - code >= 2_000
+    return code > Math.max(startedCode, refusedCode) && Date.now() - code >= 2_000 ? code : 0
+  }
+  /**
+   * The Node to start again with, once the new code is seen to load there (a pull stopped on a conflict, a Node too old
+   * or one that cannot run would leave a window that only says so); else why not.
+   */
+  const restartWith = () => {
+    const node = nodeToRestart()
+    if (node === undefined) return { why: 'the plugin changed: q, then Ops screen in /sessions, shows it' }
+    const tried = spawnSync(node, [...process.execArgv, process.argv[1], '--loads'], { encoding: 'utf8', input: '', timeout: 20_000 })
+    if (tried.stdout === 'loads\n') return { node }
+    const said = clean(`${tried.stdout ?? ''}\n${tried.stderr ?? ''}\n${tried.error?.message ?? ''}`.split('\n').find(l => l.trim() !== '') ?? `exit ${tried.status}`)
+    return { why: `the plugin's new code does not load (${said.slice(0, 120)}): this screen goes on as it was` }
   }
   const startAgain = node => process.execve(node, [process.argv0, ...process.execArgv, ...process.argv.slice(1)], { ...process.env, LIVE_SESSIONS_OPS_VIEW: account })
   let loaded = load()
   if (loaded === undefined) {
     // none of this version yet (an update: sessions not reloaded still write the one before): said, and waited for
-    process.stdout.write(`No snapshot of this version at ${SNAPSHOT} yet: open /sessions in Claude Code once (with this plugin's version). Waiting for it; Ctrl-C closes.\n`)
+    process.stdout.write(`No snapshot of this version at ${SNAPSHOT} yet: open /sessions in Claude Code once (with this plugin's version). Waiting for it; q closes.\n`)
+    // keys while it waits: q or Ctrl-C closes, any other is dropped, never left for the screen once it draws
+    process.stdin.setRawMode?.(true)
+    const onKey = d => {
+      if (!d.includes(113) && !d.includes(3)) return
+      process.stdin.setRawMode?.(false)
+      process.exit(0)
+    }
+    process.stdin.on('data', onKey)
     while ((loaded = load()) === undefined) {
       await new Promise(res => setTimeout(res, 1_000))
-      const node = isCodeChanged() ? nodeToRestart() : undefined
-      if (node !== undefined) startAgain(node)
+      const code = changedCode()
+      if (code === 0) continue
+      const next = restartWith()
+      if (next.node === undefined) {
+        refusedCode = code
+        continue
+      }
+      process.stdin.setRawMode?.(false)
+      startAgain(next.node)
     }
+    process.stdin.off('data', onKey)
   }
   let tick = 0
   let note = ''
-  let isRestartable = true
   // said while the screen is older than the plugin's and cannot start again
   let stale = ''
   let noteUntil = 0
@@ -476,16 +514,17 @@ if (process.argv.includes('--frame')) {
     diff(seenAs(loaded.snap), Date.now())
   } catch {}
   setInterval(() => {
-    if (isRestartable && isCodeChanged()) {
-      const node = nodeToRestart()
-      if (node === undefined) {
-        // nothing to start again with (its Node or this file gone): it goes on as it is, and says so
-        isRestartable = false
-        stale = 'the plugin changed: q, then Ops screen in /sessions, shows it'
+    const code = changedCode()
+    if (code > 0) {
+      const next = restartWith()
+      if (next.node === undefined) {
+        // nothing to start again with: it goes on as it is, says why, and tries again once the code changes again
+        refusedCode = code
+        stale = next.why
       } else {
         restore()
         process.stdin.setRawMode?.(false)
-        startAgain(node)
+        startAgain(next.node)
       }
     }
     const again = load()

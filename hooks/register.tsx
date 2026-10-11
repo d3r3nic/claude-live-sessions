@@ -77,6 +77,7 @@ import {
   isForeground,
   isShell,
   modeFlags,
+  normalPath,
   PLACE_SCRIPT,
   RECENT_SCRIPT,
   REPOS_SCOPE,
@@ -756,7 +757,7 @@ async function openOps($: EngineInterface) {
   const home = (await $.env.get('HOME')) ?? ''
   // the account this pane shows
   const account = await shownAccount($, home)
-  const file = `${$.plugin.root}/ops/ops.mjs`
+  const file = normalPath(`${$.plugin.root}/ops/ops.mjs`)
   // that screen open already (it restarts itself when the plugin changes): its window to the front, never a second one;
   // its Node as the shell ran it (`node`, or a path a version manager's shim gave it)
   const tail = ` --no-warnings ${file} --account ${account}`.trimEnd()

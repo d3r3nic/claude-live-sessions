@@ -87,9 +87,11 @@ sub ctx {
   print "==> $file\n";
   open(my $fh, '<', $file) or return;
   my $size = -s $fh;
-  seek($fh, $size > 262144 ? $size - 262144 : 0, 0);
-  # read from the middle of a record: that part of it is not read as one
-  <$fh> if $size > 262144;
+  # from the byte before the last 256 KB, through the end of its line: a record begun before them is not read as one,
+  # and one that begins exactly there is read whole
+  my $at = $size > 262144 ? $size - 262145 : 0;
+  seek($fh, $at, 0);
+  <$fh> if $at > 0;
   my $found;
   while (my $line = <$fh>) {
     if (is_rollout($file)) {

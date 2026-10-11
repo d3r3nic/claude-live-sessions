@@ -51,6 +51,7 @@ import {
   forAccount,
   ALL_ACCOUNTS,
   contextSaid,
+  normalPath,
 } from '../hooks/collect'
 import type { CodexProc, ThreadRow } from '../hooks/collect'
 import type { ClaudeSession, CodexSession, Snapshot, Workspace } from '../types'
@@ -788,6 +789,10 @@ describe('collect', () => {
     expect(webApp.trees[1]!.items.map(i => i.title)).toEqual(['Execute research', 'WEB CONSOLE', 'Find the report writer'])
   })
 
+  test('a script\'s path as Node resolves it: no `.`, `..` or repeated `/`', async () => {
+    expect([normalPath('/a//b/./c/../ops/ops.mjs'), normalPath('/plugins/live-sessions/ops/ops.mjs'), normalPath('/a/b/'), normalPath('/../x')]).toEqual(['/a/b/ops/ops.mjs', '/plugins/live-sessions/ops/ops.mjs', '/a/b', '/x'])
+  })
+
   test('what a press opens: a terminal tab, or a background session to attach; never this one', async () => {
     const view = viewOf(snapshotOf(), { home: HOME, now: NOW, windowMs: 0, selfId: 'session-104' })
     const targets = Object.fromEntries(view.repos.flatMap(r => r.trees.flatMap(t => t.items.map(i => [i.title, i.target]))))
@@ -1010,7 +1015,7 @@ describe('pane', () => {
     expect(await press(ops('*'))).toEqual(['focus ttys062'])
     expect(await press(ops('*', 'ttys062', 'S+', `/Users/u/.asdf/installs/nodejs/22.18.0/bin/node --no-warnings ${file} --account *`))).toEqual(['focus ttys062'])
     expect(await press(ops('*', 'ttys062', 'S+', `notnode --no-warnings ${file} --account *`))).toEqual(['open'])
-    expect(await press(ops('*', 'ttys062', 'S+', `--no-warnings ${file} --account *`))).toEqual(['open'])
+    expect(await press(ops('*', 'ttys062', 'S+', `/usr/local/bin/nodemon --no-warnings ${file} --account *`))).toEqual(['open'])
     // another account's, another plugin folder's, one with no account (before there were any), stopped, or not a
     // Terminal tab: a new one
     expect(await press(ops(''))).toEqual(['open'])
