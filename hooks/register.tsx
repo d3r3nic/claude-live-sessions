@@ -41,9 +41,8 @@ import {
   headOf,
   parseWorktrees,
   WORKTREES_SCRIPT,
-  defaultPlacement,
-  openedFontSize,
-  isOnScreen,
+  agentPlacement,
+  screenShowing,
   hideBinding,
   hidePath,
   placementFrom,
@@ -731,11 +730,11 @@ async function openWorkspace($: EngineInterface, ws: Workspace, at?: { window: s
   for (const tty of attached) {
     if ((await osascript(FOCUS_SCRIPT, tty)).stdout.trim() === 'shown') return { isOpen: true, text: `Brought ${name} to the front.` }
   }
-  // where it was when last hidden, while that still shows on a screen there is now; else most of the screen in
-  // use, in the font of the window it is opened from
+  // maximized on the screen it was on when last hidden, while that screen is still there (else the one in use), in
+  // half the font of the window it is opened from: never the size and font it had
   const kept = await $.fs.read(placementPath(home, name)).then(text => placementFrom(JSON.parse(text))).catch(() => undefined)
   const seen = await screens($, osascript)
-  const place = kept !== undefined && seen !== undefined && isOnScreen(kept, seen.screens) ? kept : seen === undefined ? undefined : defaultPlacement(seen.screens[0]!, seen.fontSize)
+  const place = seen === undefined ? undefined : agentPlacement((kept === undefined ? undefined : screenShowing(kept, seen.screens)) ?? seen.screens[0]!, seen.fontSize)
   const opened = await osascript(OPEN_SCRIPT, command, ...(place === undefined ? [] : [JSON.stringify(place)]))
   const isOpened = opened.exitCode === 0 && opened.stdout.trim() === 'opened'
   // the window makes the session (made new, or again after it ended): once it is there, its bar gets Hide
@@ -747,7 +746,7 @@ async function openWorkspace($: EngineInterface, ws: Workspace, at?: { window: s
 
 /**
  * The ops screen (ops/ops.mjs, beside this plugin's hooks) in a Terminal window of its own, filling the screen in
- * use (what the menu bar and Dock leave), in half this tab's font size.
+ * use (what the menu bar and Dock leave), in this tab's own font size.
  */
 async function openOps($: EngineInterface) {
   const osascript = (script: string, ...args: string[]) =>
@@ -766,7 +765,7 @@ async function openOps($: EngineInterface) {
     if ((await osascript(FOCUS_SCRIPT, tty)).stdout.trim() === 'shown') return
   }
   const seen = await screens($, osascript)
-  const place = seen === undefined ? undefined : { ...seen.screens[0]!, fontSize: openedFontSize(seen.fontSize) }
+  const place = seen === undefined ? undefined : { ...seen.screens[0]!, fontSize: seen.fontSize }
   const command = `node --no-warnings ${shellQuote(file)} --account ${shellQuote(account)}`
   const opened = await osascript(OPEN_SCRIPT, command, ...(place === undefined ? [] : [JSON.stringify(place)]))
   if (opened.stdout.trim() !== 'opened') $.ui.toast(`The ops screen did not open (${firstLine(opened.stderr) || `exit ${opened.exitCode}`}). Run: ${command}`, { timeoutMs: 15_000 })
@@ -813,10 +812,10 @@ async function openSession($: EngineInterface, target: NonNullable<Item['target'
   }
   const command = attachCommand(target.attach, target.profile, (await $.env.get('HOME')) ?? '')
   if (command === undefined) return
-  // most of the screen, in half this tab's font: never the profile's small default window
+  // maximized on the screen in use, in half this tab's font: never the profile's small default window
   const seen = await screens($, (script, ...args) =>
     $.process.run(['/usr/bin/osascript', '-l', 'JavaScript', '-e', script, ...args], { timeoutMs: 10_000 }).catch(() => ({ stdout: '' })))
-  const place = seen === undefined ? undefined : defaultPlacement(seen.screens[0]!, seen.fontSize)
+  const place = seen === undefined ? undefined : agentPlacement(seen.screens[0]!, seen.fontSize)
   await $.process.run(['/usr/bin/osascript', '-l', 'JavaScript', '-e', OPEN_SCRIPT, command, ...(place === undefined ? [] : [JSON.stringify(place)])], { timeoutMs: 10_000 })
 }
 

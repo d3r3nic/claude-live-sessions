@@ -276,14 +276,13 @@ export function placementFrom(raw: unknown): Placement | undefined {
 /** A screen's free part (what the menu bar and Dock leave), from the top left of the menu bar's screen, as Terminal places windows. */
 export type Screen = { x: number; y: number; width: number; height: number }
 
-/** Whether a kept placement still shows: at least a quarter of it on one of the screens there are now. */
-export function isOnScreen(place: Placement, screens: readonly Screen[]): boolean {
+/** The screen a kept placement still shows on: of the screens there are now, the one with most of it, at least a quarter. */
+export function screenShowing(place: Placement, screens: readonly Screen[]): Screen | undefined {
   const area = place.width * place.height
-  return screens.some(s => {
-    const w = Math.min(place.x + place.width, s.x + s.width) - Math.max(place.x, s.x)
-    const h = Math.min(place.y + place.height, s.y + s.height) - Math.max(place.y, s.y)
-    return w > 0 && h > 0 && w * h >= area / 4
-  })
+  const shown = (s: Screen) =>
+    Math.max(0, Math.min(place.x + place.width, s.x + s.width) - Math.max(place.x, s.x)) * Math.max(0, Math.min(place.y + place.height, s.y + s.height) - Math.max(place.y, s.y))
+  const best = [...screens].sort((a, b) => shown(b) - shown(a))[0]
+  return best !== undefined && shown(best) > 0 && shown(best) >= area / 4 ? best : undefined
 }
 
 /**
@@ -297,21 +296,12 @@ export function openedFontSize(fontSize: number): number {
 }
 
 /**
- * A new window's place (a workspace's first, a session opened in the
- * background's, the ops screen's): most of the screen (85% of the part the
- * menu bar and Dock leave, centred), in half the font size of the window it
- * is opened from (openedFontSize), never a profile's small default window.
+ * A window of agents this plugin opens (a workspace's, a session opened in the background's): maximized, the whole of
+ * the screen's free part (what the menu bar and Dock leave), in half the font size of the window it is opened from
+ * (openedFontSize); never a profile's small default window, nor the size and font it had before.
  */
-export function defaultPlacement(screen: Screen, fontSize: number): Placement {
-  const width = Math.round(screen.width * 0.85)
-  const height = Math.round(screen.height * 0.85)
-  return {
-    x: Math.round(screen.x + (screen.width - width) / 2),
-    y: Math.round(screen.y + (screen.height - height) / 2),
-    width,
-    height,
-    fontSize: openedFontSize(fontSize),
-  }
+export function agentPlacement(screen: Screen, fontSize: number): Placement {
+  return { x: screen.x, y: screen.y, width: screen.width, height: screen.height, fontSize: openedFontSize(fontSize) }
 }
 
 /**
