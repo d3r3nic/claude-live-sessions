@@ -2,7 +2,7 @@
 
 What each version changed, newest first. Each links its pull request, which holds the details, the checks and the reviews. After updating, run `/reload-plugins` in your sessions.
 
-## 0.22.2 — 2026-10-11
+## 0.22.2 — 2026-10-11 ([#29](https://github.com/d3r3nic/claude-live-sessions/pull/29))
 - Agent windows (a workspace's, from /sessions or the Ops screen, and a background session's) open at 60% of the screen across and down, centred, in your tab's own font (twice the half size of 0.22.1).
 
 ## 0.22.1 — 2026-10-11 ([#27](https://github.com/d3r3nic/claude-live-sessions/pull/27))
