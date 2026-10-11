@@ -3951,6 +3951,21 @@ describe('usage', () => {
     await ui.unmount()
   })
 
+  test('counts that cannot be kept or read back are said, never lost unseen', { timeoutMs: 30_000 }, async ($, on) => {
+    const { files, clock } = engine(on, machine, { termProgram: 'Apple_Terminal', isOwnAccount: true, canWrite: false })
+    usageWorld()
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    await clock.advance(1)
+    const asText = await $.command.run({ ...SESSIONS, args: 'usage' })
+    expect(asText.text).toMatch(/\n! usage: the counts could not be kept \(.*EACCES: permission denied.*\); they are read again from the start$/)
+    // there but not readable (too large, or cut by another writer): said, and read again
+    const usagePath = `${HOME}/Library/Caches/live-sessions/usage.json`
+    files.set(usagePath, '{"version": 2, "at": 1')
+    for (let t = 0; t < 124_000; t += 4_000) await clock.advance(4_000)
+    expect((await $.command.run({ ...SESSIONS, args: 'usage' })).text).toMatch(/\n! usage: the counts kept could not be read; read again from the start · usage: the counts could not be kept \(/)
+  })
+
   test('reading: a batch of files at a time, from where each was left; not again within two minutes; a cut run\'s whole files taken; limits shared', { timeoutMs: 60_000 }, async ($, on) => {
     const { files, clock, runs } = engine(on, machine, { termProgram: 'Apple_Terminal', isOwnAccount: true })
     let limits = rateLimits

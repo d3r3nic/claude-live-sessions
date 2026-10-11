@@ -1596,8 +1596,11 @@ async function refreshUsage($: EngineInterface, isAsked = false) {
   usageReadAt = now
   usageRun = (async () => {
     const home = (await $.env.get('HOME')) ?? ''
-    let state: UsageState = usageFrom(await readJson($, usagePath(home)))
-    let problem = ''
+    // the counts kept: one there but not read (too large to read, cut by another writer) is said, then read again
+    const raw = await readJson($, usagePath(home))
+    let state: UsageState = usageFrom(raw)
+    // what kept it from counting, each said
+    const problems: string[] = raw === undefined && (await $.fs.exists(usagePath(home))) ? ['usage: the counts kept could not be read; read again from the start'] : []
     if (now - state.at >= USAGE_MAX_AGE_MS) {
       const configDirs = (await $.fs.list(home).catch(() => []))
         .filter(d => d.kind === 'dir' && /^\.(claude|codex)(-[\w.-]+)?$/.test(d.name))
@@ -1613,19 +1616,24 @@ async function refreshUsage($: EngineInterface, isAsked = false) {
         const isCut = out.isStdoutTruncated === true
         // a failed run is not taken: its files are read from where they were, next time
         if (out.exitCode !== 0 && !isCut) {
-          problem = `usage: ${firstLine(out.stderr) || `perl exited ${out.exitCode}`}`
+          problems.push(`usage: ${firstLine(out.stderr) || `perl exited ${out.exitCode}`}`)
           break
         }
         // one cut short (more than a run may print): the files it finished are taken, the rest read on next time
         const taken = isCut ? wholeFiles(out.stdout) : out.stdout
-        if (isCut && taken === '') problem = 'usage: too much output from one file'
+        if (isCut && taken === '') problems.push('usage: too much output from one file')
         state = applyScan(state, taken, now, f => accountOfFile(home, f))
       }
-      if (listed === undefined) problem = 'usage: the transcripts could not be listed'
+      if (listed === undefined) problems.push('usage: the transcripts could not be listed')
       // a file no longer listed (older than 8 days, gone) is forgotten; a rollout archived meanwhile keeps its mark
       const listedKeys = new Set(files.map(markKey))
       if (listed !== undefined) state = { ...state, files: Object.fromEntries(Object.entries(state.files).filter(([f]) => listedKeys.has(f))) }
-      if (state !== EMPTY_USAGE) await $.fs.write(usagePath(home), `${JSON.stringify(state)}\n`).catch(() => undefined)
+      // a write refused (too large, no room) is said: else every read would start over unseen
+      if (state !== EMPTY_USAGE) {
+        await $.fs.write(usagePath(home), `${JSON.stringify(state)}\n`).catch((error: unknown) => {
+          problems.push(`usage: the counts could not be kept (${firstLine(message(error))}); they are read again from the start`)
+        })
+      }
     }
     // each folder named for its project: its repository, else the folder
     const dirs = [...new Set(Object.keys(state.slots).map(k => k.split('\t').slice(2).join('\t')))]
@@ -1638,7 +1646,7 @@ async function refreshUsage($: EngineInterface, isAsked = false) {
       return place !== undefined && place.repo !== '' ? { key: place.repo, name: place.name } : { key: dir, name: dir.startsWith(`${home}/`) ? `~${dir.slice(home.length)}` : dir === home ? '~' : dir }
     }
     const accounts = [...new Set([...(await read($, snapshot)).envs, ...Object.keys(state.codexLimits), ...Object.keys(shared), ...(own === undefined ? [] : [own])])]
-    const view: UsageView = { at: state.at, problem, offset: 0, offsets: {}, accounts: {} }
+    const view: UsageView = { at: state.at, problem: problems.join(' · '), offset: 0, offsets: {}, accounts: {} }
     for (const account of accounts) {
       const limits = {
         claude: currentLimits(account === own ? mergeLimits(shared[account], live) : shared[account], now),
