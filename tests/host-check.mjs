@@ -1110,8 +1110,8 @@ except ChildProcessError: pass
     // osascript stood in for: what it is asked is recorded, and no Terminal window is opened or brought up
     const asked = join(scratch, 'osascript.log')
     const stub = join(scratch, 'osascript')
-    // (its screens: one, the menu bar's 30 points left out, this tab in 12 points)
-    writeFileSync(stub, `#!/bin/sh\nscript=$4\nshift 4\ncase $script in *NSScreen*) echo '{"screens":[{"x":0,"y":30,"width":2560,"height":1410}],"fontSize":12}';; *doScript*) printf 'OPEN %s %s\\n' "$1" "$2" >> '${asked}'; echo opened;; *) printf 'FOCUS %s\\n' "$1" >> '${asked}';; esac\n`)
+    // (its screens: one, the menu bar's 30 points left out; a terminal tab asked about is in 12 points, none in 0)
+    writeFileSync(stub, `#!/bin/sh\nscript=$4\nshift 4\ncase $script in *NSScreen*) case $1 in ttys[0-9]*) size=12;; *) size=0;; esac; echo '{"screens":[{"x":0,"y":30,"width":2560,"height":1410}],"fontSize":'$size'}';; *doScript*) printf 'OPEN %s %s\\n' "$1" "$2" >> '${asked}'; echo opened;; *) printf 'FOCUS %s\\n' "$1" >> '${asked}';; esac\n`)
     execFileSync('/bin/chmod', ['+x', stub])
     const env = { ...process.env, LIVE_SESSIONS_SNAPSHOT: snapFile, LIVE_SESSIONS_EVENTS: events, LIVE_SESSIONS_TMUX_SOCKET: socket, LIVE_SESSIONS_OSASCRIPT: stub, HOME: scratch }
     const draw = (cols, rows, extra = []) => spawnSync(process.execPath, ['--no-warnings', opsFile, '--frame', ...extra], { encoding: 'utf8', env: { ...env, COLS: String(cols), ROWS: String(rows) } }).stdout

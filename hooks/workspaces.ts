@@ -278,7 +278,7 @@ export type Screen = { x: number; y: number; width: number; height: number }
 
 /**
  * The screen a kept window is on: of the screens there are now, the one with most of it (on a tie, the one listed
- * first: the screen in use); none when it shows on none.
+ * first, the screen in use being listed first); none when it shows on none.
  */
 export function screenShowing(place: Placement, screens: readonly Screen[]): Screen | undefined {
   const shown = (s: Screen) =>
