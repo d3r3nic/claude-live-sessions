@@ -609,7 +609,9 @@ export function leanWork(isPair: boolean): string {
     ...(isPair ? ['Hand over at milestones, a complete piece of the purpose your peer can review, not after each small step, as far as the peer-coding rules leave that to you.'] : []),
     'Make independent reads and checks in one step (several tool calls at once, or one command).',
     'Read the part of a file you need, and not again unless it changed.',
-    'Run a test suite once per set of changes, printing only failures and the summary; keep evidence as short summaries, not full logs.',
+    isPair
+      ? 'Run a test suite once per set of changes, saving its full output where the peer-coding rules keep evidence and printing only its failures and summary.'
+      : 'Run a test suite once per set of changes, printing only its failures and summary.',
     'Between steps, write one short line at most, and only when your direction changes.',
     'Never skip a check, a test or a review to save tokens.',
   ].join(' ')

@@ -2317,8 +2317,9 @@ describe('bringing running sessions into a workspace', () => {
   })
 
   test('how the agents work: fewer, fuller requests and less output, never fewer checks; a pair hands over at milestones', async () => {
-    expect(leanWork(true)).toBe('Work lean here: every request re-reads this whole conversation, so fewer, fuller steps and less output cost less. Hand over at milestones, a complete piece of the purpose your peer can review, not after each small step, as far as the peer-coding rules leave that to you. Make independent reads and checks in one step (several tool calls at once, or one command). Read the part of a file you need, and not again unless it changed. Run a test suite once per set of changes, printing only failures and the summary; keep evidence as short summaries, not full logs. Between steps, write one short line at most, and only when your direction changes. Never skip a check, a test or a review to save tokens.')
-    expect(leanWork(false)).toBe(leanWork(true).replace(' Hand over at milestones, a complete piece of the purpose your peer can review, not after each small step, as far as the peer-coding rules leave that to you.', ''))
+    expect(leanWork(true)).toBe('Work lean here: every request re-reads this whole conversation, so fewer, fuller steps and less output cost less. Hand over at milestones, a complete piece of the purpose your peer can review, not after each small step, as far as the peer-coding rules leave that to you. Make independent reads and checks in one step (several tool calls at once, or one command). Read the part of a file you need, and not again unless it changed. Run a test suite once per set of changes, saving its full output where the peer-coding rules keep evidence and printing only its failures and summary. Between steps, write one short line at most, and only when your direction changes. Never skip a check, a test or a review to save tokens.')
+    // alone: no hand-overs, and no peer-coding evidence to keep
+    expect(leanWork(false)).toBe('Work lean here: every request re-reads this whole conversation, so fewer, fuller steps and less output cost less. Make independent reads and checks in one step (several tool calls at once, or one command). Read the part of a file you need, and not again unless it changed. Run a test suite once per set of changes, printing only its failures and summary. Between steps, write one short line at most, and only when your direction changes. Never skip a check, a test or a review to save tokens.')
     // Codex's first prompts carry it (its compactions keep them); a brought-in Claude's too (its conversation keeps the
     // system prompt it began with until it compacts); a new Claude's not (its system prompt has it)
     const ws = { ...practice, purpose: 'roles for admins', checkout: '/Users/u/dev/web-app' }
@@ -2625,7 +2626,8 @@ describe('the context guard', () => {
   test('a workspace\'s Claude whose context has grown to the line compacts itself as soon as its hand-off to Codex is passed', async ($, on) => {
     const { files, clock } = engine(on, machine, { termProgram: 'Apple_Terminal', selfId: 'session-104' })
     let tokens: number | undefined = 437_000
-    on('session.usage', async () => ({ value: { startedAt: NOW, context: { ...(tokens === undefined ? {} : { tokens, percent: Math.round(tokens / 10_000) }), window: 1_000_000 }, rateLimits: [] } }))
+    let window = 1_000_000
+    on('session.usage', async () => ({ value: { startedAt: NOW, context: { ...(tokens === undefined ? {} : { tokens, percent: Math.round((tokens / window) * 100) }), window }, rateLimits: [] } }))
     const compacted: (string | undefined)[] = []
     // the engine's compaction, recorded: done (a summary left, what it read), or vetoed
     let isVetoed = false
@@ -2736,6 +2738,15 @@ describe('the context guard', () => {
     files.set(`${ledger}/pass-turn-n-own`, '')
     await wait(4_000)
     expect(compacted).toHaveLength(5)
+    // a window too small for the line (a 200k model): from 80% of it, 160k; not below
+    window = 200_000
+    for (const [now, id] of [[159_999, 'turn-w1'], [160_000, 'turn-w2']] as const) {
+      tokens = now
+      await end(`Done.\n${READY_CODEX}`, id)
+      files.set(`${ledger}/pass-${id}`, '')
+      await wait(4_000)
+    }
+    expect(compacted).toHaveLength(6)
   })
 
   test('an idle Claude is left to Claude Code: below the line nothing waits for its cache, however long it waits', { timeoutMs: 60_000 }, async ($, on) => {

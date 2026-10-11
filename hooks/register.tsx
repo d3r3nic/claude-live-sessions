@@ -1404,8 +1404,8 @@ async function logEvent($: EngineInterface, home: string, event: RelayEvent) {
  * context, not the whole. Between turns only (refused while one runs), while
  * that turn is still its last and it is still that conversation. Never after
  * a cue for the owner (NEEDS USER, SCOPE CLOSED): it waits for the owner's
- * answer. An idle Claude is left to Claude Code, which compacts it before
- * its prompt cache expires.
+ * answer. On a smaller window than the line allows for, it compacts from
+ * 80% of that window. An idle Claude is left as it is: below the line.
  */
 async function compactAtHandOff($: EngineInterface, answer: string) {
   const cue = answer.split('\n').map(cueOf).filter(c => c !== undefined).at(-1)
@@ -1419,10 +1419,11 @@ async function compactAtHandOff($: EngineInterface, answer: string) {
   // a workspace of one agent has no hand-off to wait for, even with a relay turned on there by hand
   if (self === undefined || ws === undefined || pane?.window !== 'claude' || ws.only !== undefined || ws.relay?.mode !== 'auto') return
   const line = ws.compactFrom ?? COMPACT_FROM
-  // below the line, or the line off: nothing to do
+  // below the line (on a window too small for it, 80% of the window), or the line off: nothing to do
   const isOver = async () => {
-    const { tokens } = (await $.session.usage()).context
-    return line > 0 && tokens !== undefined && tokens >= line ? tokens : undefined
+    const { tokens, window } = (await $.session.usage()).context
+    const at = window > 0 ? Math.min(line, Math.floor(window * 0.8)) : line
+    return line > 0 && tokens !== undefined && tokens >= at ? tokens : undefined
   }
   if ((await isOver()) === undefined) return
   const file = transcriptPath(`${home}/.${self.profile}`, self.startCwd, id)
