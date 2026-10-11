@@ -164,6 +164,25 @@ export function attachCommand(sessionId: string, profile: string, home: string):
   return `${env}claude attach ${sessionId}`
 }
 
+/**
+ * Whether a `ps` command line is `claude attach <id>` for one of `ids` (a background session's job id or session
+ * id): the tab it runs in shows that session. A tab that went on to the agent view runs `claude agents`, which says
+ * nothing of the session it shows; Ctrl+Z ends the attach. An id is random, so one of another account is never it.
+ */
+export function isAttachTo(args: string, ids: readonly string[]): boolean {
+  const words = args.split(' ')
+  return words.length === 3 && /(^|\/)claude$/.test(words[0]!) && words[1] === 'attach' && SAFE_ID.test(words[2]!) && ids.includes(words[2]!)
+}
+
+/** The terminal tabs (`ttys012`) where a process `isIt` picks runs in the foreground: what those windows show. */
+export function shownIn(procs: Iterable<Proc>, isIt: (p: Proc) => boolean): string[] {
+  const ttys: string[] = []
+  for (const p of procs) {
+    if (/^ttys\d+$/.test(p.tty) && isForeground(p.stat) && !ttys.includes(p.tty) && isIt(p)) ttys.push(p.tty)
+  }
+  return ttys
+}
+
 /** An id that goes into a shell command as it is: letters, digits and dashes only. */
 const SAFE_ID = /^[A-Za-z0-9-]{1,64}$/
 /** A string as one shell word. */
@@ -921,6 +940,7 @@ export const isSnapshot = (v: unknown): v is Snapshot => {
 /** One session as the pane lists it, Claude's or Codex's alike. */
 /** A session's context said short: `437k`, or `117k/258k` with its window where its records say (Codex's). */
 export function contextSaid(c: SessionContext): string {
+  if (c.isCompacted === true) return 'compacted'
   return c.window === undefined || c.window <= 0 ? tokensSaid(c.tokens) : `${tokensSaid(c.tokens)}/${tokensSaid(c.window)}`
 }
 
@@ -938,7 +958,7 @@ export type Item = {
    * What a press opens: the terminal tab it runs in, a background Claude
    * session to attach, or the workspace window it runs in.
    */
-  target?: { tty: string } | { attach: string; profile: string } | { workspace: string; window: string; pane?: string }
+  target?: { tty: string } | { attach: string; profile: string; sessionId: string } | { workspace: string; window: string; pane?: string }
   /** Its lasting id for assigning it to a workspace: `claude:<session id>` or `codex:<thread id>`. */
   memberId?: string
   /** For an idle Claude session in a terminal tab: what moving it to the background starts from. */
@@ -1026,7 +1046,7 @@ export function viewOf(
           : inWorkspace(s.tty) !== undefined
             ? { target: { workspace: inWorkspace(s.tty)!.session, window: inWorkspace(s.tty)!.window, pane: inWorkspace(s.tty)!.pane } }
             : s.kind === 'bg'
-            ? { target: { attach: s.jobId || s.sessionId.slice(0, 8), profile: s.profile } }
+            ? { target: { attach: s.jobId || s.sessionId.slice(0, 8), profile: s.profile, sessionId: s.sessionId } }
             : /^ttys\d+$/.test(s.tty)
               ? { target: { tty: s.tty } }
               : {}),

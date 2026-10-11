@@ -161,6 +161,8 @@ const world = {
   args: new Map<number, string>(),
   /** ttys no Terminal.app tab has any more. */
   noTab: new Set<string>(),
+  /** More processes with a terminal, as `ps` prints them, beside the fixture's. */
+  terminalProcs: [] as string[],
   /** What MODE_SCRIPT prints for every transcript. */
   mode: '"permissionMode":"bypassPermissions"\n',
   /** How MOVE_SCRIPT ends: its exit code, or `reject` for a run that times out. */
@@ -238,6 +240,7 @@ const resetWorld = () => {
   world.stat.clear()
   world.args.clear()
   world.noTab.clear()
+  world.terminalProcs = []
   world.mode = '"permissionMode":"bypassPermissions"\n'
   world.move = 0
   world.parent = 'Ss -zsh'
@@ -293,6 +296,11 @@ function machine(argv: readonly string[], env: unknown): Run {
     case '/bin/ps': {
       if (argv.includes('ppid=')) return ok(`${9000 + Number(argv[argv.length - 1])}\n`)
       if (argv.includes('stat=,comm=')) return ok(`${world.parent}\n`)
+      // no -p, -a or -x: this person's processes that have a terminal (the fixture's own, and a test's, as they are)
+      if (!argv.includes('-p')) {
+        const lines = [...Object.entries(PS_LINES).flatMap(([pid, line]) => (world.exited.has(Number(pid)) || /^\s*\d+\s+\?\?/.test(line) ? [] : [changed(Number(pid), line)])), ...world.terminalProcs]
+        return ok(`${lines.map(line => (isUtcEnglish(env) ? line : local(line))).join('\n')}\n`)
+      }
       const pids = pidsAfter('-p')
       const lines = pids.flatMap(pid => (PS_LINES[pid] === undefined || world.exited.has(pid) ? [] : [changed(pid, PS_LINES[pid]!)]))
       const text = lines.map(line => (isUtcEnglish(env) ? line : local(line))).join('\n')
@@ -387,7 +395,7 @@ function machine(argv: readonly string[], env: unknown): Run {
     case '/usr/sbin/lsof':
       return { exitCode: 1, stdout: world.lsof ?? LSOF, stderr: '' }
     case '/usr/bin/osascript':
-      if (argv[4] === FOCUS_SCRIPT) return ok(TABS.has(argv[5] ?? '') ? 'shown\n' : '\n')
+      if (argv[4] === FOCUS_SCRIPT) return ok(TABS.has(argv[5] ?? '') && !world.noTab.has(argv[5] ?? '') ? 'shown\n' : '\n')
       if (argv[4] === OPEN_SCRIPT) {
         if (world.openFails) return { exitCode: 1, stdout: '', stderr: 'execution error: Not authorized to send Apple events to Terminal. (-1743)\n' }
         // the window it opens makes the workspace's tmux session
@@ -413,7 +421,7 @@ function machine(argv: readonly string[], env: unknown): Run {
 }
 
 /** The ttys Terminal.app has tabs on. */
-const TABS = new Set(['ttys004', 'ttys022', 'ttys000', 'ttys001', 'ttys045'])
+const TABS = new Set(['ttys004', 'ttys022', 'ttys000', 'ttys001', 'ttys045', 'ttys061', 'ttys062'])
 
 /** The database a sqlite3 command line opens, by path or by URI. */
 const dbOf = (argv: readonly string[]) =>
@@ -784,7 +792,7 @@ describe('collect', () => {
     const view = viewOf(snapshotOf(), { home: HOME, now: NOW, windowMs: 0, selfId: 'session-104' })
     const targets = Object.fromEntries(view.repos.flatMap(r => r.trees.flatMap(t => t.items.map(i => [i.title, i.target]))))
     expect(targets['WEB CONSOLE']).toEqual({ tty: 'ttys004' })
-    expect(targets['NIGHTLY']).toEqual({ attach: 'a1b2c3d4', profile: 'claude' })
+    expect(targets['NIGHTLY']).toEqual({ attach: 'a1b2c3d4', profile: 'claude', sessionId: 'session-102' })
     expect(targets['WORKER']).toBeUndefined()
     expect(targets['Find the report writer']).toEqual({ tty: 'ttys045' })
     expect(targets['Audit GitHub usage']).toBeUndefined()
@@ -936,6 +944,80 @@ describe('pane', () => {
     // this session, and a thread with no terminal, are not pressed to open
     expect(await ui.find({ key: 'open claude-104' })).toBeUndefined()
     expect(await ui.find({ key: 'open codex-b' })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('a background session already open in a tab is brought up there, never attached in a second window', async ($, on) => {
+    const { runs } = engine(on, machine, { selfId: 'session-104', termProgram: 'Apple_Terminal' })
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(90) })
+    const osa = () => runs.filter(r => r[0] === '/usr/bin/osascript' && (r[4] === FOCUS_SCRIPT || r[4] === OPEN_SCRIPT)).map(r => [r[4] === FOCUS_SCRIPT ? 'focus' : 'open', r[5]])
+    const press = async (...procs: string[]) => {
+      world.terminalProcs = procs
+      const before = osa().length
+      await ui.press({ key: 'open claude-102' })
+      return osa().slice(before)
+    }
+    const at = (tty: string, stat: string, args: string, pid = 301) => `  ${pid} ${tty}  ${stat} Fri Oct  9 16:00:00 2026     ${args}`
+    const attachNew = ['open', 'claude attach a1b2c3d4']
+    // attached by its job id, or by its session id (with claude's full path): that tab comes up
+    expect(await press(at('ttys061', 'S+', 'claude attach a1b2c3d4'))).toEqual([['focus', 'ttys061']])
+    expect(await press(at('ttys061', 'S+', '/Users/u/.local/bin/claude attach session-102'))).toEqual([['focus', 'ttys061']])
+    // a tab tmux runs (no Terminal tab of its own) is passed over for the next one
+    expect(await press(at('ttys070', 'S+', 'claude attach a1b2c3d4'), at('ttys061', 'Ss+', 'claude attach a1b2c3d4', 302))).toEqual([['focus', 'ttys070'], ['focus', 'ttys061']])
+    // a tab Terminal no longer has: a new window
+    world.noTab.add('ttys061')
+    expect(await press(at('ttys061', 'S+', 'claude attach a1b2c3d4'))).toEqual([['focus', 'ttys061'], attachNew])
+    world.noTab.clear()
+    // nothing showing it: stopped, in the background of its tab, without a terminal or on the Mac's console (no Terminal
+    // tab), gone on to the agent view, another
+    // session, another command or more words, or another program named so
+    for (const proc of [
+      at('ttys061', 'T+', 'claude attach a1b2c3d4'),
+      at('ttys061', 'S', 'claude attach a1b2c3d4'),
+      at('??', 'Ss', 'claude attach a1b2c3d4'),
+      at('console', 'S+', 'claude attach a1b2c3d4'),
+      at('ttys061', 'S+', 'claude agents'),
+      at('ttys061', 'S+', 'claude attach b9b9b9b9'),
+      at('ttys061', 'S+', 'claude attach a1b2c3d'),
+      at('ttys061', 'S+', 'claude logs a1b2c3d4'),
+      at('ttys061', 'S+', 'claude attach a1b2c3d4 --help'),
+      at('ttys061', 'S+', '/usr/bin/notclaude attach a1b2c3d4'),
+    ]) expect(await press(proc)).toEqual([attachNew])
+    // no tab at all: a new window, as before
+    expect(await press()).toEqual([attachNew])
+    await ui.unmount()
+  })
+
+  test('Ops screen pressed while that account\'s screen is open brings its window up, never a second one', async ($, on) => {
+    const { runs } = engine(on, machine, { termProgram: 'Apple_Terminal', selfId: 'session-104' })
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    const osa = () => runs.filter(r => r[0] === '/usr/bin/osascript' && (r[4] === FOCUS_SCRIPT || r[4] === OPEN_SCRIPT)).map(r => [r[4] === FOCUS_SCRIPT ? 'focus' : 'open', r[5]])
+    const press = async (...procs: string[]) => {
+      world.terminalProcs = procs
+      const before = osa().length
+      await ui.press({ key: 'ops' })
+      return osa().slice(before).map(([what, arg]) => (what === 'open' ? 'open' : `${what} ${arg}`))
+    }
+    expect(await press()).toEqual(['open'])
+    const file = /^node --no-warnings '(.*)' --account '\*'$/.exec(osa().at(-1)![1]!)![1]!
+    const ops = (account: string, tty = 'ttys062', stat = 'S+', args = `node --no-warnings ${file} --account ${account}`) => `  401 ${tty}  ${stat} Fri Oct  9 12:00:00 2026     ${args}`
+    // open for the accounts the pane shows (every one): brought up, nothing opened
+    expect(await press(ops('*'))).toEqual(['focus ttys062'])
+    // another account's, another plugin folder's, one with no account (before there were any), stopped, or not a
+    // Terminal tab: a new one
+    expect(await press(ops(''))).toEqual(['open'])
+    expect(await press(ops('*', 'ttys062', 'S+', `node --no-warnings /elsewhere/ops/ops.mjs --account *`))).toEqual(['open'])
+    expect(await press(ops('*', 'ttys062', 'S+', `node --no-warnings ${file}`))).toEqual(['open'])
+    expect(await press(ops('*', 'ttys062', 'T+'))).toEqual(['open'])
+    expect(await press(ops('*', 'ttys070'))).toEqual(['focus ttys070', 'open'])
+    // the pane showing only its own account: that account's screen (its name empty for the default)
+    await ui.press({ key: 'accounts' })
+    expect(await press(ops(''))).toEqual(['focus ttys062'])
+    expect(await press(ops('*'))).toEqual(['open'])
     await ui.unmount()
   })
 
@@ -3957,9 +4039,9 @@ describe('usage', () => {
     expect(currentLimits(usageFrom(state).codexLimits[''], NOW)).toEqual({})
     expect(scanInput(['/a', '/x/rollout-r.jsonl'], { ...EMPTY_USAGE, seen: { msg_1: 1, msg_2: 2 }, files: { '/a': { offset: 5, mark: 'm\tn' }, 'rollout:rollout-r.jsonl': { offset: 8, mark: '1,2,3\t/w' } } }))
       .toBe('S\tmsg_1\nS\tmsg_2\n/a\t5\tm\tn\n/x/rollout-r.jsonl\t8\t1,2,3\t/w\n')
-    const contexts = parseContexts('==> /a\nctx 437000\n==> /b\nctx 117363 258400\n==> /c\nctx x\n==> /d\n')
-    expect([...contexts]).toEqual([['/a', { tokens: 437_000 }], ['/b', { tokens: 117_363, window: 258_400 }]])
-    expect([contextSaid({ tokens: 437_000 }), contextSaid({ tokens: 117_363, window: 258_400 }), contextSaid({ tokens: 1_250_000, window: 0 })]).toEqual(['437k', '117k/258k', '1.3M'])
+    const contexts = parseContexts('==> /a\nctx 437000\n==> /b\nctx 117363 258400\n==> /c\nctx x\n==> /d\n==> /e\nctx compacted\n==> /f\nctx compacted 9\n')
+    expect([...contexts]).toEqual([['/a', { tokens: 437_000 }], ['/b', { tokens: 117_363, window: 258_400 }], ['/e', { tokens: 0, isCompacted: true }]])
+    expect([contextSaid({ tokens: 437_000 }), contextSaid({ tokens: 117_363, window: 258_400 }), contextSaid({ tokens: 1_250_000, window: 0 }), contextSaid({ tokens: 0, isCompacted: true })]).toEqual(['437k', '117k/258k', '1.3M', 'compacted'])
   })
 
   /** A usage.pl scan answer for a file: its rows, then its new mark. */
@@ -4025,6 +4107,12 @@ describe('usage', () => {
     // pressed again: hidden, and kept so
     await ui.press({ key: 'usage' })
     expect([store.get('usageShown'), (await texts()).join('\n').includes('Usage by project')]).toEqual([false, false])
+    // compacted since its last request: said so (its size is its next request's), once the contexts are read again
+    // (they are kept 10 s; the pane refreshes every 4 s)
+    world.contexts[transcript] = 'ctx compacted'
+    await clock.advance(13_000)
+    expect(await texts()).toContain('compacted')
+    expect(await texts()).not.toContain('437k')
     await ui.unmount()
   })
 

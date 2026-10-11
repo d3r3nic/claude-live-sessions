@@ -4,7 +4,7 @@
 #
 #   usage.pl ctx FILE...
 #     For each file: `==> FILE`, then `ctx TOKENS [WINDOW]`, the context of its last main-thread request as its last
-#     256 KB record it (none if they do not).
+#     256 KB record it (none if they do not), or `ctx compacted` when Claude's conversation was compacted after it.
 #   usage.pl scan SINCE < (S \t REPLY_ID lines, then FILE \t OFFSET \t MARK lines)
 #     For each file, from byte OFFSET to its last complete line: `==> FILE`, its sums, then `<== NEW_OFFSET \t MARK`
 #     to pass back next time. A file now shorter than OFFSET is read again from its start.
@@ -96,6 +96,11 @@ sub ctx {
       my $window = $line =~ /"model_context_window":(\d+)/ ? $1 : '';
       $found = "$n->{total_tokens} $window";
     } else {
+      # compacted since its last request: a summary in place of the conversation, its size known at the next one
+      if ($line =~ /(?<!\\)"subtype":"compact_boundary"/) {
+        $found = 'compacted' unless $line =~ /^\{[^{]*?"isSidechain":true/;
+        next;
+      }
       next unless $line =~ /(?<!\\)"role":"assistant"/;
       next if $line =~ /^\{[^{]*?"isSidechain":true/ || is_synthetic($line);
       my $n = claude_usage($line) or next;

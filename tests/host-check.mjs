@@ -999,6 +999,22 @@ except ChildProcessError: pass
     // the contexts: the session's last request of its own (not the subagent's, not one made up), Codex's last count and window
     const ctx = perl(['ctx', claudeFile, rolloutFile, join(scratch, 'gone.jsonl')])
     check('usage: each file\'s context: Claude\'s last main-thread request, Codex\'s last count and window; a file not there, none', ctx.stdout === `==> ${claudeFile}\nctx 7001\n==> ${rolloutFile}\nctx 65 258400\n==> ${join(scratch, 'gone.jsonl')}\n`, ctx.stdout.includes('ctx 7001\n') ? '' : JSON.stringify(ctx.stdout))
+    // Claude's conversation compacted after its last request (a record as Claude Code writes it): said so, its size the
+    // next request's; a subagent's compaction, or a prompt quoting such a record, is not it; a request since is the size
+    const boundary = (at, isSidechain = false) => JSON.stringify({ parentUuid: null, logicalParentUuid: 'p', isSidechain, type: 'system', subtype: 'compact_boundary', content: 'Conversation compacted', isMeta: false, timestamp: at, compactMetadata: { trigger: 'manual', preTokens: 7001 } })
+    const quoting = JSON.stringify({ parentUuid: 'p', isSidechain: false, type: 'user', message: { role: 'user', content: '{"type":"system","subtype":"compact_boundary"}' }, timestamp: '2026-10-09T15:22:00.000Z' })
+    const compactedFiles = [
+      [lines[4], boundary('2026-10-09T15:20:00.000Z')],
+      [lines[4], boundary('2026-10-09T15:20:00.000Z', true), quoting],
+      [lines[4], boundary('2026-10-09T15:20:00.000Z'), reply('msg_G', '2026-10-09T15:21:00.000Z', usage(3, 2000, 0, 7))],
+    ].map((records, k) => {
+      const file = join(scratch, `compacted-${k}.jsonl`)
+      writeFileSync(file, `${records.join('\n')}\n`)
+      return file
+    })
+    const told = perl(['ctx', ...compactedFiles])
+    const toldWant = `==> ${compactedFiles[0]}\nctx compacted\n==> ${compactedFiles[1]}\nctx 7001\n==> ${compactedFiles[2]}\nctx 2003\n`
+    check('usage: a context compacted since its last request is said so; a subagent\'s compaction or a quoted one is not; a request since gives its size', told.stdout === toldWant, told.stdout === toldWant ? '' : JSON.stringify(told.stdout))
     // into the plugin's state, priced; the rollout's mark by its name
     const state1 = u.applyScan(u.EMPTY_USAGE, first.stdout, Date.parse('2026-10-09T15:20:00Z'), f => (f === claudeFile || f === copyFile ? '' : f === rolloutFile ? 'work' : undefined))
     const slots = state1.slots
@@ -1114,10 +1130,39 @@ except ChildProcessError: pass
         every.every(f => f.includes('ALL ACCOUNTS') && f.includes('Mine Here') && f.includes('Theirs There') && f.includes('a hand-off of theirs')),
         [own, theirs, ...every].map(f => f.split('\n').find(l => /ACCOUNT/.test(l))?.trim().slice(0, 60)).join(' | '))
     }
-    // a workspace of one agent: that agent alone on its row, no relay line; a click anywhere on the row opens it
+    // a workspace as it reads: its account only when every account is shown, `stopped` only when it is, nothing of its
+    // window; each agent's state (working, never exec), context and title; the relay's last step, and the alert only
+    // while the owner has not typed since a cue for them
+    {
+      const readFile = join(scratch, 'reads.json')
+      const codexIn = { key: 'cx', title: 'Continue the reading work', cwd: scratch, profile: 'codex', surface: 'terminal', tty: 'ttys991', updatedAt: now, lastActive: now, agents: 0, context: { tokens: 117363, window: 258400 } }
+      const relayed = (status, typedAgo) => ({ mode: 'auto', since: now - 9e6, streak: 2, status, at: now - 3 * 3_600_000, ...(typedAgo === undefined ? {} : { typedAt: now - typedAgo }) })
+      writeFileSync(readFile, snapshot({ codex: [codexIn], workspaces: [
+        { id: 'opsx', name: 'Answered One', env: '', dir: scratch, createdAt: 1, relay: relayed('needs you', 600_000) },
+        { id: 'waits', name: 'Waiting One', env: 'mmm', dir: scratch, createdAt: 2, relay: relayed('needs you', 5 * 3_600_000) },
+      ] }))
+      const reads = (...extra) => spawnSync(process.execPath, ['--no-warnings', opsFile, '--frame', '--plain', ...extra], { encoding: 'utf8', env: { ...env, LIVE_SESSIONS_SNAPSHOT: readFile, COLS: '120', ROWS: '40', NOW: String(now) } }).stdout.split('\n')
+      const every = reads()
+      const own = reads('--account', '')
+      const row = (frame, text) => frame.find(l => l.includes(text)) ?? ''
+      const after = (frame, text, k) => frame[frame.findIndex(l => l.includes(text)) + k] ?? ''
+      const answered = every.slice(every.findIndex(l => l.includes('Answered One')), every.findIndex(l => l.includes('Waiting One')))
+      check('ops: a workspace says its account only when every account is shown, stopped only when it is, nothing of its window',
+        /Answered One ░▒▓\s+default\s/.test(row(every, 'Answered One')) && /Waiting One ░▒▓\s+mmm · stopped\s/.test(row(every, 'Waiting One')) &&
+        /Answered One ░▒▓\s+║$/.test(row(own, 'Answered One').trimEnd()) && !every.some(l => /window open|hidden|env /.test(l)),
+        `${JSON.stringify(row(every, 'Answered One').trim())} ${JSON.stringify(row(every, 'Waiting One').trim())} ${JSON.stringify(row(own, 'Answered One').trim())}`)
+      check('ops: an agent\'s row says it is working (never exec), its context and its title',
+        /\[CODEX\]\s+● working \S{3}\s+ctx 117k\/258k\s+Continue the reading work/.test(after(every, 'Answered One', 2)) && /\[CLAUDE\]\s+offline/.test(after(every, 'Answered One', 1)) && !every.some(l => /EXEC|exec/.test(l)),
+        JSON.stringify(after(every, 'Answered One', 2).trim()))
+      check('ops: a cue for the owner they typed after is no alert, and says so; one they have not is',
+        /relay\s+auto  needs you 3h ago · you typed 10m ago · 2 hand-offs since you typed/.test(after(every, 'Answered One', 3)) && !answered.some(l => l.includes('OPERATOR INPUT REQUIRED')) &&
+        after(every, 'Waiting One', 4).includes('OPERATOR INPUT REQUIRED') && !/· you typed \S+ ago/.test(after(every, 'Waiting One', 3)),
+        `${JSON.stringify(after(every, 'Answered One', 3).trim())} ${JSON.stringify(after(every, 'Waiting One', 4).trim())}`)
+    }
+    // a workspace of one agent: that agent's row alone, no relay line; a click on the row opens it
     const solo = at('Solo X')
     check('ops: a workspace of one agent shows that agent alone, with no relay, and its row opens that agent',
-      solo > 0 && rows[solo + 1].includes('[CODEX]') && rows[solo + 1].includes('alone') && !rows[solo + 1].includes('[CLAUDE]') && !rows[solo + 2].includes('relay') &&
+      solo > 0 && rows[solo + 1].includes('[CODEX]') && !rows[solo + 1].includes('[CLAUDE]') && !rows[solo + 2].includes('relay') &&
       JSON.stringify(targets[solo + 1]) === JSON.stringify({ kind: 'workspace', id: 'solox', agent: 'codex' }),
       `${JSON.stringify(rows[solo + 1])} ${JSON.stringify(targets[solo + 1])}`)
     // the screen, live in a terminal: clicks, keys, signals
@@ -1170,16 +1215,15 @@ except ChildProcessError: pass
     check('ops, live: another account\'s session events, seen while every account was shown, are gone when its own view comes back',
       during.includes('THEIRS TITLE') && back.includes('ACCOUNT default') && !back.includes('THEIRS TITLE'),
       `${during.includes('THEIRS TITLE')} ${back.includes('ACCOUNT default')} ${back.includes('THEIRS TITLE')}`)
-    // Claude's side of the agent row, then Codex's: each pane gets the keys; a stopped workspace: said, nothing done
+    // Claude's row, then Codex's: each pane gets the keys; a stopped workspace: said, nothing done
     t('select-pane', '-t', right)
-    const agentRow = rowOf('[CLAUDE]')
-    const outA = live(`os.write(fd, b"\\x1b[<0;6;${agentRow}M\\x1b[<0;6;${agentRow}m")`)
+    const outA = live(`os.write(fd, b"\\x1b[<0;60;${rowOf('[CLAUDE]')}M\\x1b[<0;60;${rowOf('[CLAUDE]')}m")`)
     const activeA = t('display-message', '-p', '-t', '=ws-opsx:peers', '#{pane_id}').stdout.trim()
-    const outB = live(`os.write(fd, b"\\x1b[<0;100;${agentRow}M\\x1b[<0;100;${agentRow}m")`)
+    const outB = live(`os.write(fd, b"\\x1b[<0;6;${rowOf('[CODEX]')}M\\x1b[<0;6;${rowOf('[CODEX]')}m")`)
     const activeB = t('display-message', '-p', '-t', '=ws-opsx:peers', '#{pane_id}').stdout.trim()
     const outC = live(`os.write(fd, b"\\x1b[<0;10;${rowOf('Stopped one')}M")`)
     const opens = existsSync(asked) ? readFileSync(asked, 'utf8').trim().split('\n') : []
-    check('ops: a click on either side of an agent row gives that agent\'s pane the keys and opens a window attached to it; a stopped workspace is left to /sessions',
+    check('ops: a click on an agent\'s row gives that agent\'s pane the keys and opens a window attached to it; a stopped workspace is left to /sessions',
       activeA === left && activeB === right && outC.includes('Stopped one is not running: open it from /sessions') &&
       opens.length === 2 && opens.every(l => l === `OPEN tmux -L '${socket}' -f /dev/null attach -t '=ws-opsx'`),
       `${activeA}/${left} ${activeB}/${right} ${JSON.stringify(opens)}`)
@@ -1189,6 +1233,48 @@ except ChildProcessError: pass
     const byKeys = live('os.write(fd, b"qq")')
     const bySignal = live('os.kill(pid, signal.SIGINT)')
     check('ops: the terminal is given back as it was, by q, qq or a signal', restored(byKeys) && restored(bySignal))
+    // its code changed under it (the plugin updated): it starts again in place, the same process and window, with the
+    // new code; a copy of the plugin's ops and hooks, changed while it runs
+    {
+      const copy = join(scratch, 'plugin-copy')
+      for (const dir of ['ops', 'hooks']) {
+        mkdirSync(join(copy, dir), { recursive: true })
+        for (const name of readdirSync(join(import.meta.dirname, '..', dir))) writeFileSync(join(copy, dir, name), readFileSync(join(import.meta.dirname, '..', dir, name)))
+      }
+      const copied = join(copy, 'ops', 'ops.mjs')
+      const again = spawnSync('python3', ['-c', [
+        'import os, pty, sys, time, select, struct, fcntl, termios, json',
+        'pid, fd = pty.fork()',
+        'if pid == 0:',
+        '    os.execvpe(sys.argv[1], sys.argv[1:], os.environ)',
+        'fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 120, 0, 0))',
+        'out = b""',
+        'def drain(s):',
+        '    global out',
+        '    end = time.time() + s',
+        '    while time.time() < end:',
+        '        r, _, _ = select.select([fd], [], [], 0.1)',
+        '        if r:',
+        '            try: out += os.read(fd, 65536)',
+        '            except OSError: return',
+        // long enough for a check of its code (every 2 s, once a change is 2 s old): unchanged, it never starts again
+        'drain(5)',
+        'before = len(out)',
+        'p = os.environ["OPS_COPY"]',
+        'text = open(p).read()',
+        'open(p, "w").write(text.replace("LIVE//SESSIONS :: OPS", "LIVE//SESSIONS :: OPS AGAIN"))',
+        'drain(7)',
+        'done, _ = os.waitpid(pid, os.WNOHANG)',
+        'os.write(fd, b"q")',
+        'drain(1)',
+        'print(json.dumps({"before": out[:before].decode("utf8", "replace"), "after": out[before:].decode("utf8", "replace"), "alive": done == 0}))',
+      ].join('\n'), process.execPath, '--no-warnings', copied], { encoding: 'utf8', timeout: 30_000, env: { ...env, OPS_COPY: copied } })
+      const seenAgain = (() => { try { return JSON.parse(again.stdout) } catch { return { before: '', after: '', alive: false } } })()
+      const bareAgain = text => text.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')
+      check('ops: its code changed, it starts again in place (the same process) with the new code, the screen given back and taken again',
+        !bareAgain(seenAgain.before).includes('OPS AGAIN') && !seenAgain.before.includes('\x1b[?1049l') && bareAgain(seenAgain.after).includes('LIVE//SESSIONS :: OPS AGAIN') && seenAgain.alive && seenAgain.after.includes('\x1b[?1049l') && seenAgain.after.lastIndexOf('\x1b[?1049h') > seenAgain.after.indexOf('\x1b[?1049l'),
+        `${bareAgain(seenAgain.after).includes('OPS AGAIN')} ${seenAgain.alive} ${again.stderr.slice(0, 200)}`)
+    }
     // its terminal closed under it (the window shut): it ends, never left running
     const closedArgs = ['-c', [
       'import os, pty, sys, time',
@@ -1248,6 +1334,59 @@ except ChildProcessError: pass
     const lines = [log + '.1', log].flatMap(f => (existsSync(f) ? readFileSync(f, 'utf8').trim().split('\n') : []))
     const parsed = lines.flatMap(l => { try { return [JSON.parse(l)] } catch { return [] } })
     check('ops: the event log takes lines from 40 sessions at once whole, none lost as it moves to .1', parsed.length === lines.length && parsed.filter(e => e.at >= 1000).length === 40 && existsSync(log + '.1'), `${parsed.length}/${lines.length}, ${parsed.filter(e => e.at >= 1000).length} new`)
+  } finally {
+    t('kill-server')
+    rmSync(join(process.env.TMUX_TMPDIR ?? '/tmp', `tmux-${process.getuid()}`, socket), { force: true })
+    rmSync(scratch, { recursive: true, force: true })
+  }
+}
+
+// what a window shows, found as `ps` lists this person's processes with a terminal: a background session's tab by its
+// `claude attach <id>` in front (not the agent view), and an ops screen by its command line, which stays the same when
+// it starts again in place with new code. Stand-ins and the screen run in panes of a private tmux server (which
+// continues a pane's process that is stopped, so a stopped one is the plugin tests' case).
+{
+  const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'live-sessions-shown-')))
+  const socket = `live-sessions-shown-${process.pid}`
+  const t = (...args) => spawnSync('tmux', ['-L', socket, '-f', '/dev/null', ...args], { encoding: 'utf8' })
+  try {
+    const bin = join(scratch, 'bin')
+    mkdirSync(bin)
+    writeFileSync(join(scratch, 'wait.c'), '#include <unistd.h>\nint main(void) { sleep(600); return 0; }\n')
+    execFileSync('/usr/bin/cc', ['-o', join(bin, 'claude'), join(scratch, 'wait.c')])
+    // a copy of the plugin's ops and hooks, so its code can change under the screen
+    const copy = join(scratch, 'plugin')
+    for (const dir of ['ops', 'hooks']) {
+      mkdirSync(join(copy, dir), { recursive: true })
+      for (const name of readdirSync(join(import.meta.dirname, '..', dir))) writeFileSync(join(copy, dir, name), readFileSync(join(import.meta.dirname, '..', dir, name)))
+    }
+    const opsCopy = join(copy, 'ops', 'ops.mjs')
+    const snap = join(scratch, 'snapshot.json')
+    writeFileSync(snap, JSON.stringify({ version: c.SHARED_VERSION, snapshot: { claude: [], codex: [], places: {}, envs: [''], problems: [], checkedAt: Date.now(), workspaces: [], tmux: { panes: {}, clients: {} } } }))
+    const path = `PATH='${bin}':"$PATH"`
+    t('new-session', '-d', '-s', 'attached', `exec env ${path} claude attach abcd1234`)
+    t('new-session', '-d', '-s', 'agents', `exec env ${path} claude agents`)
+    t('new-session', '-d', '-s', 'ops', '-x', '120', '-y', '30', `exec env LIVE_SESSIONS_SNAPSHOT='${snap}' LIVE_SESSIONS_EVENTS='${join(scratch, 'events.jsonl')}' HOME='${scratch}' node --no-warnings '${opsCopy}' --account ''`)
+    await new Promise(res => setTimeout(res, 2_000))
+    const ttyOf = name => t('display-message', '-p', '-t', `=${name}:`, '#{pane_tty}').stdout.trim().replace('/dev/', '')
+    const pidOf = name => Number(t('display-message', '-p', '-t', `=${name}:`, '#{pane_pid}').stdout.trim())
+    const listed = () => [...c.parsePs(spawnSync('/bin/ps', ['-ww', '-o', c.PS_COLUMNS], { encoding: 'utf8', env: { ...process.env, ...PS_ENV } }).stdout).values()]
+    const opsArgs = `node --no-warnings ${opsCopy} --account`
+    const first = listed()
+    const attachedIn = c.shownIn(first, p => c.isAttachTo(p.args, ['abcd1234', 'abcd1234-0000']))
+    const opsIn = c.shownIn(first, p => p.args === opsArgs)
+    check('shown: a background session\'s tab is found by its claude attach in front; one gone on to the agent view is not',
+      JSON.stringify(attachedIn) === JSON.stringify([ttyOf('attached')]) && /^ttys\d+$/.test(attachedIn[0] ?? ''),
+      `${JSON.stringify(attachedIn)} attached ${ttyOf('attached')} agents ${ttyOf('agents')}`)
+    // its code changed: the screen starts again in place, its command line and process the same, the new code drawn
+    const opsPid = pidOf('ops')
+    writeFileSync(opsCopy, readFileSync(opsCopy, 'utf8').replace('LIVE//SESSIONS :: OPS', 'LIVE//SESSIONS :: OPS ANEW'))
+    await new Promise(res => setTimeout(res, 6_000))
+    const opsAfter = c.shownIn(listed(), p => p.args === opsArgs && p.pid === opsPid)
+    const drawn = t('capture-pane', '-p', '-t', '=ops:').stdout
+    check('shown: an ops screen is found by its command line, the same once it has started again in place with new code',
+      JSON.stringify(opsIn) === JSON.stringify([ttyOf('ops')]) && JSON.stringify(opsAfter) === JSON.stringify([ttyOf('ops')]) && drawn.includes('LIVE//SESSIONS :: OPS ANEW'),
+      `${JSON.stringify(opsIn)} ${JSON.stringify(opsAfter)} ${drawn.includes('OPS ANEW')}`)
   } finally {
     t('kill-server')
     rmSync(join(process.env.TMUX_TMPDIR ?? '/tmp', `tmux-${process.getuid()}`, socket), { force: true })

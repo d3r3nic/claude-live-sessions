@@ -3,9 +3,10 @@
 // a node, an agent or an event opens what it is about: the workspace's window at that agent, or a session's tab.
 //   node ops/ops.mjs [--account <env>]     live, full screen, one account's or every one's (a accounts, t theme, q quit)
 //   node ops/ops.mjs --frame [--plain]     one frame, printed (COLS, ROWS, TICK); --targets prints what each row opens
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync, writeSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync, writeSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import * as nodeModule from 'node:module'
+import { fileURLToPath } from 'node:url'
 
 /** Said, and left on screen until a key (the window it runs in closes with it). */
 async function fail(text) {
@@ -35,6 +36,17 @@ try {
 }
 
 const HOME = process.env.HOME
+/** When its code (this folder's files and the plugin's hooks it loads) last changed; 0 when it cannot tell. */
+function codeAt() {
+  try {
+    return Math.max(0, ...['.', '../hooks'].flatMap(dir => {
+      const path = fileURLToPath(new URL(`${dir}/`, import.meta.url))
+      return readdirSync(path, { withFileTypes: true }).filter(e => e.isFile()).map(e => statSync(path + e.name).mtimeMs)
+    }))
+  } catch {
+    return 0
+  }
+}
 const SNAPSHOT = process.env.LIVE_SESSIONS_SNAPSHOT ?? `${HOME}/Library/Caches/live-sessions/snapshot.json`
 const EVENTS = process.env.LIVE_SESSIONS_EVENTS ?? `${HOME}/Library/Caches/live-sessions/events.jsonl`
 const ESC = '\x1b['
@@ -171,7 +183,7 @@ function diff(snap, now) {
     for (const [key, item] of state) {
       const before = previous.state.get(key)
       if (before === undefined) said('SPAWN', item)
-      else if (before.state !== item.state && item.state === 'working') said('EXEC', item)
+      else if (before.state !== item.state && item.state === 'working') said('WORKING', item)
       else if (before.state !== item.state && before.state === 'working') said('IDLE', item)
     }
     for (const [key, item] of previous.state) if (!state.has(key)) said('EXIT', item)
@@ -211,34 +223,45 @@ function frame(snap, now, cols, rows, tick, note = '') {
     const relay = raw?.relay
     const claude = ws.items.find(i => i.tool === 'claude')
     const codex = ws.items.find(i => i.tool === 'codex')
-    // one agent the owner chose: its row alone, no link and no relay (it has no one to pass to)
+    // one agent the owner chose: its row alone, no relay (it has no one to pass to)
     const only = raw?.only === 'claude' || raw?.only === 'codex' ? raw.only : undefined
-    const needs = only === undefined && (relay?.status === 'needs you' || relay?.status === 'waits for you')
+    // as the pane says it: a cue, a pass it could not make or a pane left scrolled back, until the owner types
+    const needs = only === undefined && ws.relay.needsOwner
     const node = WORKSPACE_ID.test(ws.key) ? { kind: 'workspace', id: ws.key } : undefined
-    line(` ${rgb(needs && tick % 6 < 3 ? G.red : G.hi, bold(`▓▒░ ${clean(ws.name)} ░▒▓`))}  ${rgb(G.lo, `env ${clean(ws.env) || 'default'} · ${ws.isAttached ? '● window open' : ws.isRunning ? '◐ hidden, running' : '○ stopped'}`)}`, node)
-    const agent = (label, item) => {
-      if (item === undefined) return rgb(G.dim, `[${label}] offline`)
-      const bar = item.state === 'working' ? rgb(G.amber, '▁▂▃▅▇▅▃▂'.slice(tick % 8, (tick % 8) + 5).padEnd(5, '▁')) : rgb(G.dim, '·····')
-      return `${rgb(G.hi, `[${label}]`)} ${item.state === 'working' ? rgb(G.amber, '● EXEC') : rgb(G.mid, '○ idle')} ${bar} ${rgb(G.mid, cut(clean(item.title), 18))}`
+    // the account is the screen's, in its header; each workspace's only when every account is shown
+    const tags = [...(account === c.ALL_ACCOUNTS ? [clean(ws.env) || 'default'] : []), ...(ws.isRunning ? [] : ['stopped'])]
+    line(` ${rgb(needs && tick % 6 < 3 ? G.red : G.hi, bold(`▓▒░ ${clean(ws.name)} ░▒▓`))}${tags.length === 0 ? '' : `  ${rgb(G.lo, tags.join(' · '))}`}`, node)
+    // an agent a line: what it does, how large its context is, its conversation's title
+    const agent = (tool, item) => {
+      const label = rgb(G.hi, pad(`[${tool.toUpperCase()}]`, 8))
+      const target = node === undefined ? undefined : { ...node, agent: tool }
+      if (item === undefined) {
+        line(`   ${label} ${rgb(G.dim, 'offline')}`, target)
+        return
+      }
+      const isWorking = item.state === 'working'
+      const state = isWorking ? `${rgb(G.amber, '● working')} ${rgb(G.amber, '▁▂▃▅▇▅▃▂'.slice(tick % 8, (tick % 8) + 3).padEnd(3, '▁'))}` : rgb(G.mid, pad('○ idle', 13))
+      const context = item.context === undefined ? pad('', 14) : `${rgb(G.lo, 'ctx')} ${rgb(G.mid, pad(clean(item.context), 10))}`
+      line(`   ${label} ${state}  ${context} ${rgb(G.mid, cut(clean(item.title), Math.max(8, inner - 45)))}`, target)
     }
-    // a packet in flight for 20 s after a hand-off, toward who got it
-    const linkWidth = 16
-    const sinceRelay = relay?.at === undefined ? Infinity : now - relay.at
-    let link = rgb(G.dim, '─'.repeat(linkWidth))
-    if (sinceRelay < 20_000 && /Codex|Claude/.test(relay.status ?? '')) {
-      const toCodex = /Codex/.test(relay.status)
-      const pos = tick % linkWidth
-      link = rgb(G.cyan, [...'─'.repeat(linkWidth)].map((ch, k) => (k === (toCodex ? pos : linkWidth - 1 - pos) ? (toCodex ? '▸' : '◂') : ch)).join(''))
-    }
-    if (only !== undefined) {
-      line(`   ${agent(only.toUpperCase(), only === 'claude' ? claude : codex)}  ${rgb(G.lo, 'alone')}`, node === undefined ? undefined : { ...node, agent: only })
-    } else {
-      // a click left of Codex's part opens Claude's pane; on it, Codex's
-      const left = `   ${agent('CLAUDE', claude)}  ${link}  `
-      line(`${left}${agent('CODEX', codex)}`, node === undefined ? undefined : { ...node, agent: 'claude', codexFrom: 1 + width(left) })
+    if (only !== undefined) agent(only, only === 'claude' ? claude : codex)
+    else {
+      agent('claude', claude)
+      agent('codex', codex)
+      // what it last did: a hand-off in flight for 20 s after it passed, toward who got it
+      const sinceRelay = relay?.at === undefined ? Infinity : now - relay.at
+      const status = clean(relay?.status)
+      const isFlying = sinceRelay < 20_000 && /Codex|Claude/.test(status)
+      const arrow = /Codex/.test(status) ? '▸' : '◂'
+      const flight = isFlying ? `${rgb(G.cyan, [0, 1, 2].map(k => (k === tick % 3 ? arrow : '·')).join(''))} ` : ''
+      // a cue for the owner they have typed since: answered, as far as the relay can tell
+      const answered = relay?.typedAt !== undefined && relay?.at !== undefined && relay.typedAt > relay.at && /^(needs you|could not pass|waits: )/.test(status)
+        ? rgb(G.lo, ` · you typed ${c.ago(now - relay.typedAt)} ago`)
+        : ''
+      const streak = Number.isFinite(relay?.streak) && relay.streak > 0 ? rgb(G.lo, ` · ${relay.streak} hand-off${relay.streak === 1 ? '' : 's'} since you typed`) : ''
       const mode = clean(relay?.mode ?? 'off')
-      const combo = Number.isFinite(relay?.streak) ? relay.streak : 0
-      line(`   ${rgb(G.lo, 'relay')} ${rgb(mode === 'auto' ? G.hi : G.lo, mode.toUpperCase())}  ${rgb(G.lo, 'combo')} ${rgb(combo > 0 ? G.amber : G.lo, `x${combo}`)}  ${rgb(G.lo, 'last')} ${rgb(needs ? G.red : G.mid, clean(relay?.status) || '—')}${relay?.at !== undefined ? rgb(G.lo, ` ${c.ago(now - relay.at)} ago`) : ''}`, node)
+      const last = status === '' ? '' : `  ${flight}${rgb(needs ? G.red : isFlying ? G.cyan : G.mid, status)}${relay?.at === undefined ? '' : rgb(G.lo, ` ${c.ago(sinceRelay)} ago`)}${answered}`
+      line(`   ${rgb(G.lo, pad('relay', 8))} ${rgb(mode === 'auto' ? G.hi : G.lo, mode)}${last}${streak}`, node)
     }
     if (needs) line(`   ${rgb(tick % 6 < 3 ? G.red : G.amber, bold('⚠ OPERATOR INPUT REQUIRED ⚠'))}  ${rgb(G.mid, 'click to open')}`, node)
     line()
@@ -250,7 +273,7 @@ function frame(snap, now, cols, rows, tick, note = '') {
     const items = repo.trees.flatMap(t => t.items)
     const busy = items.filter(i => i.state === 'working').length
     const row = items.map(i => (i.state === 'working' ? rgb(G.amber, '▮') : rgb(G.lo, '▮'))).join('')
-    line(` ${rgb(G.mid, pad(cut(clean(repo.label), 34), 34))} ${row}${' '.repeat(Math.max(0, 14 - items.length))} ${rgb(G.lo, `${items.length} agents`)}${busy > 0 ? rgb(G.amber, ` · ${busy} exec`) : ''}`)
+    line(` ${rgb(G.mid, pad(cut(clean(repo.label), 34), 34))} ${row}${' '.repeat(Math.max(0, 14 - items.length))} ${rgb(G.lo, `${items.length} agents`)}${busy > 0 ? rgb(G.amber, ` · ${busy} working`) : ''}`)
   }
   rule('EVENT LOG · click one to open it')
   const room = Math.max(3, rows - out.length - 2)
@@ -258,7 +281,7 @@ function frame(snap, now, cols, rows, tick, note = '') {
   const shownIds = new Set(snap.workspaces.map(x => x.id))
   const events = allEvents().filter(e => account === c.ALL_ACCOUNTS || e.target?.kind !== 'workspace' || shownIds.has(e.target.id))
   for (const e of events.slice(0, room)) {
-    const color = /ALERT|NEEDS|WAITS|DRIFT|FAILED/.test(e.kind) ? G.red : /RELAY|PASS|NOTIFY/.test(e.kind) ? G.cyan : /EXEC|COMPACT/.test(e.kind) ? G.amber : G.mid
+    const color = /ALERT|NEEDS|WAITS|DRIFT|FAILED/.test(e.kind) ? G.red : /RELAY|PASS|NOTIFY/.test(e.kind) ? G.cyan : /WORKING|COMPACT/.test(e.kind) ? G.amber : G.mid
     line(` ${rgb(G.lo, new Date(e.at).toTimeString().slice(0, 8))}  ${rgb(color, pad(e.kind, 7))} ${rgb(G.mid, cut(e.text, inner - 22))}${e.target !== undefined ? rgb(G.lo, ' ›') : ''}`, e.target)
   }
   // never more than the screen holds: the rest is cut, never scrolled
@@ -335,6 +358,11 @@ if (process.argv.includes('--frame')) {
   if (loaded === undefined) await fail(`No snapshot of this version at ${SNAPSHOT} yet: open /sessions in Claude Code once (with this plugin's version).`)
   let tick = 0
   let note = ''
+  // its code as it started: changed since (an update of the plugin), the screen starts again in place, the same process
+  // and window, so an open window never shows an older screen than the plugin's
+  const startedCode = codeAt()
+  let codeCheckedAt = Date.now()
+  let isRestartable = typeof process.execve === 'function'
   let noteUntil = 0
   let shown = { targets: [] }
   // its own screen, no cursor, no wrapping (a long line is cut, never pushed onto the next), and the mouse taken,
@@ -377,8 +405,7 @@ if (process.argv.includes('--frame')) {
     // a left click (SGR mouse: button 0, pressed) on a row that opens something
     for (const m of text.matchAll(/\x1b\[<(\d+);(\d+);(\d+)([Mm])/g)) {
       if (m[1] !== '0' || m[4] !== 'M') continue
-      const row = shown.targets[Number(m[3]) - 1]
-      const target = row?.codexFrom !== undefined && Number(m[2]) > row.codexFrom ? { ...row, agent: 'codex' } : row
+      const target = shown.targets[Number(m[3]) - 1]
       if (target !== undefined) {
         try {
           note = open(target, loaded.snap)
@@ -409,6 +436,26 @@ if (process.argv.includes('--frame')) {
     diff(seenAs(loaded.snap), Date.now())
   } catch {}
   setInterval(() => {
+    // every 2 s, once the change has settled for 2 s (an update writes several files)
+    if (isRestartable && Date.now() - codeCheckedAt >= 2_000) {
+      codeCheckedAt = Date.now()
+      const code = codeAt()
+      if (code > startedCode && Date.now() - code >= 2_000) {
+        restore()
+        process.stdin.setRawMode?.(false)
+        try {
+          process.execve(process.execPath, [process.argv0, ...process.execArgv, ...process.argv.slice(1)], process.env)
+        } catch {
+          // it goes on as it is: the screen taken again, said once
+          isRestartable = false
+          isRestored = false
+          process.stdin.setRawMode?.(true)
+          process.stdout.write('\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[?1000h\x1b[?1006h' + bgOn() + '\x1b[2J')
+          note = 'the plugin changed: q, then Ops screen in /sessions, shows it'
+          noteUntil = Date.now() + 30_000
+        }
+      }
+    }
     const again = load()
     if (again !== undefined && again.mtime !== loaded.mtime) {
       loaded = again

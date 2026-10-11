@@ -1,4 +1,4 @@
-import type { UsageLimit, UsageRow } from '../types'
+import type { SessionContext, UsageLimit, UsageRow } from '../types'
 
 // What each project costs of an account's plan: token counts from Claude Code transcripts and Codex rollouts, read
 // by usage.pl (once, then only what was added), kept in 10-minute slots per account, tool and folder, and set
@@ -292,9 +292,9 @@ export function clockOf(view: { offset: number; offsets: Record<string, number> 
 /** For each epoch second in "$@", the Mac's offset from UTC then (`-0700`), one per line. */
 export const OFFSETS_SCRIPT = 'for t in "$@"; do /bin/date -r "$t" +%z; done'
 
-/** usage.pl ctx's output: file → its last context, in tokens, and its window when the file says. */
-export function parseContexts(stdout: string): Map<string, { tokens: number; window?: number }> {
-  const out = new Map<string, { tokens: number; window?: number }>()
+/** usage.pl ctx's output: file → its last context, in tokens, and its window when the file says; or compacted since. */
+export function parseContexts(stdout: string): Map<string, SessionContext> {
+  const out = new Map<string, SessionContext>()
   let file: string | undefined
   for (const line of stdout.split('\n')) {
     if (line.startsWith('==> ')) {
@@ -303,6 +303,7 @@ export function parseContexts(stdout: string): Map<string, { tokens: number; win
     }
     const m = /^ctx (\d+)(?: (\d+))?$/.exec(line)
     if (file !== undefined && m !== null) out.set(file, { tokens: Number(m[1]), ...(m[2] === undefined ? {} : { window: Number(m[2]) }) })
+    if (file !== undefined && line === 'ctx compacted') out.set(file, { tokens: 0, isCompacted: true })
   }
   return out
 }

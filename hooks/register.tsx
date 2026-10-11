@@ -73,6 +73,7 @@ import {
   codexSessions,
   codexTerminals,
   isClaudeProcess,
+  isAttachTo,
   isForeground,
   isShell,
   modeFlags,
@@ -95,6 +96,7 @@ import {
   readOnlyArgs,
   registryPid,
   resumeCommand,
+  shownIn,
   sortClaude,
   statusSummary,
   threadQuery,
@@ -651,7 +653,6 @@ async function hideWorkspace($: EngineInterface, ws: Workspace) {
   await refresh($, 0)
 }
 
-/** Brings a session's Terminal tab to the front, or opens a background session in a new window. */
 /**
  * Brings a workspace up: the Terminal tab already attached to its tmux
  * session to the front, else a new window that creates the session (if it
@@ -752,13 +753,26 @@ async function openOps($: EngineInterface) {
     $.process
       .run(['/usr/bin/osascript', '-l', 'JavaScript', '-e', script, ...args], { timeoutMs: 10_000 })
       .catch((error: unknown) => ({ exitCode: -1, stdout: '', stderr: message(error) }))
-  const seen = await screens($, osascript)
-  const place = seen === undefined ? undefined : { ...seen.screens[0]!, fontSize: openedFontSize(seen.fontSize) }
   const home = (await $.env.get('HOME')) ?? ''
   // the account this pane shows
-  const command = `node --no-warnings ${shellQuote(`${$.plugin.root}/ops/ops.mjs`)} --account ${shellQuote(await shownAccount($, home))}`
+  const account = await shownAccount($, home)
+  const file = `${$.plugin.root}/ops/ops.mjs`
+  // that screen open already (it restarts itself when the plugin changes): its window to the front, never a second one
+  const running = shownIn(await terminalProcesses($), p => p.args === `node --no-warnings ${file} --account ${account}`.trim())
+  for (const tty of running) {
+    if ((await osascript(FOCUS_SCRIPT, tty)).stdout.trim() === 'shown') return
+  }
+  const seen = await screens($, osascript)
+  const place = seen === undefined ? undefined : { ...seen.screens[0]!, fontSize: openedFontSize(seen.fontSize) }
+  const command = `node --no-warnings ${shellQuote(file)} --account ${shellQuote(account)}`
   const opened = await osascript(OPEN_SCRIPT, command, ...(place === undefined ? [] : [JSON.stringify(place)]))
   if (opened.stdout.trim() !== 'opened') $.ui.toast(`The ops screen did not open (${firstLine(opened.stderr) || `exit ${opened.exitCode}`}). Run: ${command}`, { timeoutMs: 15_000 })
+}
+
+/** This person's processes that have a terminal (`ps` with neither -a nor -x); none when `ps` cannot be run. */
+async function terminalProcesses($: EngineInterface): Promise<Proc[]> {
+  const ps = await $.process.run(['/bin/ps', '-ww', '-o', PS_COLUMNS], { env: PS_ENV, timeoutMs: 10_000 }).catch(() => undefined)
+  return ps === undefined ? [] : [...parsePs(ps.stdout).values()]
 }
 
 /** The screens there are now (the one in use first), and the font size of this session's own tab. */
@@ -774,6 +788,7 @@ async function screens($: EngineInterface, osascript: (script: string, ...args: 
   }
 }
 
+/** Brings a session's Terminal tab to the front: a background session's, the tab attached to it, else a new window attached to it. */
 async function openSession($: EngineInterface, target: NonNullable<Item['target']>) {
   const osascript = (script: string, arg: string) =>
     $.process.run(['/usr/bin/osascript', '-l', 'JavaScript', '-e', script, arg], { timeoutMs: 10_000 })
@@ -788,6 +803,10 @@ async function openSession($: EngineInterface, target: NonNullable<Item['target'
     const out = await osascript(FOCUS_SCRIPT, target.tty)
     if (out.stdout.trim() !== 'shown') $.ui.toast(`No Terminal tab runs on ${target.tty}.`)
     return
+  }
+  // a tab showing it already: brought to the front, never a second window
+  for (const tty of shownIn(await terminalProcesses($), p => isAttachTo(p.args, [target.attach, target.sessionId]))) {
+    if ((await osascript(FOCUS_SCRIPT, tty).catch(() => ({ stdout: '' }))).stdout.trim() === 'shown') return
   }
   const command = attachCommand(target.attach, target.profile, (await $.env.get('HOME')) ?? '')
   if (command === undefined) return

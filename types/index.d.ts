@@ -25,8 +25,11 @@ export type ClaudeSession = {
   context?: SessionContext
 }
 
-/** A session's context at its last request: its size in tokens, and its window when the records say. */
-export type SessionContext = { tokens: number; window?: number }
+/**
+ * A session's context at its last request: its size in tokens, and its window when the records say; or, compacted
+ * since (tokens 0), a summary whose size its next request tells.
+ */
+export type SessionContext = { tokens: number; window?: number; isCompacted?: boolean }
 
 /** One Codex session: an open `codex` terminal, or a thread active in the last half hour. */
 export type CodexSession = {
