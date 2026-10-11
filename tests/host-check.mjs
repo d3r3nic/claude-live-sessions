@@ -1256,9 +1256,9 @@ except ChildProcessError: pass
     const activeB = t('display-message', '-p', '-t', '=ws-opsx:peers', '#{pane_id}').stdout.trim()
     const outC = live(`os.write(fd, b"\\x1b[<0;10;${rowOf('Stopped one')}M")`)
     const opens = existsSync(asked) ? readFileSync(asked, 'utf8').trim().split('\n') : []
-    check('ops: a click on an agent\'s row gives that agent\'s pane the keys and opens a window attached to it, maximized in half its font; a stopped workspace is left to /sessions',
+    check('ops: a click on an agent\'s row gives that agent\'s pane the keys and opens a window attached to it, 60% of the screen in its font; a stopped workspace is left to /sessions',
       activeA === left && activeB === right && outC.includes('Stopped one is not running: open it from /sessions') &&
-      opens.length === 2 && opens.every(l => l === `OPEN tmux -L '${socket}' -f /dev/null attach -t '=ws-opsx' {"x":0,"y":30,"width":2560,"height":1410,"fontSize":6}`),
+      opens.length === 2 && opens.every(l => l === `OPEN tmux -L '${socket}' -f /dev/null attach -t '=ws-opsx' {"x":512,"y":312,"width":1536,"height":846,"fontSize":12}`),
       `${activeA}/${left} ${activeB}/${right} ${JSON.stringify(opens)}`)
     void outA; void outB
     // however it ends, the terminal is given back: q (typed twice too), Ctrl-C, a signal

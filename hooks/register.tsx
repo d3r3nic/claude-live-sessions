@@ -730,8 +730,8 @@ async function openWorkspace($: EngineInterface, ws: Workspace, at?: { window: s
   for (const tty of attached) {
     if ((await osascript(FOCUS_SCRIPT, tty)).stdout.trim() === 'shown') return { isOpen: true, text: `Brought ${name} to the front.` }
   }
-  // maximized on the screen it was on when last hidden, while that screen is still there (else the one in use), in
-  // half the font of the window it is opened from: never the size and font it had
+  // on the screen it was on when last hidden, while that screen is still there (else the one in use), 60% of it, in the
+  // font of the window it is opened from: never the size and font it had
   const kept = await $.fs.read(placementPath(home, name)).then(text => placementFrom(JSON.parse(text))).catch(() => undefined)
   const seen = await screens($, osascript)
   const place = seen === undefined ? undefined : workspacePlacement(seen, kept)
@@ -806,7 +806,7 @@ async function openSession($: EngineInterface, target: NonNullable<Item['target'
   }
   const command = attachCommand(target.attach, target.profile, (await $.env.get('HOME')) ?? '')
   if (command === undefined) return
-  // maximized on the screen in use, in half this tab's font: never the profile's small default window
+  // 60% of the screen in use, in this tab's font: never the profile's small default window
   const seen = await screens($, (script, ...args) =>
     $.process.run(['/usr/bin/osascript', '-l', 'JavaScript', '-e', script, ...args], { timeoutMs: 10_000 }).catch(() => ({ stdout: '' })))
   const place = seen === undefined ? undefined : agentPlacement(seen.screens[0]!, seen.fontSize)

@@ -352,8 +352,8 @@ const tmux = (...args) => run(['tmux', ...(SOCKET === undefined ? [] : ['-L', SO
 /**
  * Opens what a row is about: a session's own Terminal tab; or a running workspace's window (its tmux session, marked
  * as this workspace's), at its agent's pane when the row is one agent's: the terminal attached to it brought up, else
- * a new window attached to it, maximized as /sessions opens one (on the screen it was on when last hidden, in half
- * this screen's font). A workspace not running is opened from /sessions, which checks it first. Says what it did.
+ * a new window attached to it, placed as /sessions opens one (60% of the screen it was on when last hidden, in this
+ * screen's font). A workspace not running is opened from /sessions, which checks it first. Says what it did.
  */
 function open(target, snap) {
   if (target.kind === 'tty') {

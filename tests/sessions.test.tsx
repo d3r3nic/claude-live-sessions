@@ -945,8 +945,8 @@ describe('pane', () => {
     await ui.press({ key: 'open claude-102' })
     await ui.press({ key: 'open codex-1cdaec1d-0ec7-4f0a-811f-5c29c9bcb3b7' })
     expect(osa()).toEqual([['focus', 'ttys004'], ['open', 'claude attach a1b2c3d4'], ['focus', 'ttys045']])
-    // the background one in a window maximized on the screen in use, in half this tab's font (12: 6), never the profile's small one
-    expect(JSON.parse(runs.find(r => r[5] === 'claude attach a1b2c3d4')![6]!)).toEqual({ x: 0, y: 30, width: 2560, height: 1410, fontSize: 6 })
+    // the background one in a window of 60% of the screen in use, centred, in this tab's font (12), never the profile's small one
+    expect(JSON.parse(runs.find(r => r[5] === 'claude attach a1b2c3d4')![6]!)).toEqual({ x: 512, y: 312, width: 1536, height: 846, fontSize: 12 })
     // this session, and a thread with no terminal, are not pressed to open
     expect(await ui.find({ key: 'open claude-104' })).toBeUndefined()
     expect(await ui.find({ key: 'open codex-b' })).toBeUndefined()
@@ -3375,13 +3375,13 @@ describe('hiding a workspace window', () => {
 })
 
 describe('workspace windows open where they were', () => {
-  test('placements: kept ones checked; a window of agents is maximized on its screen, in half the font of the window it is opened from', async () => {
+  test('placements: kept ones checked; a window of agents is 60% of its screen, centred, in the font of the window it is opened from', async () => {
     expect(placementFrom({ x: 10.4, y: 20, width: 1200, height: 800, fontSize: 13 })).toEqual({ x: 10, y: 20, width: 1200, height: 800, fontSize: 13 })
     expect(placementFrom({ x: 0, y: 0, width: 1200, height: 800, fontSize: 200 })?.fontSize).toBe(0)
     for (const bad of [null, 'x', { x: 0, y: 0, width: 100, height: 800 }, { x: 'a', y: 0, width: 1200, height: 800 }, { y: 0, width: 1200, height: 800 }]) expect(placementFrom(bad)).toBeUndefined()
-    expect(agentPlacement({ x: 0, y: 30, width: 2560, height: 1410 }, 14)).toEqual({ x: 0, y: 30, width: 2560, height: 1410, fontSize: 7 })
-    // half, 6 points at least; a size this does not read: the profile's
-    expect([openedFontSize(13), openedFontSize(9), openedFontSize(72), openedFontSize(0), openedFontSize(200)]).toEqual([7, 6, 36, 0, 0])
+    expect(agentPlacement({ x: 0, y: 30, width: 2560, height: 1410 }, 14)).toEqual({ x: 512, y: 312, width: 1536, height: 846, fontSize: 14 })
+    // the opener's own size; a size this does not read: the profile's
+    expect([openedFontSize(13), openedFontSize(9), openedFontSize(72), openedFontSize(12.5), openedFontSize(0), openedFontSize(200)]).toEqual([13, 9, 72, 13, 0, 0])
     expect(agentPlacement({ x: 0, y: 30, width: 2560, height: 1410 }, 0).fontSize).toBe(0)
     // the screen it is on: the one with most of it (any part); on a tie, the one listed first (the screen in use)
     const main = { x: 0, y: 30, width: 2560, height: 1410 }
@@ -3394,14 +3394,14 @@ describe('workspace windows open where they were', () => {
     // larger than the screen it is on: still that screen
     expect(screenShowing({ x: 2600, y: -500, width: 6000, height: 3000, fontSize: 0 }, [main, side])).toEqual(side)
     // a screen whose free part is not in whole points: the window's place is
-    expect(agentPlacement({ x: 0, y: 37.5, width: 1512.4, height: 944.6 }, 12)).toEqual({ x: 0, y: 38, width: 1512, height: 945, fontSize: 6 })
+    expect(agentPlacement({ x: 0, y: 37.5, width: 1512.4, height: 944.6 }, 12)).toEqual({ x: 303, y: 226, width: 907, height: 567, fontSize: 12 })
     // SCREEN_SCRIPT's answer: screens of no size or not numbers dropped; none, or not its answer at all: nothing
     expect(screensFrom(JSON.stringify({ screens: [main, { x: 0, y: 0, width: 0, height: 900 }, { x: 'a', y: 0, width: 10, height: 10 }], fontSize: 13 }))).toEqual({ screens: [main], fontSize: 13 })
     expect([screensFrom(JSON.stringify({ screens: [], fontSize: 13 })), screensFrom('nope'), screensFrom('')]).toEqual([undefined, undefined, undefined])
     expect(screensFrom(JSON.stringify({ screens: [main] }))).toEqual({ screens: [main], fontSize: 0 })
   })
 
-  test('a workspace\'s window opens maximized on the screen it was on when hidden (else the one in use), in half this tab\'s font, never its old size and font', async ($, on) => {
+  test('a workspace\'s window opens at 60% of the screen it was on when hidden (else the one in use), in this tab\'s font, never its old size and font', async ($, on) => {
     const { files, runs } = engine(on, machine, { termProgram: 'Apple_Terminal', selfId: 'session-104' })
     files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [practice] }))
     await $.session.start(START)
@@ -3410,28 +3410,28 @@ describe('workspace windows open where they were', () => {
     // never hidden: the screen, and half the font of this session's tab (ttys022: 12, so 6)
     await $.command.run({ ...SESSIONS, command: 'workspace', args: 'open practice-rbac' })
     expect(runs.find(r => r[4] === SCREEN_SCRIPT)?.[5]).toBe('ttys022')
-    const maximized = { x: 0, y: 30, width: 2560, height: 1410, fontSize: 6 }
-    expect(opens().at(-1)).toEqual(maximized)
-    // hidden before, small and in a large font (as a window of the version before was): maximized there, in half the font
+    const placed = { x: 512, y: 312, width: 1536, height: 846, fontSize: 12 }
+    expect(opens().at(-1)).toEqual(placed)
+    // hidden before, at another size and font (as a window of a version before was): 60% there, in this tab's font
     world.started.clear()
     files.set(placementPath(HOME, 'ws-practice-rbac'), JSON.stringify({ x: 188, y: 203, width: 1581, height: 903, fontSize: 14 }))
     await $.command.run({ ...SESSIONS, command: 'workspace', args: 'open practice-rbac' })
-    expect(opens().at(-1)).toEqual(maximized)
-    // kept where no screen is now (a display unplugged): maximized on the screen in use
+    expect(opens().at(-1)).toEqual(placed)
+    // kept where no screen is now (a display unplugged): on the screen in use
     world.started.clear()
     files.set(placementPath(HOME, 'ws-practice-rbac'), JSON.stringify({ x: 5200, y: -2000, width: 1500, height: 900, fontSize: 13 }))
     await $.command.run({ ...SESSIONS, command: 'workspace', args: 'open practice-rbac' })
-    expect(opens().at(-1)).toEqual(maximized)
-    // on the second screen: maximized there
+    expect(opens().at(-1)).toEqual(placed)
+    // on the second screen: 60% of that one, centred there
     world.started.clear()
     files.set(placementPath(HOME, 'ws-practice-rbac'), JSON.stringify({ x: 2700, y: 100, width: 1500, height: 900, fontSize: 13 }))
     await $.command.run({ ...SESSIONS, command: 'workspace', args: 'open practice-rbac' })
-    expect(opens().at(-1)).toEqual({ x: 2560, y: 0, width: 1920, height: 1080, fontSize: 6 })
+    expect(opens().at(-1)).toEqual({ x: 2944, y: 216, width: 1152, height: 648, fontSize: 12 })
     // a kept file that is not a placement is not used
     world.started.clear()
     files.set(placementPath(HOME, 'ws-practice-rbac'), '{"x": "far"}')
     await $.command.run({ ...SESSIONS, command: 'workspace', args: 'open practice-rbac' })
-    expect(opens().at(-1)).toEqual(maximized)
+    expect(opens().at(-1)).toEqual(placed)
   })
 })
 
