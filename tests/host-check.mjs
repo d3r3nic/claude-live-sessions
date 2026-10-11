@@ -1003,18 +1003,35 @@ except ChildProcessError: pass
     // next request's; a subagent's compaction, or a prompt quoting such a record, is not it; a request since is the size
     const boundary = (at, isSidechain = false) => JSON.stringify({ parentUuid: null, logicalParentUuid: 'p', isSidechain, type: 'system', subtype: 'compact_boundary', content: 'Conversation compacted', isMeta: false, timestamp: at, compactMetadata: { trigger: 'manual', preTokens: 7001 } })
     const quoting = JSON.stringify({ parentUuid: 'p', isSidechain: false, type: 'user', message: { role: 'user', content: '{"type":"system","subtype":"compact_boundary"}' }, timestamp: '2026-10-09T15:22:00.000Z' })
+    // a reply whose tool call's input is such a record, as real JSON: a reply, its own size
+    const inInput = reply('msg_H', '2026-10-09T15:23:00.000Z', usage(5, 0, 600, 2)).replace('"input":{', '"input":{"type":"system","subtype":"compact_boundary","isSidechain":false,')
     const compactedFiles = [
       [lines[4], boundary('2026-10-09T15:20:00.000Z')],
       [lines[4], boundary('2026-10-09T15:20:00.000Z', true), quoting],
       [lines[4], boundary('2026-10-09T15:20:00.000Z'), reply('msg_G', '2026-10-09T15:21:00.000Z', usage(3, 2000, 0, 7))],
+      [lines[4], inInput],
     ].map((records, k) => {
       const file = join(scratch, `compacted-${k}.jsonl`)
       writeFileSync(file, `${records.join('\n')}\n`)
       return file
     })
-    const told = perl(['ctx', ...compactedFiles])
-    const toldWant = `==> ${compactedFiles[0]}\nctx compacted\n==> ${compactedFiles[1]}\nctx 7001\n==> ${compactedFiles[2]}\nctx 2003\n`
-    check('usage: a context compacted since its last request is said so; a subagent\'s compaction or a quoted one is not; a request since gives its size', told.stdout === toldWant, told.stdout === toldWant ? '' : JSON.stringify(told.stdout))
+    // the last 256 KB begin inside a record, right where such JSON in it begins: that part is not read as a record
+    const cutFile = join(scratch, 'compacted-cut.jsonl')
+    {
+      const head = `${lines[4]}\n`
+      const record = reply('msg_I', '2026-10-09T15:24:00.000Z', usage(1, 0, 1, 1)).replace('"input":{', '"input":{"type":"system","subtype":"compact_boundary",')
+      const at = Buffer.byteLength(head) + Buffer.byteLength(record.slice(0, record.indexOf('{"type":"system","subtype":"compact_boundary"')))
+      const base = `${head}${record}\n`
+      const padOf = n => JSON.stringify({ type: 'user', isSidechain: false, message: { role: 'user', content: 'x'.repeat(n) }, timestamp: '2026-10-09T15:25:00.000Z' })
+      // the file exactly 256 KB longer than where the cut is wanted
+      writeFileSync(cutFile, `${base}${padOf(at + 262144 - Buffer.byteLength(base) - Buffer.byteLength(padOf(0)) - 1)}\n`)
+    }
+    const cutAt = statSync(cutFile).size - 262144
+    const cutStarts = readFileSync(cutFile).subarray(cutAt, cutAt + 46).toString()
+    const told = perl(['ctx', ...compactedFiles, cutFile])
+    const toldWant = `==> ${compactedFiles[0]}\nctx compacted\n==> ${compactedFiles[1]}\nctx 7001\n==> ${compactedFiles[2]}\nctx 2003\n==> ${compactedFiles[3]}\nctx 605\n==> ${cutFile}\n`
+    check('usage: a context compacted since its last request is said so; a subagent\'s compaction, a quoted one, such JSON in a tool call or a record cut by the window is not; a request since gives its size',
+      told.stdout === toldWant && cutStarts === '{"type":"system","subtype":"compact_boundary",', told.stdout === toldWant && cutStarts === '{"type":"system","subtype":"compact_boundary",' ? '' : `${JSON.stringify(told.stdout)} ${JSON.stringify(cutStarts)}`)
     // into the plugin's state, priced; the rollout's mark by its name
     const state1 = u.applyScan(u.EMPTY_USAGE, first.stdout, Date.parse('2026-10-09T15:20:00Z'), f => (f === claudeFile || f === copyFile ? '' : f === rolloutFile ? 'work' : undefined))
     const slots = state1.slots
@@ -1140,6 +1157,8 @@ except ChildProcessError: pass
       writeFileSync(readFile, snapshot({ codex: [codexIn], workspaces: [
         { id: 'opsx', name: 'Answered One', env: '', dir: scratch, createdAt: 1, relay: relayed('needs you', 600_000) },
         { id: 'waits', name: 'Waiting One', env: 'mmm', dir: scratch, createdAt: 2, relay: relayed('needs you', 5 * 3_600_000) },
+        { id: 'flying', name: 'Flying One', env: '', dir: scratch, createdAt: 3, relay: { ...relayed('passed to Codex'), at: now - 5_000 } },
+        { id: 'failed', name: 'Failed One', env: '', dir: scratch, createdAt: 4, relay: { ...relayed('could not pass to Codex (its pane is scrolled back)'), at: now - 5_000 } },
       ] }))
       const reads = (...extra) => spawnSync(process.execPath, ['--no-warnings', opsFile, '--frame', '--plain', ...extra], { encoding: 'utf8', env: { ...env, LIVE_SESSIONS_SNAPSHOT: readFile, COLS: '120', ROWS: '40', NOW: String(now) } }).stdout.split('\n')
       const every = reads()
@@ -1154,8 +1173,11 @@ except ChildProcessError: pass
       check('ops: an agent\'s row says it is working (never exec), its context and its title',
         /\[CODEX\]\s+● working \S{3}\s+ctx 117k\/258k\s+Continue the reading work/.test(after(every, 'Answered One', 2)) && /\[CLAUDE\]\s+offline/.test(after(every, 'Answered One', 1)) && !every.some(l => /EXEC|exec/.test(l)),
         JSON.stringify(after(every, 'Answered One', 2).trim()))
+      check('ops: a hand-off passed a moment ago runs toward its agent; one it could not pass does not',
+        /relay\s+auto  \S*▸\S* passed to Codex 5s ago/.test(after(every, 'Flying One', 3)) && !/[▸◂]/.test(after(every, 'Failed One', 3)) && after(every, 'Failed One', 3).includes('could not pass to Codex'),
+        `${JSON.stringify(after(every, 'Flying One', 3).trim())} ${JSON.stringify(after(every, 'Failed One', 3).trim())}`)
       check('ops: a cue for the owner they typed after is no alert, and says so; one they have not is',
-        /relay\s+auto  needs you 3h ago · you typed 10m ago · 2 hand-offs since you typed/.test(after(every, 'Answered One', 3)) && !answered.some(l => l.includes('OPERATOR INPUT REQUIRED')) &&
+        /relay\s+auto  needs you 3h ago · you typed 10m ago · 2 of 10 hand-offs in a row/.test(after(every, 'Answered One', 3)) && !answered.some(l => l.includes('OPERATOR INPUT REQUIRED')) &&
         after(every, 'Waiting One', 4).includes('OPERATOR INPUT REQUIRED') && !/· you typed \S+ ago/.test(after(every, 'Waiting One', 3)),
         `${JSON.stringify(after(every, 'Answered One', 3).trim())} ${JSON.stringify(after(every, 'Waiting One', 4).trim())}`)
     }
@@ -1320,10 +1342,15 @@ except ChildProcessError: pass
     const screen = t('capture-pane', '-p', '-t', '=drawn:').stdout.replace(/\n$/, '').split('\n')
     t('send-keys', '-t', '=drawn:', 'q')
     check('ops: drawn live, every row keeps its right border', screen.length === 24 && screen.every(l => /[║╗╣╝]$/.test(l.trimEnd())), `${screen.filter(l => /[║╗╣╝]$/.test(l.trimEnd())).length}/${screen.length}`)
-    // a snapshot another version wrote (an older plugin): waited on, said, never drawn
+    // a snapshot another version wrote (an older plugin, or the sessions not reloaded after an update): said, never
+    // drawn, waited for; one of this version, once written, is drawn
     writeFileSync(snapFile, JSON.stringify({ version: 6, snapshot: { claude: [], codex: [] } }))
     const old = live('os.write(fd, b"\\r")')
-    check('ops: a snapshot of another version is said and never drawn, nothing broken', old.includes('No snapshot of this version') && !old.includes('\x1b[?1049h'))
+    const waited = live(['open(os.environ["SNAP_PATH"], "w").write(os.environ["NEXT_SNAPSHOT"])', 'drain(2.5)'].join('\n'), { SNAP_PATH: snapFile, NEXT_SNAPSHOT: snapshot() })
+    const waitedFor = waited.slice(waited.indexOf('No snapshot of this version'))
+    check('ops: a snapshot of another version is said and never drawn, nothing broken; waited for, one of this version is drawn',
+      old.includes('No snapshot of this version') && old.includes('Waiting for it') && !old.includes('\x1b[?1049h') && waited.includes('No snapshot of this version') && waitedFor.includes('\x1b[?1049h') && waitedFor.includes('LIVE//SESSIONS'),
+      `${old.includes('Waiting for it')} ${waitedFor.includes('LIVE//SESSIONS')}`)
     writeFileSync(snapFile, snapshot())
     // the relay's event log: 40 sessions writing at once, past the point where it moves to .1: every line whole, none lost
     const log = join(scratch, 'log', 'events.jsonl')
@@ -1354,19 +1381,27 @@ except ChildProcessError: pass
     mkdirSync(bin)
     writeFileSync(join(scratch, 'wait.c'), '#include <unistd.h>\nint main(void) { sleep(600); return 0; }\n')
     execFileSync('/usr/bin/cc', ['-o', join(bin, 'claude'), join(scratch, 'wait.c')])
-    // a copy of the plugin's ops and hooks, so its code can change under the screen
-    const copy = join(scratch, 'plugin')
-    for (const dir of ['ops', 'hooks']) {
-      mkdirSync(join(copy, dir), { recursive: true })
-      for (const name of readdirSync(join(import.meta.dirname, '..', dir))) writeFileSync(join(copy, dir, name), readFileSync(join(import.meta.dirname, '..', dir, name)))
+    // copies of the plugin's ops and hooks, so its code can change under a screen
+    const copyOf = name => {
+      const copy = join(scratch, name)
+      for (const dir of ['ops', 'hooks']) {
+        mkdirSync(join(copy, dir), { recursive: true })
+        for (const file of readdirSync(join(import.meta.dirname, '..', dir))) writeFileSync(join(copy, dir, file), readFileSync(join(import.meta.dirname, '..', dir, file)))
+      }
+      return join(copy, 'ops', 'ops.mjs')
     }
-    const opsCopy = join(copy, 'ops', 'ops.mjs')
+    const opsCopy = copyOf('plugin')
+    // a screen whose Node is gone by the time its code changes (a Node updated away): started through a link to it
+    const opsKept = copyOf('plugin-kept')
+    const nodeLink = join(bin, 'node-link')
+    symlinkSync(process.execPath, nodeLink)
     const snap = join(scratch, 'snapshot.json')
     writeFileSync(snap, JSON.stringify({ version: c.SHARED_VERSION, snapshot: { claude: [], codex: [], places: {}, envs: [''], problems: [], checkedAt: Date.now(), workspaces: [], tmux: { panes: {}, clients: {} } } }))
     const path = `PATH='${bin}':"$PATH"`
     t('new-session', '-d', '-s', 'attached', `exec env ${path} claude attach abcd1234`)
     t('new-session', '-d', '-s', 'agents', `exec env ${path} claude agents`)
     t('new-session', '-d', '-s', 'ops', '-x', '120', '-y', '30', `exec env LIVE_SESSIONS_SNAPSHOT='${snap}' LIVE_SESSIONS_EVENTS='${join(scratch, 'events.jsonl')}' HOME='${scratch}' node --no-warnings '${opsCopy}' --account ''`)
+    t('new-session', '-d', '-s', 'kept', '-x', '120', '-y', '30', `exec env LIVE_SESSIONS_SNAPSHOT='${snap}' LIVE_SESSIONS_EVENTS='${join(scratch, 'events.jsonl')}' HOME='${scratch}' '${nodeLink}' --no-warnings '${opsKept}' --account ''`)
     await new Promise(res => setTimeout(res, 2_000))
     const ttyOf = name => t('display-message', '-p', '-t', `=${name}:`, '#{pane_tty}').stdout.trim().replace('/dev/', '')
     const pidOf = name => Number(t('display-message', '-p', '-t', `=${name}:`, '#{pane_pid}').stdout.trim())
@@ -1378,15 +1413,27 @@ except ChildProcessError: pass
     check('shown: a background session\'s tab is found by its claude attach in front; one gone on to the agent view is not',
       JSON.stringify(attachedIn) === JSON.stringify([ttyOf('attached')]) && /^ttys\d+$/.test(attachedIn[0] ?? ''),
       `${JSON.stringify(attachedIn)} attached ${ttyOf('attached')} agents ${ttyOf('agents')}`)
-    // its code changed: the screen starts again in place, its command line and process the same, the new code drawn
+    // its code changed: the screen starts again in place, its command line and process the same, the new code drawn,
+    // every account still shown where `a` had shown them
     const opsPid = pidOf('ops')
+    t('send-keys', '-t', '=ops:', 'a')
+    await new Promise(res => setTimeout(res, 500))
+    const toggled = t('capture-pane', '-p', '-t', '=ops:').stdout
     writeFileSync(opsCopy, readFileSync(opsCopy, 'utf8').replace('LIVE//SESSIONS :: OPS', 'LIVE//SESSIONS :: OPS ANEW'))
+    // its Node gone, then its code changed: it goes on as it was, and says so
+    rmSync(nodeLink)
+    writeFileSync(opsKept, readFileSync(opsKept, 'utf8').replace('LIVE//SESSIONS :: OPS', 'LIVE//SESSIONS :: OPS ANEW'))
     await new Promise(res => setTimeout(res, 6_000))
     const opsAfter = c.shownIn(listed(), p => p.args === opsArgs && p.pid === opsPid)
     const drawn = t('capture-pane', '-p', '-t', '=ops:').stdout
-    check('shown: an ops screen is found by its command line, the same once it has started again in place with new code',
-      JSON.stringify(opsIn) === JSON.stringify([ttyOf('ops')]) && JSON.stringify(opsAfter) === JSON.stringify([ttyOf('ops')]) && drawn.includes('LIVE//SESSIONS :: OPS ANEW'),
-      `${JSON.stringify(opsIn)} ${JSON.stringify(opsAfter)} ${drawn.includes('OPS ANEW')}`)
+    check('shown: an ops screen is found by its command line, the same once it has started again in place with new code; every account still shown',
+      JSON.stringify(opsIn) === JSON.stringify([ttyOf('ops')]) && JSON.stringify(opsAfter) === JSON.stringify([ttyOf('ops')]) && drawn.includes('LIVE//SESSIONS :: OPS ANEW') &&
+      toggled.includes('ALL ACCOUNTS') && drawn.includes('ALL ACCOUNTS'),
+      `${JSON.stringify(opsIn)} ${JSON.stringify(opsAfter)} ${drawn.includes('OPS ANEW')} ${toggled.includes('ALL ACCOUNTS')} ${drawn.includes('ALL ACCOUNTS')}`)
+    const keptDrawn = t('capture-pane', '-p', '-t', '=kept:').stdout
+    check('shown: an ops screen whose Node is gone when its code changes goes on as it was and says so',
+      t('has-session', '-t', '=kept').status === 0 && keptDrawn.includes('the plugin changed: q, then Ops screen in /sessions, shows it') && !keptDrawn.includes('OPS ANEW') && keptDrawn.includes('LIVE//SESSIONS :: OPS'),
+      JSON.stringify(keptDrawn.split('\n').filter(l => /plugin changed|SESSIONS ::/.test(l)).map(l => l.trim().slice(0, 80))))
   } finally {
     t('kill-server')
     rmSync(join(process.env.TMUX_TMPDIR ?? '/tmp', `tmux-${process.getuid()}`, socket), { force: true })

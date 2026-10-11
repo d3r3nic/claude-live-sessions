@@ -88,6 +88,8 @@ sub ctx {
   open(my $fh, '<', $file) or return;
   my $size = -s $fh;
   seek($fh, $size > 262144 ? $size - 262144 : 0, 0);
+  # read from the middle of a record: that part of it is not read as one
+  <$fh> if $size > 262144;
   my $found;
   while (my $line = <$fh>) {
     if (is_rollout($file)) {
@@ -96,8 +98,9 @@ sub ctx {
       my $window = $line =~ /"model_context_window":(\d+)/ ? $1 : '';
       $found = "$n->{total_tokens} $window";
     } else {
-      # compacted since its last request: a summary in place of the conversation, its size known at the next one
-      if ($line =~ /(?<!\\)"subtype":"compact_boundary"/) {
+      # compacted since its last request: a summary in place of the conversation, its size known at the next one; the
+      # record's own type (before anything nested), never real JSON within another record
+      if ($line =~ /^\{[^{]*?"type":"system","subtype":"compact_boundary"/) {
         $found = 'compacted' unless $line =~ /^\{[^{]*?"isSidechain":true/;
         next;
       }

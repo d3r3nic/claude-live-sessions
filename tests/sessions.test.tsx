@@ -1005,8 +1005,12 @@ describe('pane', () => {
     expect(await press()).toEqual(['open'])
     const file = /^node --no-warnings '(.*)' --account '\*'$/.exec(osa().at(-1)![1]!)![1]!
     const ops = (account: string, tty = 'ttys062', stat = 'S+', args = `node --no-warnings ${file} --account ${account}`) => `  401 ${tty}  ${stat} Fri Oct  9 12:00:00 2026     ${args}`
-    // open for the accounts the pane shows (every one): brought up, nothing opened
+    // open for the accounts the pane shows (every one): brought up, nothing opened; its Node as a version manager's
+    // shim started it too
     expect(await press(ops('*'))).toEqual(['focus ttys062'])
+    expect(await press(ops('*', 'ttys062', 'S+', `/Users/u/.asdf/installs/nodejs/22.18.0/bin/node --no-warnings ${file} --account *`))).toEqual(['focus ttys062'])
+    expect(await press(ops('*', 'ttys062', 'S+', `notnode --no-warnings ${file} --account *`))).toEqual(['open'])
+    expect(await press(ops('*', 'ttys062', 'S+', `--no-warnings ${file} --account *`))).toEqual(['open'])
     // another account's, another plugin folder's, one with no account (before there were any), stopped, or not a
     // Terminal tab: a new one
     expect(await press(ops(''))).toEqual(['open'])

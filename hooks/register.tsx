@@ -757,8 +757,10 @@ async function openOps($: EngineInterface) {
   // the account this pane shows
   const account = await shownAccount($, home)
   const file = `${$.plugin.root}/ops/ops.mjs`
-  // that screen open already (it restarts itself when the plugin changes): its window to the front, never a second one
-  const running = shownIn(await terminalProcesses($), p => p.args === `node --no-warnings ${file} --account ${account}`.trim())
+  // that screen open already (it restarts itself when the plugin changes): its window to the front, never a second one;
+  // its Node as the shell ran it (`node`, or a path a version manager's shim gave it)
+  const tail = ` --no-warnings ${file} --account ${account}`.trimEnd()
+  const running = shownIn(await terminalProcesses($), p => p.args.endsWith(tail) && /(^|\/)node$/.test(p.args.slice(0, -tail.length)))
   for (const tty of running) {
     if ((await osascript(FOCUS_SCRIPT, tty)).stdout.trim() === 'shown') return
   }

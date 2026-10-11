@@ -3,7 +3,7 @@
 // a node, an agent or an event opens what it is about: the workspace's window at that agent, or a session's tab.
 //   node ops/ops.mjs [--account <env>]     live, full screen, one account's or every one's (a accounts, t theme, q quit)
 //   node ops/ops.mjs --frame [--plain]     one frame, printed (COLS, ROWS, TICK); --targets prints what each row opens
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync, writeSync } from 'node:fs'
+import { accessSync, constants, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync, writeSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import * as nodeModule from 'node:module'
 import { fileURLToPath } from 'node:url'
@@ -27,15 +27,34 @@ nodeModule.registerHooks({
     }
   },
 })
-let c, w
+let c, w, r
 try {
   c = await import(new URL('../hooks/collect.ts', import.meta.url).href)
   w = await import(new URL('../hooks/workspaces.ts', import.meta.url).href)
+  r = await import(new URL('../hooks/relay.ts', import.meta.url).href)
 } catch (error) {
   await fail(`The ops screen needs Node 22.18 or later, which runs TypeScript as it is; this is Node ${process.versions.node} (${String(error).split('\n')[0]}).`)
 }
 
 const HOME = process.env.HOME
+/**
+ * The Node to start the screen again with: `node` as it was started, found where a new window would find it now (a Node
+ * updated meanwhile is the new one), else the one running; none when there is none, or this Node cannot replace
+ * itself. Checked first: a Node that replaces itself with a program not there ends then and there.
+ */
+function nodeToRestart() {
+  if (typeof process.execve !== 'function' || !existsSync(process.argv[1])) return undefined
+  const named = process.argv0
+  const candidates = named.includes('/') ? [named] : [...(process.env.PATH ?? '').split(':').filter(Boolean).map(dir => `${dir}/${named}`), process.execPath]
+  return candidates.find(file => {
+    try {
+      accessSync(file, constants.X_OK)
+      return statSync(file).isFile()
+    } catch {
+      return false
+    }
+  })
+}
 /** When its code (this folder's files and the plugin's hooks it loads) last changed; 0 when it cannot tell. */
 function codeAt() {
   try {
@@ -167,7 +186,8 @@ const OWN = (() => {
   const named = process.argv[process.argv.indexOf('--account') + 1]
   return process.argv.includes('--account') && typeof named === 'string' && /^([a-z0-9][a-z0-9_.-]*)?$/i.test(named) ? named : c.ALL_ACCOUNTS
 })()
-let account = OWN
+// as it was before it started again in place (`a` pressed), else its own
+let account = process.env.LIVE_SESSIONS_OPS_VIEW === OWN || (OWN !== c.ALL_ACCOUNTS && process.env.LIVE_SESSIONS_OPS_VIEW === c.ALL_ACCOUNTS) ? process.env.LIVE_SESSIONS_OPS_VIEW : OWN
 /** What the account shown sees of a snapshot. */
 const seenAs = snap => c.forAccount(snap, account)
 
@@ -251,14 +271,16 @@ function frame(snap, now, cols, rows, tick, note = '') {
       // what it last did: a hand-off in flight for 20 s after it passed, toward who got it
       const sinceRelay = relay?.at === undefined ? Infinity : now - relay.at
       const status = clean(relay?.status)
-      const isFlying = sinceRelay < 20_000 && /Codex|Claude/.test(status)
-      const arrow = /Codex/.test(status) ? '▸' : '◂'
+      const passed = /^passed to (Codex|Claude)/.exec(status)
+      const isFlying = sinceRelay < 20_000 && passed !== null
+      const arrow = passed?.[1] === 'Codex' ? '▸' : '◂'
       const flight = isFlying ? `${rgb(G.cyan, [0, 1, 2].map(k => (k === tick % 3 ? arrow : '·')).join(''))} ` : ''
       // a cue for the owner they have typed since: answered, as far as the relay can tell
       const answered = relay?.typedAt !== undefined && relay?.at !== undefined && relay.typedAt > relay.at && /^(needs you|could not pass|waits: )/.test(status)
         ? rgb(G.lo, ` · you typed ${c.ago(now - relay.typedAt)} ago`)
         : ''
-      const streak = Number.isFinite(relay?.streak) && relay.streak > 0 ? rgb(G.lo, ` · ${relay.streak} hand-off${relay.streak === 1 ? '' : 's'} since you typed`) : ''
+      // hand-offs in a row: at the limit the relay holds the next one for the owner
+      const streak = Number.isFinite(relay?.streak) && relay.streak > 0 ? rgb(relay.streak >= r.RELAY_CAP ? G.amber : G.lo, ` · ${relay.streak} of ${r.RELAY_CAP} hand-offs in a row`) : ''
       const mode = clean(relay?.mode ?? 'off')
       const last = status === '' ? '' : `  ${flight}${rgb(needs ? G.red : isFlying ? G.cyan : G.mid, status)}${relay?.at === undefined ? '' : rgb(G.lo, ` ${c.ago(sinceRelay)} ago`)}${answered}`
       line(`   ${rgb(G.lo, pad('relay', 8))} ${rgb(mode === 'auto' ? G.hi : G.lo, mode)}${last}${streak}`, node)
@@ -354,15 +376,33 @@ if (process.argv.includes('--frame')) {
   if (process.argv.includes('--targets')) process.stdout.write(`${JSON.stringify(targets)}\n`)
   else process.stdout.write((process.argv.includes('--plain') ? lines.map(strip) : lines).join('\n') + '\n')
 } else {
-  let loaded = load()
-  if (loaded === undefined) await fail(`No snapshot of this version at ${SNAPSHOT} yet: open /sessions in Claude Code once (with this plugin's version).`)
-  let tick = 0
-  let note = ''
-  // its code as it started: changed since (an update of the plugin), the screen starts again in place, the same process
-  // and window, so an open window never shows an older screen than the plugin's
+  // its code as it started: changed since (an update of the plugin), the screen starts again in place, the same process,
+  // window and command line, so an open window never shows an older screen than the plugin's
   const startedCode = codeAt()
   let codeCheckedAt = Date.now()
-  let isRestartable = typeof process.execve === 'function'
+  /** Whether its code changed since it started, the change settled for 2 s (an update writes several files); every 2 s. */
+  const isCodeChanged = () => {
+    if (Date.now() - codeCheckedAt < 2_000) return false
+    codeCheckedAt = Date.now()
+    const code = codeAt()
+    return code > startedCode && Date.now() - code >= 2_000
+  }
+  const startAgain = node => process.execve(node, [process.argv0, ...process.execArgv, ...process.argv.slice(1)], { ...process.env, LIVE_SESSIONS_OPS_VIEW: account })
+  let loaded = load()
+  if (loaded === undefined) {
+    // none of this version yet (an update: sessions not reloaded still write the one before): said, and waited for
+    process.stdout.write(`No snapshot of this version at ${SNAPSHOT} yet: open /sessions in Claude Code once (with this plugin's version). Waiting for it; Ctrl-C closes.\n`)
+    while ((loaded = load()) === undefined) {
+      await new Promise(res => setTimeout(res, 1_000))
+      const node = isCodeChanged() ? nodeToRestart() : undefined
+      if (node !== undefined) startAgain(node)
+    }
+  }
+  let tick = 0
+  let note = ''
+  let isRestartable = true
+  // said while the screen is older than the plugin's and cannot start again
+  let stale = ''
   let noteUntil = 0
   let shown = { targets: [] }
   // its own screen, no cursor, no wrapping (a long line is cut, never pushed onto the next), and the mouse taken,
@@ -436,24 +476,16 @@ if (process.argv.includes('--frame')) {
     diff(seenAs(loaded.snap), Date.now())
   } catch {}
   setInterval(() => {
-    // every 2 s, once the change has settled for 2 s (an update writes several files)
-    if (isRestartable && Date.now() - codeCheckedAt >= 2_000) {
-      codeCheckedAt = Date.now()
-      const code = codeAt()
-      if (code > startedCode && Date.now() - code >= 2_000) {
+    if (isRestartable && isCodeChanged()) {
+      const node = nodeToRestart()
+      if (node === undefined) {
+        // nothing to start again with (its Node or this file gone): it goes on as it is, and says so
+        isRestartable = false
+        stale = 'the plugin changed: q, then Ops screen in /sessions, shows it'
+      } else {
         restore()
         process.stdin.setRawMode?.(false)
-        try {
-          process.execve(process.execPath, [process.argv0, ...process.execArgv, ...process.argv.slice(1)], process.env)
-        } catch {
-          // it goes on as it is: the screen taken again, said once
-          isRestartable = false
-          isRestored = false
-          process.stdin.setRawMode?.(true)
-          process.stdout.write('\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[?1000h\x1b[?1006h' + bgOn() + '\x1b[2J')
-          note = 'the plugin changed: q, then Ops screen in /sessions, shows it'
-          noteUntil = Date.now() + 30_000
-        }
+        startAgain(node)
       }
     }
     const again = load()
@@ -464,7 +496,7 @@ if (process.argv.includes('--frame')) {
       } catch {}
     }
     tick++
-    if (Date.now() > noteUntil) note = ''
+    if (Date.now() > noteUntil) note = stale
     const cols = process.stdout.columns ?? 80
     const rows = process.stdout.rows ?? 24
     try {
