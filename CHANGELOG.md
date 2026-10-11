@@ -2,7 +2,7 @@
 
 What each version changed, newest first. Each links its pull request, which holds the details, the checks and the reviews. After updating, run `/reload-plugins` in your sessions.
 
-## 0.23.0 — 2026-10-11
+## 0.23.0 — 2026-10-11 ([#30](https://github.com/d3r3nic/claude-live-sessions/pull/30))
 - **Ops screen:**
   - a workspace where any agent works says `● WORKING` in front of its name, in amber;
   - an idle workspace is drawn lighter, with `done 5m ago`;
