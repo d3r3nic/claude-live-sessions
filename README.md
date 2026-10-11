@@ -143,6 +143,10 @@ Nothing in Claude's or Codex's own files is ever written. Collecting reads, and 
 
 One snapshot, `~/Library/Caches/live-sessions/snapshot.json`, is shared by every session. Collection therefore runs about once every 30 s for the whole machine, or every 4 s while some pane is in view, however many sessions are open.
 
+## Changes
+
+What each version changed, newest first, is in [CHANGELOG.md](CHANGELOG.md). Every release adds its entry there.
+
 ## Install
 
 From this folder, which then stays the copy that sessions load:
