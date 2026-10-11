@@ -969,7 +969,7 @@ export type WorkspaceView = {
   relay: { mode: 'auto' | 'notify' | 'off'; status: string; isWaiting: boolean; needsOwner: boolean }
   /** How large Claude's context may grow, in tokens, before it compacts itself at a hand-off; 0 is off. */
   compactFrom: number
-  /** Claude's last compaction at a hand-off, said for the owner, with whether a drift check has looked since. */
+  /** Claude's last compaction (of any kind), said for the owner, with whether a drift check has looked since or will. */
   compacted?: string
   /** Hand-offs between drift checks (0: off), and the last check said for the owner ('' when none yet). */
   checkEvery: number
@@ -1117,9 +1117,14 @@ export function viewOf(
       needsOwner: needsOwner(ws.relay),
     },
     compactFrom: ws.compactFrom ?? COMPACT_FROM,
+    // said as it will go: a check needs the checks on, a purpose to check against and the relay passing hand-offs
     ...(ws.compacted === undefined ? {} : {
-      compacted: `Claude compacted at its hand-off ${ago(o.now - ws.compacted.at)} ago, at ${tokensSaid(ws.compacted.tokens)}; ${
-        ws.compacted.isChecked ? 'a drift check has looked since' : (ws.checkEvery ?? DRIFT_EVERY) > 0 ? 'a drift check follows its next hand-off' : 'drift checks are off'}`,
+      compacted: `Claude's context was compacted ${ago(o.now - ws.compacted.at)} ago, at ${tokensSaid(ws.compacted.tokens)}; ${
+        ws.compacted.isChecked ? 'a drift check has looked since'
+        : (ws.checkEvery ?? DRIFT_EVERY) <= 0 ? 'drift checks are off'
+        : ws.purpose === undefined ? 'no drift check: the workspace has no purpose to check against'
+        : ws.relay?.mode !== 'auto' ? 'a drift check follows its next hand-off once the relay is on'
+        : 'a drift check follows its next hand-off'}`,
     }),
     checkEvery: ws.checkEvery ?? DRIFT_EVERY,
     check: ws.check === undefined ? undefined : {

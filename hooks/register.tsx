@@ -1264,15 +1264,17 @@ async function checkDrift($: EngineInterface, home: string, id: string, isAfterC
       }
       return `${ws.name} is checked from a Claude session of its own account (${account}).`
     }
-    // the passes counted when it began: the ones made while it runs count toward the next check
+    // the passes counted when it began: the ones made while it runs count toward the next check; and the compaction
+    // it was started for (a newer one, made while it runs, waits for its own)
     const counted = ws.relay?.sinceCheck ?? 0
+    const compactedAt = ws.compacted?.at
     // a check done or not, the next is at the next milestone (a failed one is never tried again at every hand-off)
     // and a compaction is checked once, done or not (a failed check is not tried again at every hand-off)
     const restart = (more: Partial<Workspace>) =>
       changeWorkspaces($, home, list => list.map(w => (w.id !== id ? w : {
         ...w, ...more,
         ...(w.relay === undefined ? {} : { relay: { ...w.relay, sinceCheck: Math.max(0, (w.relay.sinceCheck ?? 0) - counted) } }),
-        ...(isAfterCompaction && w.compacted !== undefined ? { compacted: { ...w.compacted, isChecked: true } } : {}),
+        ...(isAfterCompaction && w.compacted !== undefined && w.compacted.at === compactedAt ? { compacted: { ...w.compacted, isChecked: true } } : {}),
       })))
     const cues = await recentCues($, home, id)
     const latest = cues.filter(c => recordFolderOf(c) !== undefined).at(-1)
@@ -1376,6 +1378,18 @@ async function passCues(
       const known = fileFor(tool, tty)
       const turn = known?.file === undefined ? undefined : turns.get(known.file)
       sides[tool] = { tool, pane: p.pane!, isBusy: (known?.isBusy ?? false) || turn?.state === 'busy', ...(turn === undefined ? {} : { turn }) }
+    }
+    // Claude's context compacted since the last one kept (of any kind: this plugin's at a hand-off, Claude Code's own,
+    // the owner's /compact): kept, so a drift check follows its next hand-off
+    const seenCompaction = sides.claude?.turn?.compacted
+    if (seenCompaction !== undefined && seenCompaction.at > (ws.compacted?.at ?? 0)) {
+      let fresh: Workspace | undefined
+      const isSaved = await changeWorkspaces($, home, list => list.map(w => {
+        if (w.id !== ws.id || seenCompaction.at <= (w.compacted?.at ?? 0)) return w
+        fresh = { ...w, compacted: { ...seenCompaction, isChecked: false } }
+        return fresh
+      }))
+      if (isSaved && fresh !== undefined) ws = fresh
     }
     if (ws.relay !== undefined && afterOwner(ws.relay, sides) !== undefined) {
       // the owner typed to an agent: the count starts again, on the relay as the file has it now
@@ -1489,9 +1503,6 @@ async function compactAtHandOff($: EngineInterface, answer: string) {
   // logged once it has been done (not refused, not vetoed), with what its summary read from the cache and afresh
   const result = await $.session.compact({ instructions: claudeKeep(ws.name) }).catch(() => undefined)
   if (result === undefined || result.skip !== undefined) return
-  // kept on the workspace: a drift check follows its next hand-off
-  const at = await $.clock.now()
-  await changeWorkspaces($, home, list => list.map(w => (w.id === ws.id ? { ...w, compacted: { at, tokens, isChecked: false } } : w)))
   const spent = result.usage === undefined ? '' : `; it read ${tokensSaid(result.usage.cache_read_input_tokens)} tokens from the cache, ${tokensSaid(result.usage.input_tokens + result.usage.cache_creation_input_tokens)} afresh`
   await logEvent($, home, { kind: 'compact', text: `${ws.name}: Claude compacted at its hand-off (its context was ${tokensSaid(tokens)} tokens${spent})`, workspace: ws.id, agent: 'claude' })
 }

@@ -97,19 +97,23 @@ export const TURN_SCRIPT = [
   '      else false end;',
   // how full Codex's context is: its last count of tokens against its model's window, as a whole percentage
   '    def filled: try (.payload.info | .model_context_window as $w | .last_token_usage.total_tokens as $t | if ($w | type) == "number" and $w > 0 and ($t | type) == "number" then ($t * 100 / $w | floor) else null end) catch null;',
-  '    reduce (inputs | fromjson? | select(type == "object" and .isSidechain != true)) as $o ({t: null, o: null, c: null};',
+  // Claude's last compaction (its own at the window's end or when idle, this plugin's at a hand-off, the owner's
+  // /compact): when, and how large its context was
+  '    reduce (inputs | fromjson? | select(type == "object" and .isSidechain != true)) as $o ({t: null, o: null, c: null, k: null};',
   '      {t: (.t | step($o)), o: (if ($o | owner) then $o.timestamp else .o end),',
-  '       c: (if $o.type == "event_msg" and $o.payload.type == "token_count" then ($o | filled) // .c else .c end)})',
-  '    | .o as $typed | .c as $filled | .t | select(. != null) | [.state, .id, .at, ((.text // "") | cue), $typed, $filled] | map(. // "" | tostring) | join("\\t")',
+  '       c: (if $o.type == "event_msg" and $o.payload.type == "token_count" then ($o | filled) // .c else .c end),',
+  '       k: (if $o.type == "system" and $o.subtype == "compact_boundary" and ($o.timestamp | type) == "string" then {at: $o.timestamp, tokens: (($o.compactMetadata.preTokens // 0) | if type == "number" then floor else 0 end)} else .k end)})',
+  '    | .o as $typed | .c as $filled | .k as $k | .t | select(. != null) | [.state, .id, .at, ((.text // "") | cue), $typed, $filled, ($k.at // ""), ($k.tokens // "")] | map(. // "" | tostring) | join("\\t")',
   "  ' 2>/dev/null",
   'done',
 ].join('\n')
 
 /**
  * An agent's last turn; `typedAt`, when the owner last typed into the agent (as far back as the pipeline
- * reads); `filled`, how full a Codex conversation's context is, in percent.
+ * reads); `filled`, how full a Codex conversation's context is, in percent; `compacted`, Claude's last
+ * compaction of any kind, when and how large its context was (as far back as the pipeline reads).
  */
-export type Turn = { state: 'done' | 'busy'; id: string; at: number; cue?: Cue; typedAt?: number; filled?: number }
+export type Turn = { state: 'done' | 'busy'; id: string; at: number; cue?: Cue; typedAt?: number; filled?: number; compacted?: { at: number; tokens: number } }
 
 /** TURN_SCRIPT's answer: each file's last turn. */
 export function parseTurns(stdout: string): Map<string, Turn> {
@@ -120,13 +124,15 @@ export function parseTurns(stdout: string): Map<string, Turn> {
       file = line.slice(4)
       continue
     }
-    const [state, id = '', iso = '', cueLine = '', typedIso = '', filledText = ''] = line.split('\t')
+    const [state, id = '', iso = '', cueLine = '', typedIso = '', filledText = '', compactedIso = '', compactedTokens = ''] = line.split('\t')
     const at = Date.parse(iso)
     if (file === '' || (state !== 'done' && state !== 'busy') || !/^[A-Za-z0-9-]{1,80}$/.test(id) || Number.isNaN(at)) continue
     const cue = state === 'done' ? cueOf(cueLine) : undefined
     const typedAt = Date.parse(typedIso)
     const filled = /^\d{1,3}$/.test(filledText) ? Number(filledText) : undefined
-    turns.set(file, { state, id, at, ...(cue === undefined ? {} : { cue }), ...(Number.isNaN(typedAt) ? {} : { typedAt }), ...(filled === undefined ? {} : { filled }) })
+    const compactedAt = Date.parse(compactedIso)
+    const compacted = Number.isNaN(compactedAt) || !/^\d{1,9}$/.test(compactedTokens) ? undefined : { at: compactedAt, tokens: Number(compactedTokens) }
+    turns.set(file, { state, id, at, ...(cue === undefined ? {} : { cue }), ...(Number.isNaN(typedAt) ? {} : { typedAt }), ...(filled === undefined ? {} : { filled }), ...(compacted === undefined ? {} : { compacted }) })
   }
   return turns
 }
@@ -141,7 +147,7 @@ export type Side = { tool: Tool; pane: string; turn?: Turn; isBusy: boolean }
  * - `tell`: tell the owner.
  */
 export type Step =
-  | { kind: 'pass'; key: string; from?: Tool; to: Tool; pane: string; line: string }
+  | { kind: 'pass'; key: string; from?: Tool; to: Tool; pane: string; line: string; at?: number }
   | { kind: 'tell'; key: string; from?: Tool; text: string; isForOwner: boolean; cue?: Cue['kind'] }
 
 /**
@@ -182,7 +188,7 @@ export function relaySteps(ws: Pick<Workspace, 'name' | 'relay'> & Partial<Pick<
       // a cue already passed is never held: the ledger takes this step when it has its pass (RELAY_SCRIPT)
       steps.push({ kind: 'tell', key: `cap-${turn.id}`, text: `${ws.name}: the relay passed ${relay.streak} hand-offs in a row and waits for you; type to either agent, or press continue in /sessions, to pass the next.`, isForOwner: true })
     } else {
-      steps.push({ kind: 'pass', key: `pass-${turn.id}`, from: tool, to: cue.to, pane: other.pane, line: cue.line })
+      steps.push({ kind: 'pass', key: `pass-${turn.id}`, from: tool, to: cue.to, pane: other.pane, line: cue.line, at: turn.at })
     }
   }
   return steps

@@ -217,6 +217,8 @@ const world = {
   /** What CODEX_TASK_SCRIPT prints (the last task event), or a function answering each run. */
   codexTask: '"type":"task_complete"\n',
   codexTaskAnswer: undefined as (() => string) | undefined,
+  /** Done while the agents' turns are read (another session writing meanwhile). */
+  whileTurnsRead: () => {},
   /** What usage.pl ctx prints for a file (`ctx 437000`, `ctx 117363 258400`). */
   contexts: {} as Record<string, string>,
   /** The files USAGE_FILES_SCRIPT lists, one per line. */
@@ -265,6 +267,7 @@ const resetWorld = () => {
   world.sessionId = undefined
   world.events = []
   world.records = '==> CURRENT.md\nRound 3: the console\'s sign-in.\n'
+  world.whileTurnsRead = () => {}
   world.contexts = {}
   world.usageFiles = ''
   world.scan = {}
@@ -343,6 +346,7 @@ function machine(argv: readonly string[], env: unknown): Run {
       }
       if (argv[2] === PROJECTS_SCRIPT) return ok('/Users/u/dev/web-app\n/Users/u/dev/api\n/Users/u/dev/build\n/Users/u/dev/résumé\n')
       if (argv[2] === TURN_SCRIPT) {
+        world.whileTurnsRead()
         return ok(args.map(f => `==> ${f}\n${Object.entries(world.turns).filter(([k]) => f.includes(k)).map(([, line]) => `${line}\n`).join('')}`).join(''))
       }
       if (argv[2] === RELAY_SCRIPT) {
@@ -2023,8 +2027,9 @@ describe('relay', () => {
     // null: no turn finished yet
     const claude = (turn: ReturnType<typeof done> | null = done('c0', 'Ready.'), isBusy = false): Side => ({ tool: 'claude', pane: '%1', isBusy, ...(turn === null ? {} : { turn }) })
     const codex = (turn: ReturnType<typeof done> | null = done('x0', 'Ready.'), isBusy = false): Side => ({ tool: 'codex', pane: '%2', isBusy, ...(turn === null ? {} : { turn }) })
-    expect(relaySteps(ws, { claude: claude(done('c1', READY_CODEX)), codex: codex() }, NOW)).toEqual([{ kind: 'pass', key: 'pass-c1', from: 'claude', to: 'codex', pane: '%2', line: READY_CODEX }])
-    expect(relaySteps(ws, { claude: claude(), codex: codex(done('x1', READY_CLAUDE)) }, NOW)).toEqual([{ kind: 'pass', key: 'pass-x1', from: 'codex', to: 'claude', pane: '%1', line: READY_CLAUDE }])
+    // each pass with when its turn ended (a check after a compaction goes by it)
+    expect(relaySteps(ws, { claude: claude(done('c1', READY_CODEX)), codex: codex() }, NOW)).toEqual([{ kind: 'pass', key: 'pass-c1', from: 'claude', to: 'codex', pane: '%2', line: READY_CODEX, at: done('c1', READY_CODEX).at }])
+    expect(relaySteps(ws, { claude: claude(), codex: codex(done('x1', READY_CLAUDE)) }, NOW)).toEqual([{ kind: 'pass', key: 'pass-x1', from: 'codex', to: 'claude', pane: '%1', line: READY_CLAUDE, at: done('x1', READY_CLAUDE).at }])
     // the other is at work: it waits; the sender still at work, or its turn under way: nothing yet
     expect(relaySteps(ws, { claude: claude(done('c1', READY_CODEX)), codex: codex(done('x0', 'Ready.'), true) }, NOW)).toEqual([])
     // the other has not finished a turn: it may be at a question of its own (trust, an update) that Enter
@@ -2698,8 +2703,6 @@ describe('the context guard', () => {
     expect(compacted).toEqual([claudeKeep('Practice RBAC')])
     // done: logged for the ops screen
     expect(world.events.at(-1)).toMatchObject({ kind: 'compact', workspace: 'practice-rbac', agent: 'claude', text: 'Practice RBAC: Claude compacted at its hand-off (its context was 437k tokens; it read 437k tokens from the cache, 3k afresh)' })
-    // kept on the workspace: a drift check follows its next hand-off
-    expect(JSON.parse(files.get(WORKSPACES)!).workspaces[0].compacted).toEqual({ at: expect.any(Number) as unknown as number, tokens: 437_000, isChecked: false })
     // vetoed (a hook, a turn begun): asked, not logged
     isVetoed = true
     await end(`Done.\n${READY_CODEX}`, 'turn-v1')
@@ -2871,8 +2874,8 @@ describe('the ops screen', () => {
     expect(world.events.every(e => typeof e.at === 'number')).toBe(true)
   })
 
-  test('Ops screen opens the ops console, from this plugin\'s folder, in a Terminal window over the screen in use', async ($, on) => {
-    const { runs } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+  test('Ops screen opens the ops console, from this plugin\'s folder, in a Terminal window over the screen in use, in half this tab\'s font', async ($, on) => {
+    const { runs } = engine(on, machine, { termProgram: 'Apple_Terminal', selfId: 'session-104' })
     await $.session.start(START)
     await $.command.run(SESSIONS)
     const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
@@ -2880,7 +2883,8 @@ describe('the ops screen', () => {
     const opened = runs.find(r => r[0] === '/usr/bin/osascript' && r[4] === OPEN_SCRIPT)
     // for the accounts the pane shows: here all of them
     expect(opened?.[5]).toMatch(/^node --no-warnings '\/.*\/ops\/ops\.mjs' --account '\*'$/)
-    expect(JSON.parse(opened![6]!)).toMatchObject({ x: expect.any(Number), y: expect.any(Number), width: expect.any(Number), height: expect.any(Number), fontSize: expect.any(Number) })
+    // the whole screen in use; this tab (ttys022) is in 12 points: 6
+    expect(JSON.parse(opened![6]!)).toEqual({ x: 0, y: 30, width: 2560, height: 1410, fontSize: 6 })
     await ui.unmount()
   })
 
@@ -3035,62 +3039,116 @@ describe('the drift check', () => {
     await ui.unmount()
   })
 
-  test('after Claude compacts at a hand-off, a check follows its next hand-off, once, whatever the count: told to look at what the compaction may have lost', async ($, on) => {
-    // due: Claude's hand-off passed, a compaction not checked since, the checks on
-    const claudePass = { kind: 'pass', from: 'claude' }
+  test('after Claude\'s context is compacted (any compaction its transcript records), a check follows its next hand-off, once, whatever the count', async ($, on) => {
+    // due: Claude's hand-off of a turn that ended after a compaction not checked since, the checks on
+    const claudePass = { kind: 'pass', from: 'claude', at: NOW - 30_000 }
     const compacted = { at: NOW - 600_000, tokens: 437_000, isChecked: false }
     expect(isDueAfterCompaction({ compacted }, claudePass, 'passed')).toBe(true)
     expect([
       isDueAfterCompaction({ compacted: { ...compacted, isChecked: true } }, claudePass, 'passed'),
       isDueAfterCompaction({}, claudePass, 'passed'),
-      isDueAfterCompaction({ compacted }, { kind: 'pass', from: 'codex' }, 'passed'),
+      isDueAfterCompaction({ compacted }, { ...claudePass, from: 'codex' }, 'passed'),
       isDueAfterCompaction({ compacted }, claudePass, 'taken'),
       isDueAfterCompaction({ compacted, checkEvery: 0 }, claudePass, 'passed'),
-      isDueAfterCompaction({ compacted }, { kind: 'tell', from: 'claude' }, 'told'),
-    ]).toEqual([false, false, false, false, false, false])
+      isDueAfterCompaction({ compacted }, { kind: 'tell', from: 'claude', at: NOW }, 'told'),
+      // the hand-off of a turn that ended before the compaction (its pass held up meanwhile): not after it
+      isDueAfterCompaction({ compacted }, { ...claudePass, at: NOW - 700_000 }, 'passed'),
+      isDueAfterCompaction({ compacted }, { kind: 'pass', from: 'claude' }, 'passed'),
+    ]).toEqual([false, false, false, false, false, false, false, false])
     // kept as the workspaces file has it; one this does not read is dropped
     expect(workspacesFrom({ workspaces: [{ ...practice, compacted }, { ...practice, id: 'b', compacted: { at: 'x', tokens: 1, isChecked: false } }, { ...practice, id: 'c', compacted: { at: 1, tokens: 1 } }] }).map(w => w.compacted))
       .toEqual([compacted, undefined, undefined])
-    expect(driftRequest({ name: 'X', purpose: 'p' }, [], '', true).prompt).toContain('Claude compacted its context (a summary in place of its conversation) at its hand-off before its latest turn')
+    expect(driftRequest({ name: 'X', purpose: 'p' }, [], '', true).prompt).toContain('Claude\'s context was compacted (a summary in place of its conversation) before or during its latest turn')
     expect(driftRequest({ name: 'X', purpose: 'p' }, [], '').prompt).not.toContain('compacted')
+    // the turn reader: a transcript's last compaction, when and how large
+    const turns = parseTurns(['==> /c.jsonl', `done\tturn-1\t2026-10-09T10:05:00Z\t${READY_CODEX}\t\t\t2026-10-09T10:00:00Z\t437000`, '==> /d.jsonl', 'done\tturn-2\t2026-10-09T10:05:00Z\t\t\t\tsoon\t5', '==> /e.jsonl', 'done\tturn-3\t2026-10-09T10:05:00Z\t\t\t\t2026-10-09T10:00:00Z\tx'].join('\n'))
+    expect([turns.get('/c.jsonl')?.compacted, turns.get('/d.jsonl')?.compacted, turns.get('/e.jsonl')?.compacted]).toEqual([{ at: Date.UTC(2026, 9, 9, 10, 0), tokens: 437_000 }, undefined, undefined])
 
     const { files, clock } = engine(on, machine, { termProgram: 'Apple_Terminal', configDir: `${HOME}/.claude-work/` })
     const asked: string[] = []
+    let during = () => {}
     on('model.complete', async ($, e) => {
       asked.push(String(e.prompt))
+      during()
       return { value: { isAnswered: true as const, text: '{"status": "on-track", "brief": "Fine."}', usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } }
     })
     const saved = () => JSON.parse(files.get(WORKSPACES)!).workspaces[0]
-    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, checkout: '/Users/u/dev/web-app', purpose: 'finish the console', relay: relayOn({ sinceCheck: 0 }), compacted }] }))
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, checkout: '/Users/u/dev/web-app', purpose: 'finish the console', relay: relayOn({ sinceCheck: 0 }) }] }))
     world.tmuxPanes = 'ws-practice-rbac\tpeers\t/dev/ttys022\t%1\tclaude\nws-practice-rbac\tpeers\t/dev/ttys045\t%2\tcodex\n'
     world.tmuxOwner = String(NOW)
     world.paneCommands = { '%1': 'claude', '%2': 'codex' }
-    // the pane says when Claude compacted, and that a check follows
+    const iso = (ms: number) => new Date(ms).toISOString()
+    // Claude's transcript records a compaction (Claude Code's own, or this plugin's): kept on the workspace, said
+    const boundary = `\t${iso(NOW - 600_000)}\t437000`
+    world.turns = { 'session-104': `done\tturn-c0\t${iso(NOW - 700_000)}\t${READY_CODEX}\t\t${boundary}`, '/rollouts/a.jsonl': `busy\tturn-x1\t${iso(NOW - 60_000)}\t` }
     await $.session.start(START)
     const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
     await $.command.run(SESSIONS)
-    expect((await ui.findAll({ type: 'Text' })).map(t => t.text)).toContain('Claude compacted at its hand-off 10m ago, at 437k; a drift check follows its next hand-off')
-    // Codex hands back: no check yet
-    world.turns = { 'session-104': `done\tturn-c0\t${new Date(NOW - 300_000).toISOString()}\tWorking.`, '/rollouts/a.jsonl': `done\tturn-x1\t${new Date(NOW - 60_000).toISOString()}\t${READY_CLAUDE}` }
+    expect(saved().compacted).toEqual(compacted)
+    expect((await ui.findAll({ type: 'Text' })).map(t => t.text)).toContain('Claude\'s context was compacted 10m ago, at 437k; a drift check follows its next hand-off')
+    // the hand-off of the turn before it, passed only now: no check (it is not after the compaction)
+    world.ledger.clear()
     await clock.advance(4_000)
-    await $.command.run(SESSIONS)
+    await $.command.run({ ...SESSIONS, args: 'all' })
+    await clock.advance(1_000)
     expect(asked).toEqual([])
-    // Claude's first hand-off since: checked, told what to look at; logged as after the compaction; once
-    world.turns = { 'session-104': `done\tturn-c1\t${new Date(NOW - 30_000).toISOString()}\t${READY_CODEX}`, '/rollouts/a.jsonl': `done\tturn-x1\t${new Date(NOW - 60_000).toISOString()}\t${READY_CLAUDE}` }
+    // Codex hands back: no check yet
+    world.turns = { 'session-104': `busy\tturn-c1\t${iso(NOW - 300_000)}\t\t\t${boundary}`, '/rollouts/a.jsonl': `done\tturn-x1\t${iso(NOW - 60_000)}\t${READY_CLAUDE}` }
     await clock.advance(4_000)
-    await $.command.run(SESSIONS)
+    await $.command.run({ ...SESSIONS, args: 'all' })
+    expect(asked).toEqual([])
+    // Claude's first hand-off since: checked, told what to look at; logged as after the compaction; once. A newer
+    // compaction made while that check runs is not taken for checked
+    const newer = { at: NOW - 10_000, tokens: 512_000, isChecked: false }
+    during = () => files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...saved(), compacted: newer }] }))
+    world.turns = { 'session-104': `done\tturn-c1\t${iso(NOW - 30_000)}\t${READY_CODEX}\t\t${boundary}`, '/rollouts/a.jsonl': `done\tturn-x1\t${iso(NOW - 60_000)}\t${READY_CLAUDE}` }
+    await clock.advance(4_000)
+    await $.command.run({ ...SESSIONS, args: 'all' })
     await clock.advance(1_000)
+    during = () => {}
     expect(asked).toHaveLength(1)
-    expect(asked[0]).toContain('Claude compacted its context')
-    expect(saved().compacted).toEqual({ ...compacted, isChecked: true })
+    expect(asked[0]).toContain('Claude\'s context was compacted')
+    expect(saved().compacted).toEqual(newer)
     expect(world.events.find(e => e.kind === 'check')).toMatchObject({ text: 'Practice RBAC: after Claude compacted, on track: Fine.' })
-    expect((await ui.findAll({ type: 'Text' })).map(t => t.text)).toContain('Claude compacted at its hand-off 10m ago, at 437k; a drift check has looked since')
-    world.turns = { 'session-104': `done\tturn-c2\t${new Date(NOW).toISOString()}\t${READY_CODEX}`, '/rollouts/a.jsonl': `done\tturn-x2\t${new Date(NOW - 20_000).toISOString()}\t${READY_CLAUDE}` }
-    await clock.advance(4_000)
-    await $.command.run(SESSIONS)
-    await clock.advance(1_000)
-    expect(asked).toHaveLength(1)
+    // the newer one's own check: at Claude's next hand-off, then none
+    for (const id of ['turn-c2', 'turn-c3']) {
+      world.turns = { 'session-104': `done\t${id}\t${iso(NOW + (id === 'turn-c2' ? 1 : 2) * 10_000)}\t${READY_CODEX}\t\t${boundary}`, '/rollouts/a.jsonl': `done\tturn-x2\t${iso(NOW - 20_000)}\t${READY_CLAUDE}` }
+      await clock.advance(4_000)
+      await $.command.run({ ...SESSIONS, args: 'all' })
+      await clock.advance(1_000)
+    }
+    expect(asked).toHaveLength(2)
+    expect(saved().compacted).toEqual({ ...newer, isChecked: true })
+    expect((await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')).toMatch(/Claude's context was compacted \d+s ago, at 512k; a drift check has looked since/)
     await ui.unmount()
+  })
+
+  test('a compaction read from Claude\'s transcript never takes the place of a newer one kept meanwhile', async ($, on) => {
+    const { files } = engine(on, machine, { termProgram: 'Apple_Terminal', configDir: `${HOME}/.claude-work/` })
+    const saved = () => JSON.parse(files.get(WORKSPACES)!).workspaces[0]
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, checkout: '/Users/u/dev/web-app', purpose: 'p', relay: relayOn() }] }))
+    world.tmuxPanes = 'ws-practice-rbac\tpeers\t/dev/ttys022\t%1\tclaude\nws-practice-rbac\tpeers\t/dev/ttys045\t%2\tcodex\n'
+    world.tmuxOwner = String(NOW)
+    world.paneCommands = { '%1': 'claude', '%2': 'codex' }
+    world.turns = { 'session-104': `busy\tturn-c1\t${new Date(NOW - 60_000).toISOString()}\t\t\t\t${new Date(NOW - 600_000).toISOString()}\t437000`, '/rollouts/a.jsonl': `busy\tturn-x1\t${new Date(NOW - 60_000).toISOString()}\t` }
+    // while this session reads the transcripts, another keeps a newer compaction
+    const newer = { at: NOW - 30_000, tokens: 512_000, isChecked: false }
+    world.whileTurnsRead = () => files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...saved(), compacted: newer }] }))
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    expect(saved().compacted).toEqual(newer)
+  })
+
+  test('what the box says of a check after a compaction: one that will run, or why none will', async () => {
+    const compacted = { at: NOW - 60_000, tokens: 300_000, isChecked: false }
+    const said = (ws: Partial<Workspace>) => viewOf({ ...snapshotOf(), workspaces: [{ ...practice, purpose: 'p', relay: relayOn(), compacted, ...ws }] }, { home: HOME, now: NOW, windowMs: 0, selfId: '', order: {} }).workspaces[0]?.compacted
+    expect([said({}), said({ checkEvery: 0 }), said({ purpose: undefined }), said({ relay: relayOn({ mode: 'notify' }) }), said({ compacted: { ...compacted, isChecked: true } })]).toEqual([
+      'Claude\'s context was compacted 1m ago, at 300k; a drift check follows its next hand-off',
+      'Claude\'s context was compacted 1m ago, at 300k; drift checks are off',
+      'Claude\'s context was compacted 1m ago, at 300k; no drift check: the workspace has no purpose to check against',
+      'Claude\'s context was compacted 1m ago, at 300k; a drift check follows its next hand-off once the relay is on',
+      'Claude\'s context was compacted 1m ago, at 300k; a drift check has looked since',
+    ])
   })
 
   test('the relay checks at the hand-off that makes the count; Check goes every 4, every 8, off', async ($, on) => {

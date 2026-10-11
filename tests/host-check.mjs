@@ -719,7 +719,8 @@ except ChildProcessError: pass
     { type: 'user', uuid: 'k1', origin: human, timestamp: '2026-10-09T14:00:00Z', message: { content: 'build it' } },
     { ...ended, uuid: 'k2', timestamp: '2026-10-09T14:05:00Z' },
     { type: 'user', uuid: 'k3', timestamp: '2026-10-09T14:06:00Z', message: { content: '/compact keep the peer-coding state' } },
-    { type: 'system', subtype: 'compact_boundary', timestamp: '2026-10-09T14:06:30Z' },
+    { type: 'system', subtype: 'compact_boundary', timestamp: '2026-10-09T14:06:30Z', compactMetadata: { trigger: 'manual', preTokens: 437000, postTokens: 15000 } },
+    { type: 'system', subtype: 'compact_boundary', isSidechain: true, timestamp: '2026-10-09T14:06:40Z', compactMetadata: { trigger: 'auto', preTokens: 9 } },
     { type: 'user', uuid: 'k4', isCompactSummary: true, timestamp: '2026-10-09T14:06:30Z', message: { content: 'This session is being continued…' } },
     { type: 'user', uuid: 'k5', isMeta: true, timestamp: '2026-10-09T14:06:30Z', message: { content: '<local-command-caveat>…</local-command-caveat>' } },
     { type: 'user', uuid: 'k6', timestamp: '2026-10-09T14:06:31Z', message: { content: '<command-name>/compact</command-name>\n<command-message>compact</command-message>\n<command-args>keep the peer-coding state</command-args>' } },
@@ -757,6 +758,8 @@ except ChildProcessError: pass
   ])
   const out = spawnSync('/bin/sh', ['-c', r.TURN_SCRIPT, 'sh', claudeDone, claudeBusy, codexDone, codexBusy, join(scratch, 'none.jsonl'), afterCommands, interrupted, midTurn, split, codexAborted, skillBusy, skillDone, apiError, typedClaude, typedCommand, typedBash, typedCue, typedCodex, typedCodexOld, typedMarked, typedPaste, typedOdd, compacted, quotesCompact, codexFilled], { encoding: 'utf8', timeout: 15_000 })
   const turns = r.parseTurns(out.stdout)
+  // Claude's last compaction, of its own (a subagent's is not), when and how large; one with no size said is 0
+  check('turns: the last compaction of the session itself, when and how large', JSON.stringify([turns.get(compacted)?.compacted, turns.get(afterCommands)?.compacted, turns.get(claudeDone)?.compacted]) === JSON.stringify([{ at: Date.parse('2026-10-09T14:06:30Z'), tokens: 437000 }, { at: Date.parse('2026-10-09T10:07:00Z'), tokens: 0 }, undefined]), JSON.stringify([turns.get(compacted)?.compacted, turns.get(afterCommands)?.compacted]))
   check('turns: a command run in the session, its output, a compaction or a meta record starts no turn', turns.get(afterCommands)?.state === 'done' && turns.get(afterCommands)?.id === 'e1' && turns.get(afterCommands)?.cue?.line === cue, JSON.stringify(turns.get(afterCommands)))
   check('turns: an interrupt ends a turn, with no cue', turns.get(interrupted)?.state === 'done' && turns.get(interrupted)?.id === 'i1' && turns.get(interrupted)?.cue === undefined)
   check('turns: a reply that stopped for a tool is a turn under way', turns.get(midTurn)?.state === 'busy' && turns.get(midTurn)?.id === 'a3')
@@ -785,7 +788,7 @@ except ChildProcessError: pass
   const real = readdirSync(join(home, '.claude', 'projects'), { withFileTypes: true }).filter(d => d.isDirectory()).slice(0, 3)
     .flatMap(d => readdirSync(join(home, '.claude', 'projects', d.name)).filter(f => f.endsWith('.jsonl')).slice(0, 2).map(f => join(home, '.claude', 'projects', d.name, f)))
   const realOut = spawnSync('/bin/sh', ['-c', r.TURN_SCRIPT, 'sh', ...real], { encoding: 'utf8' }).stdout
-  check('turns: this Mac\'s own transcripts read in that form', realOut.split('\n').filter(l => l !== '').every(l => l.startsWith('==> ') || /^(done|busy)\t[A-Za-z0-9-]+\t\S+\t[^\t]*\t\S*\t(\d{1,3})?$/.test(l)), `${real.length} files`)
+  check('turns: this Mac\'s own transcripts read in that form', realOut.split('\n').filter(l => l !== '').every(l => l.startsWith('==> ') || /^(done|busy)\t[A-Za-z0-9-]+\t\S+\t[^\t]*\t\S*\t(\d{1,3})?\t\S*\t(\d+)?$/.test(l)), `${real.length} files`)
 
   const socket = `live-sessions-relay-${process.pid}`
   // a private server that reads no tmux.conf: the person's plugins (a session restore) never run in it

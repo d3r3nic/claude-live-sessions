@@ -107,8 +107,8 @@ export type Workspace = {
   /** How many hand-offs in a row between two drift checks: DRIFT_EVERY (4) unless set; 0 is off. */
   checkEvery?: number
   /**
-   * Claude's last compaction at a hand-off: when, how large its context was, and whether a drift check has run since
-   * (the next one after it is due at Claude's next hand-off).
+   * Claude's last compaction, of any kind, as its transcript records it: when, how large its context was, and whether a
+   * drift check has run since (the next one after it is due at Claude's next hand-off).
    */
   compacted?: { at: number; tokens: number; isChecked: boolean }
   /** The last drift check: when, and its verdict for the owner. */
