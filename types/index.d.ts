@@ -162,8 +162,9 @@ export type UsageView = {
   at: number
   /** Why they could not be read, if they could not ('' otherwise). */
   problem: string
-  /** The Mac's clock, minutes east of UTC, to say reset times as it shows them. */
+  /** The Mac's clock, minutes east of UTC, now, and at each time the view says (by its ms), as daylight saving has it then. */
   offset: number
+  offsets: Record<string, number>
   accounts: Record<string, {
     limits: { claude: Partial<Record<'5h' | '7d', UsageLimit>>; codex: Partial<Record<'5h' | '7d', UsageLimit>> }
     ranks: Record<string, { since: number; rows: UsageRow[]; more: number }>

@@ -3,8 +3,8 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { ClaudeSession, CodexSession, Place, Relay, SessionContext, Snapshot, Thread, UsageView, Workspace } from '../types'
 import type { Screen } from './workspaces'
-import { accountOfFile, applyScan, claudeLimits, clockSaid, currentLimits, EMPTY_USAGE, limitSaid, offsetOf, parseContexts, rankUsage, scanInput, sharedLimitsFrom, usageFrom, USAGE_FILES_SCRIPT, USAGE_KEEP_MS, WINDOW_MS } from './usage'
-import type { UsageState } from './usage'
+import { accountOfFile, applyScan, claudeLimits, clockOf, currentLimits, EMPTY_USAGE, limitSaid, markKey, mergeLimits, offsetOf, OFFSETS_SCRIPT, parseContexts, rankUsage, scanInput, sharedLimitsFrom, usageFrom, USAGE_FILES_SCRIPT, USAGE_KEEP_MS, WINDOW_MS, wholeFiles } from './usage'
+import type { Limit, UsageState } from './usage'
 import { AGENT_COMMANDS, afterOwner, afterStep, claudeKeep, COMPACT_FROM, cueOf, cutBytes, eventOf, EVENT_SCRIPT, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, tokensSaid, TURN_SCRIPT } from './relay'
 import type { RelayEvent, Side, Step } from './relay'
 import { branchOf, checkDue, DRIFT_EVERY, driftRequest, parseVerdict, recordFolderOf, RECORDS_SCRIPT } from './drift'
@@ -1539,11 +1539,11 @@ const USAGE_MAX_AGE_MS = 120_000
 /** A session's own Claude limits are written for the others at most this often. */
 const LIMITS_EVERY_MS = 60_000
 /** How many files usage.pl reads in one run (its output stays far below what a run may print). */
-const SCAN_BATCH = 200
+const SCAN_BATCH = 100
 /** The projects listed per tool and window; the rest are counted. */
 const USAGE_ROWS = 8
 
-const EMPTY_VIEW: UsageView = { at: 0, problem: '', offset: 0, accounts: {} }
+const EMPTY_VIEW: UsageView = { at: 0, problem: '', offset: 0, offsets: {}, accounts: {} }
 const usageShown = atom({ plugin: 'live-sessions', key: 'usageShown' } as const, false)
 const usageWindow = atom({ plugin: 'live-sessions', key: 'usageWindow' } as const, '7d' as '5h' | '7d')
 const usage = atom({ plugin: 'live-sessions', key: 'usage' } as const, EMPTY_VIEW)
@@ -1575,8 +1575,11 @@ async function shareLimits($: EngineInterface) {
   if (Object.keys(limits).length === 0 || (said === limitsShared && now - limitsSharedAt < LIMITS_EVERY_MS)) return
   limitsSharedAt = now
   limitsShared = said
+  // with what the account's other sessions read: within a window the highest (an idle session holds an older one)
   const all = sharedLimitsFrom(await readJson($, limitsPath(home)))
-  await $.fs.write(limitsPath(home), `${JSON.stringify({ ...all, [own]: limits })}\n`)
+  const merged = mergeLimits(all[own], limits)
+  const reading = (l: Partial<Record<string, Limit>> | undefined) => JSON.stringify(Object.entries(l ?? {}).map(([w, r]) => [w, r?.used, r?.resetsAt]))
+  if (reading(merged) !== reading(all[own])) await $.fs.write(limitsPath(home), `${JSON.stringify({ ...all, [own]: merged })}\n`)
 }
 
 /**
@@ -1602,23 +1605,26 @@ async function refreshUsage($: EngineInterface, isAsked = false) {
       const listed = await $.process.run(['/bin/sh', '-c', USAGE_FILES_SCRIPT, 'sh', ...configDirs], { timeoutMs: 60_000 }).catch(() => undefined)
       const files = (listed?.stdout ?? '').split('\n').filter(f => f.startsWith('/') && accountOfFile(home, f) !== undefined)
       const since = new Date(now - USAGE_KEEP_MS).toISOString()
-      let isWhole = listed !== undefined
-      for (let i = 0; i < files.length && isWhole; i += SCAN_BATCH) {
+      for (let i = 0; i < files.length && listed !== undefined; i += SCAN_BATCH) {
         const batch = files.slice(i, i + SCAN_BATCH)
         const out = await $.process
           .run(['/usr/bin/perl', `${$.plugin.root}/hooks/usage.pl`, 'scan', since], { stdin: scanInput(batch, state), timeoutMs: 300_000 })
           .catch((error: unknown) => ({ exitCode: -1, stdout: '', stderr: message(error), isStdoutTruncated: false }))
-        // a run cut short or failed is not taken: its files are read from where they were, next time
-        if (out.exitCode !== 0 || out.isStdoutTruncated === true) {
-          problem = `usage: ${firstLine(out.stderr) || (out.isStdoutTruncated === true ? 'too much output' : `perl exited ${out.exitCode}`)}`
-          isWhole = false
+        const isCut = out.isStdoutTruncated === true
+        // a failed run is not taken: its files are read from where they were, next time
+        if (out.exitCode !== 0 && !isCut) {
+          problem = `usage: ${firstLine(out.stderr) || `perl exited ${out.exitCode}`}`
           break
         }
-        state = applyScan(state, out.stdout, now, f => accountOfFile(home, f))
+        // one cut short (more than a run may print): the files it finished are taken, the rest read on next time
+        const taken = isCut ? wholeFiles(out.stdout) : out.stdout
+        if (isCut && taken === '') problem = 'usage: too much output from one file'
+        state = applyScan(state, taken, now, f => accountOfFile(home, f))
       }
       if (listed === undefined) problem = 'usage: the transcripts could not be listed'
-      // a file no longer listed (older than 8 days, gone) is forgotten; one in a batch not read keeps its mark
-      if (isWhole) state = { ...state, at: now, files: Object.fromEntries(Object.entries(state.files).filter(([f]) => files.includes(f))) }
+      // a file no longer listed (older than 8 days, gone) is forgotten; a rollout archived meanwhile keeps its mark
+      const listedKeys = new Set(files.map(markKey))
+      if (listed !== undefined) state = { ...state, files: Object.fromEntries(Object.entries(state.files).filter(([f]) => listedKeys.has(f))) }
       if (state !== EMPTY_USAGE) await $.fs.write(usagePath(home), `${JSON.stringify(state)}\n`).catch(() => undefined)
     }
     // each folder named for its project: its repository, else the folder
@@ -1632,11 +1638,10 @@ async function refreshUsage($: EngineInterface, isAsked = false) {
       return place !== undefined && place.repo !== '' ? { key: place.repo, name: place.name } : { key: dir, name: dir.startsWith(`${home}/`) ? `~${dir.slice(home.length)}` : dir === home ? '~' : dir }
     }
     const accounts = [...new Set([...(await read($, snapshot)).envs, ...Object.keys(state.codexLimits), ...Object.keys(shared), ...(own === undefined ? [] : [own])])]
-    const clock = await $.process.run(['/bin/date', '+%z'], { timeoutMs: 5_000 }).catch(() => undefined)
-    const view: UsageView = { at: state.at, problem, offset: offsetOf(clock?.stdout ?? ''), accounts: {} }
+    const view: UsageView = { at: state.at, problem, offset: 0, offsets: {}, accounts: {} }
     for (const account of accounts) {
       const limits = {
-        claude: currentLimits(account === own && Object.keys(live).length > 0 ? live : shared[account], now),
+        claude: currentLimits(account === own ? mergeLimits(shared[account], live) : shared[account], now),
         codex: currentLimits(state.codexLimits[account], now),
       }
       const ranks: UsageView['accounts'][string]['ranks'] = {}
@@ -1649,6 +1654,17 @@ async function refreshUsage($: EngineInterface, isAsked = false) {
       }
       view.accounts[account] = { limits, ranks }
     }
+    // the Mac's offset from UTC at each time said (now, each reset, each window's start), as daylight saving has it then
+    const times = [now, now - WINDOW_MS['5h'], now - WINDOW_MS['7d'], ...Object.values(view.accounts).flatMap(a => [
+      ...Object.values(a.limits.claude), ...Object.values(a.limits.codex),
+    ].flatMap(l => (l?.resetsAt === undefined ? [] : [l.resetsAt])).concat(Object.values(a.ranks).map(r => r.since)))]
+    const unique = [...new Set(times)]
+    const offsets = await $.process.run(['/bin/sh', '-c', OFFSETS_SCRIPT, 'sh', ...unique.map(t => String(Math.floor(t / 1000)))], { timeoutMs: 10_000 }).catch(() => undefined)
+    const lines = (offsets?.stdout ?? '').split('\n')
+    unique.forEach((t, i) => {
+      view.offsets[String(t)] = offsetOf(lines[i] ?? '')
+    })
+    view.offset = view.offsets[String(now)] ?? 0
     await update($, usage, () => view)
   })().finally(() => {
     usageRun = undefined
@@ -1660,14 +1676,15 @@ async function refreshUsage($: EngineInterface, isAsked = false) {
 function usageText(used: UsageView, account: string, window: '5h' | '7d', now: number): string {
   if (used.at === 0) return `Usage: not counted yet${used.problem === '' ? '' : ` (${used.problem})`}.`
   const accounts = account === ALL_ACCOUNTS ? Object.keys(used.accounts).sort((a, b) => a.localeCompare(b)) : [account]
+  const clock = clockOf(used, now)
   const lines = accounts.flatMap(a => (['claude', 'codex'] as const).flatMap(tool => {
     const of = used.accounts[a]
     const rank = of?.ranks[`${tool} ${window}`]
     const limit = of?.limits[tool][window]
-    const head = `${tool === 'claude' ? 'Claude' : 'Codex'} (${a || 'default'}), ${window}${limit === undefined ? '' : `: ${limitSaid(window, limit, now, used.offset)}`}`
-    if (rank === undefined) return limit === undefined ? [] : [`${head}; nothing counted since ${clockSaid(now - WINDOW_MS[window], now, used.offset, true)}`]
+    const head = `${tool === 'claude' ? 'Claude' : 'Codex'} (${a || 'default'}), ${window}${limit === undefined ? '' : `: ${limitSaid(window, limit, now, clock.offsetAt)}`}`
+    if (rank === undefined) return limit === undefined ? [] : [`${head}; nothing counted since ${clock.said(now - WINDOW_MS[window], true)}`]
     const rows = rank.rows.map(r => `${r.name} ${Math.round(r.share * 100)}%${r.ofLimit === undefined ? '' : ` (≈ ${r.ofLimit < 1 ? '<1' : Math.round(r.ofLimit)}% of the limit)`}`)
-    return [`${head}; since ${clockSaid(rank.since, now, used.offset, true)}: ${rows.join(', ')}${rank.more === 0 ? '' : `, +${rank.more} more`}`]
+    return [`${head}; since ${clock.said(rank.since, true)}: ${rows.join(', ')}${rank.more === 0 ? '' : `, +${rank.more} more`}`]
   }))
   return [...lines, ...(used.problem === '' ? [] : [`! ${used.problem}`])].join('\n') || `Usage: nothing counted in this ${window} window.`
 }
@@ -1999,6 +2016,7 @@ export const register: Register = on => {
     const usedIn = await read($, usageWindow)
     const usageAccounts = account === ALL_ACCOUNTS ? Object.keys(used.accounts).sort((a, b) => a.localeCompare(b)) : [account]
     const accountName = (a: string) => a || 'default'
+    const clock = clockOf(used, now)
     const asOf = (l: { at: number }) => (now - l.at > 3_600_000 ? ` (${ago(now - l.at)} ago)` : '')
     const limitsLine = (a: string) => {
       const of = used.accounts[a]
@@ -2006,7 +2024,7 @@ export const register: Register = on => {
       const part = (tool: 'claude' | 'codex', label: string) => {
         const said = (['5h', '7d'] as const).flatMap(w => {
           const l = of.limits[tool][w]
-          return l === undefined ? [] : [`${limitSaid(w, l, now, used.offset)}${asOf(l)}`]
+          return l === undefined ? [] : [`${limitSaid(w, l, now, clock.offsetAt)}${tool === 'codex' ? asOf(l) : ''}`]
         })
         return said.length === 0 ? [] : [`${label} ${said.join(' · ')}`]
       }
@@ -2026,7 +2044,7 @@ export const register: Register = on => {
         const rank = used.accounts[a]?.ranks[`${tool} ${usedIn}`]
         if (rank === undefined) return []
         const limit = used.accounts[a]?.limits[tool][usedIn]
-        const label = `${tool === 'claude' ? 'Claude' : 'Codex'} · ${accountName(a)} · since ${clockSaid(rank.since, now, used.offset, true)}${limit === undefined ? ' · its limit not read yet' : ` · ${Math.round(limit.used)}% of the ${usedIn} limit used`}`
+        const label = `${tool === 'claude' ? 'Claude' : 'Codex'} · ${accountName(a)} · since ${clock.said(rank.since, true)}${limit === undefined ? ' · its limit not read yet' : ` · ${Math.round(limit.used)}% of the ${usedIn} limit used`}`
         return [
           <Text key={`usage ${a} ${tool}`} color={TOOL_COLOR[tool]} wrap="truncate-end">{`  ${label}`}</Text>,
           ...rank.rows.map(r => (

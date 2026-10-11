@@ -57,7 +57,7 @@ import type { ClaudeSession, CodexSession, Snapshot, Workspace } from '../types'
 import { afterOwner, afterStep, claudeKeep, COMPACT_FROM, cueOf, cutBytes, eventOf, EVENT_SCRIPT, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_MAX_AGE_MS, TURN_SCRIPT, tokensSaid } from '../hooks/relay'
 import type { Side } from '../hooks/relay'
 import { branchOf, checkDue, checkFrom, driftRequest, parseVerdict, recordFolderOf, RECORDS_SCRIPT } from '../hooks/drift'
-import { accountOfFile, applyScan, claudeCost, claudeLimits, clockSaid, codexUnits, currentLimits, EMPTY_USAGE, limitSaid, offsetOf, parseContexts, priceOf, rankUsage, scanInput, sharedLimitsFrom, usageFrom, USAGE_FILES_SCRIPT, USAGE_KEEP_MS } from '../hooks/usage'
+import { accountOfFile, applyScan, claudeCost, claudeLimits, clockSaid, codexUnits, currentLimits, EMPTY_USAGE, limitSaid, markKey, mergeLimits, offsetOf, OFFSETS_SCRIPT, parseContexts, priceOf, rankUsage, scanInput, sharedLimitsFrom, usageFrom, USAGE_FILES_SCRIPT, USAGE_KEEP_MS, wholeFiles } from '../hooks/usage'
 import { bringable, codexDir, codexFlags, CODEX_MODE_SCRIPT, CODEX_TASK_SCRIPT, codexTaskState, envOfProfile, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, threadFrom, toggled, withThreads } from '../hooks/bring'
 import {
   absoluteDir,
@@ -223,7 +223,7 @@ const world = {
   /** What usage.pl scan prints for each file it is given (default: nothing new, its mark as it was), and its stdin. */
   scan: {} as Record<string, string>,
   scanned: [] as string[],
-  /** usage.pl scan's output is cut (more than a run may print). */
+  /** usage.pl scan's output is cut (more than a run may print), in its last line. */
   scanCut: false,
 }
 const resetWorld = () => {
@@ -488,13 +488,15 @@ function engine(
       if (e.argv[2] === 'ctx') return { value: { ...ok(e.argv.slice(3).map(f => `==> ${f}\n${world.contexts[f] === undefined ? '' : `${world.contexts[f]}\n`}`).join('')), isStdoutTruncated: false, isStderrTruncated: false } }
       const stdin = e.init?.stdin ?? ''
       world.scanned.push(stdin)
-      const out = stdin.split('\n').filter(Boolean).map(line => {
+      const out = stdin.split('\n').filter(line => line !== '' && !line.startsWith('S\t')).map(line => {
         const [f = '', offset = '0', ...mark] = line.split('\t')
         return world.scan[f] ?? `==> ${f}\n<== ${offset}\t${mark.join('\t')}\n`
       }).join('')
-      return { value: { ...ok(out), isStdoutTruncated: world.scanCut, isStderrTruncated: false } }
+      // cut short: its last line not whole
+      return { value: { ...ok(world.scanCut ? out.slice(0, -3) : out), isStdoutTruncated: world.scanCut, isStderrTruncated: false } }
     }
-    if (e.argv[0] === '/bin/date') return { value: { ...ok('-0700\n'), isStdoutTruncated: false, isStderrTruncated: false } }
+    // the Mac's clock: 7 hours behind UTC until 1 Nov 2026 09:00 UTC, 8 after (daylight saving ends)
+    if (e.argv[2] === OFFSETS_SCRIPT) return { value: { ...ok(e.argv.slice(4).map(t => (Number(t) < Date.UTC(2026, 10, 1, 9) / 1000 ? '-0700' : '-0800')).join('\n') + '\n'), isStdoutTruncated: false, isStderrTruncated: false } }
     if (e.argv[2] === USAGE_FILES_SCRIPT) return { value: { ...ok(world.usageFiles), isStdoutTruncated: false, isStderrTruncated: false } }
     return { value: { ...run(e.argv, e.init?.env), isStdoutTruncated: false, isStderrTruncated: false } }
   })
@@ -3707,7 +3709,10 @@ describe('usage', () => {
       'C\t2026-10-09T15:10\tclaude-opus-5-5\t/Users/u/dev/web-app\t0\t0\t1000000\t1000000\t0',
       'C\t2026-10-09T15:10\tclaude-sonnet-5-5\t/Users/u/dev/a\\"b\t0\t0\t0\t0\t1000000',
       'C\tbad',
-      '<== 5000\tmsg_9',
+      'I\tmsg_8\t2026-10-09T15:10',
+      'I\tmsg_9\t2026-10-09T15:10',
+      'I\tmsg_x\tnot a slot',
+      '<== 5000\tmsg_9,40',
       '==> /Users/u/.codex-work/sessions/2026/10/09/rollout-x.jsonl',
       'X\t2026-10-09T15:20\t/Users/u/dev/web-app\t1000\t800\t10',
       'L\t2026-10-09T15:21:00.000Z\t42.5\t10080\t1791600000',
@@ -3724,8 +3729,12 @@ describe('usage', () => {
     near(state.slots['codex\twork\t/Users/u/dev/web-app']?.[String(at(15, 20))], 360)
     expect(Object.keys(state.slots).sort()).toEqual(['claude\t\t/Users/u/dev/a"b', 'claude\t\t/Users/u/dev/web-app', 'codex\twork\t/Users/u/dev/web-app'])
     expect(state.codexLimits).toEqual({ work: { '7d': { at: at(15, 21), used: 42.5, resetsAt: 1791600000000 }, '5h': { at: at(15, 21), used: 7 } } })
-    expect(state.files).toEqual({ '/Users/u/.claude/projects/-x/a.jsonl': { offset: 5000, mark: 'msg_9' }, '/Users/u/.codex-work/sessions/2026/10/09/rollout-x.jsonl': { offset: 777, mark: '1000,800,10\t/Users/u/dev/web-app' } })
-    expect(state.at).toBe(NOW)
+    // each file's mark: a rollout by its name alone (archived, it moves and is the same file)
+    expect(state.files).toEqual({ '/Users/u/.claude/projects/-x/a.jsonl': { offset: 5000, mark: 'msg_9,40' }, 'rollout:rollout-x.jsonl': { offset: 777, mark: '1000,800,10\t/Users/u/dev/web-app' } })
+    expect(markKey('/Users/u/.codex/archived_sessions/rollout-x.jsonl')).toBe('rollout:rollout-x.jsonl')
+    // each reply counted, by its slot: a continued conversation's copy of it is not counted again
+    expect(state.seen).toEqual({ msg_8: at(15, 10), msg_9: at(15, 10) })
+    expect([state.at, state.version]).toEqual([NOW, 2])
     // more read later: added; an older reading of a limit never replaces a newer one, a newer one does
     const later = applyScan(state, [
       '==> /Users/u/.claude/projects/-x/a.jsonl', 'C\t2026-10-09T15:10\tclaude-opus-5-5\t/Users/u/dev/web-app\t1000000\t0\t0\t0\t0', '<== 6000\tmsg_10',
@@ -3739,7 +3748,11 @@ describe('usage', () => {
     const aged = applyScan({ ...state, slots: { ...state.slots, 'claude\t\t/old': { [String(NOW - USAGE_KEEP_MS - 1)]: 5 } } }, '', NOW, f => accountOfFile(HOME, f))
     expect(aged.slots['claude\t\t/old']).toBeUndefined()
     expect(Object.keys(applyScan(state, '', at(15, 10) + USAGE_KEEP_MS, f => accountOfFile(HOME, f)).slots['claude\t\t/Users/u/dev/web-app'] ?? {})).toEqual([String(at(15, 10))])
-    expect(Object.keys(applyScan(state, '', at(15, 20) + USAGE_KEEP_MS + 1, f => accountOfFile(HOME, f)).slots)).toEqual([])
+    const gone = applyScan(state, '', at(15, 20) + USAGE_KEEP_MS + 1, f => accountOfFile(HOME, f))
+    expect([Object.keys(gone.slots), gone.seen]).toEqual([[], {}])
+    // a run cut short: the files it finished, its last whole `<== ` line included; none: nothing
+    const cut = '==> /a\nC\tx\n<== 5\tm\n==> /b\nC\ty\n<== 9\tn\n==> /c\nC\tz\n<== 1'
+    expect([wholeFiles(cut), wholeFiles('==> /a\nC\tx'), wholeFiles(''), wholeFiles('==> /a\n<== 5\tm\n')]).toEqual(['==> /a\nC\tx\n<== 5\tm\n==> /b\nC\ty\n<== 9\tn\n', '', '', '==> /a\n<== 5\tm\n'])
   })
 
   test('each project\'s part of an account\'s use of a tool in a window, and about how much of the limit that is', async () => {
@@ -3785,19 +3798,36 @@ describe('usage', () => {
     expect([sharedLimitsFrom(null), sharedLimitsFrom([1]), sharedLimitsFrom('x')]).toEqual([{}, {}, {}])
     expect(currentLimits({ '5h': { used: 1, at: 0, resetsAt: NOW - 1 }, '7d': { used: 2, at: 0, resetsAt: NOW + 1 } }, NOW)).toEqual({ '7d': { used: 2, at: 0, resetsAt: NOW + 1 } })
     expect([currentLimits(undefined, NOW), currentLimits({ '7d': { used: 2, at: 0 } }, NOW)]).toEqual([{}, { '7d': { used: 2, at: 0 } }])
-    // the Mac's clock, 7 hours behind UTC: today's time alone, another day's with its name
+    // within one window an account's highest reading (an idle session holds an older, lower one); a later window's
+    const r = (used: number, resetsAt?: number) => ({ used, at: 1, ...(resetsAt === undefined ? {} : { resetsAt }) })
+    expect(mergeLimits({ '5h': r(30, 100), '7d': r(10, 900) }, { '5h': r(12, 100), '7d': r(2, 1900) })).toEqual({ '5h': r(30, 100), '7d': r(2, 1900) })
+    expect(mergeLimits({ '5h': r(3, 100) }, { '5h': r(4, 100), '7d': r(5) })).toEqual({ '5h': r(4, 100), '7d': r(5) })
+    expect([mergeLimits(undefined, undefined), mergeLimits(undefined, { '7d': r(1) })]).toEqual([{}, { '7d': r(1) }])
+    // the Mac's clock, each time by its own offset: today's time alone, within 6 days its day's name, else its date
+    const pdt = { at: -420, now: -420 }
     expect([offsetOf('-0700\n'), offsetOf('+0530'), offsetOf('x')]).toEqual([-420, 330, 0])
-    expect([clockSaid(NOW + 3_600_000, NOW, -420), clockSaid(NOW + 2 * 86_400_000, NOW, -420), clockSaid(Date.UTC(2026, 9, 10, 3, 0), NOW, -420), clockSaid(Date.UTC(2026, 9, 10, 3, 0), NOW, 0)])
+    expect([clockSaid(NOW + 3_600_000, NOW, pdt), clockSaid(NOW + 2 * 86_400_000, NOW, pdt), clockSaid(Date.UTC(2026, 9, 10, 3, 0), NOW, pdt), clockSaid(Date.UTC(2026, 9, 10, 3, 0), NOW, { at: 0, now: 0 })])
       .toEqual(['09:40', 'Sun 08:40', '20:00', 'Sat 03:00'])
-    expect([clockSaid(NOW - 5 * 86_400_000, NOW, -420, true), clockSaid(NOW, NOW, -420, true)]).toEqual(['Sun 4 Oct 08:40', '08:40'])
-    expect([limitSaid('5h', { used: 4.4, at: NOW, resetsAt: NOW + 3 * 3_600_000 }, NOW, -420), limitSaid('7d', { used: 19.5, at: NOW }, NOW, -420)]).toEqual(['5h 4% ↻11:40', '7d 20%'])
+    // a week on, the same weekday: dated, never read as today; a window's start, dated when asked
+    expect([clockSaid(NOW + 7 * 86_400_000 - 60_000, NOW, pdt), clockSaid(NOW - 5 * 86_400_000, NOW, pdt, true), clockSaid(NOW, NOW, pdt, true)]).toEqual(['Fri 16 Oct 08:39', 'Sun 4 Oct 08:40', '08:40'])
+    // past the end of daylight saving (1 Nov), that time's own offset
+    expect(clockSaid(Date.UTC(2026, 10, 2, 16, 0), Date.UTC(2026, 9, 30, 12, 0), { at: -480, now: -420 })).toBe('Mon 08:00')
+    const offsetAt = () => -420
+    expect([limitSaid('5h', { used: 4.4, at: NOW, resetsAt: NOW + 3 * 3_600_000 }, NOW, offsetAt), limitSaid('7d', { used: 19.5, at: NOW }, NOW, offsetAt)]).toEqual(['5h 4% ↻11:40', '7d 20%'])
     expect(['/Users/u/.claude/projects/x.jsonl', '/Users/u/.claude-mmm/projects/x.jsonl', '/Users/u/.codex/sessions/r.jsonl', '/Users/u/.codex-work/archived_sessions/r.jsonl', '/Users/u/.claudeX/projects/x.jsonl', '/Users/u/projects/x.jsonl', '/other/.claude/x.jsonl'].map(f => accountOfFile(HOME, f)))
       .toEqual(['', 'mmm', '', 'work', undefined, undefined, undefined])
-    // a state read back: as it was, or empty (read again from the start) when it is not one
-    const state = { version: 1 as const, at: 5, files: { '/a': { offset: 3, mark: 'm' }, '/b': { offset: -1, mark: 'x' }, '/c': { offset: 1.5, mark: '' } }, slots: { k: { 1: 2, 3: 'x' }, bad: 4 }, codexLimits: {} }
-    expect(usageFrom(state)).toEqual({ version: 1, at: 5, files: { '/a': { offset: 3, mark: 'm' } }, slots: { k: { 1: 2 } }, codexLimits: {} })
-    expect([usageFrom({ ...state, version: 2 }), usageFrom(null), usageFrom({ ...state, files: [] })]).toEqual([EMPTY_USAGE, EMPTY_USAGE, EMPTY_USAGE])
-    expect(scanInput(['/a', '/b'], { ...EMPTY_USAGE, files: { '/a': { offset: 5, mark: 'm\tn' } } })).toBe('/a\t5\tm\tn\n/b\t0\t\n')
+    // a state read back: as it was, each part this does not read left out; or empty (read again from the start)
+    const state = {
+      version: 2 as const, at: 5, files: { '/a': { offset: 3, mark: 'm' }, '/b': { offset: -1, mark: 'x' }, '/c': { offset: 1.5, mark: '' } }, seen: { msg_1: 7, msg_2: 'x' },
+      slots: { k: { 1: 2, 3: 'x' }, bad: 4 }, codexLimits: { '': { '7d': null, '5h': { at: 1, used: 2, resetsAt: 3 } }, work: { '7d': { at: 1, used: 'x' } }, gone: 5 },
+    }
+    expect(usageFrom(state)).toEqual({ version: 2, at: 5, files: { '/a': { offset: 3, mark: 'm' } }, seen: { msg_1: 7 }, slots: { k: { 1: 2 } }, codexLimits: { '': { '5h': { at: 1, used: 2, resetsAt: 3 } }, work: {} } })
+    // a state of the first version counted only part of each reply's output: read again from the start
+    expect([usageFrom({ ...state, version: 1 }), usageFrom(null), usageFrom({ ...state, files: [] }), usageFrom({ ...state, seen: undefined })]).toEqual([EMPTY_USAGE, EMPTY_USAGE, EMPTY_USAGE, EMPTY_USAGE])
+    // a read state's limits still work (one this does not read once threw)
+    expect(currentLimits(usageFrom(state).codexLimits[''], NOW)).toEqual({})
+    expect(scanInput(['/a', '/x/rollout-r.jsonl'], { ...EMPTY_USAGE, seen: { msg_1: 1, msg_2: 2 }, files: { '/a': { offset: 5, mark: 'm\tn' }, 'rollout:rollout-r.jsonl': { offset: 8, mark: '1,2,3\t/w' } } }))
+      .toBe('S\tmsg_1\nS\tmsg_2\n/a\t5\tm\tn\n/x/rollout-r.jsonl\t8\t1,2,3\t/w\n')
     const contexts = parseContexts('==> /a\nctx 437000\n==> /b\nctx 117363 258400\n==> /c\nctx x\n==> /d\n')
     expect([...contexts]).toEqual([['/a', { tokens: 437_000 }], ['/b', { tokens: 117_363, window: 258_400 }]])
     expect([contextSaid({ tokens: 437_000 }), contextSaid({ tokens: 117_363, window: 258_400 }), contextSaid({ tokens: 1_250_000, window: 0 })]).toEqual(['437k', '117k/258k', '1.3M'])
@@ -3862,7 +3892,7 @@ describe('usage', () => {
     expect(asText.text).toBe('Claude (default), 7d: 7d 19% ↻Sun 08:40; since Sun 4 Oct 08:40: Acme/web-app 75% (≈ 14% of the limit), ~/notes 25% (≈ 5% of the limit)\nCodex (default), 7d: 7d 42% ↻Tue 08:40; since Tue 6 Oct 08:40: Acme/api 100% (≈ 42% of the limit)')
     // what was read is kept for every session: each file's mark, files not an account's left out
     const kept = JSON.parse(files.get(`${HOME}/Library/Caches/live-sessions/usage.json`)!) as { files: Record<string, unknown> }
-    expect(kept.files).toEqual({ [transcript]: { offset: 9000, mark: 'msg_7' }, [rollout]: { offset: 700, mark: '1000,0,0\t/Users/u/dev/api' }, [workTranscript]: { offset: 50, mark: 'msg_1' } })
+    expect(kept.files).toEqual({ [transcript]: { offset: 9000, mark: 'msg_7' }, 'rollout:rollout-a.jsonl': { offset: 700, mark: '1000,0,0\t/Users/u/dev/api' }, [workTranscript]: { offset: 50, mark: 'msg_1' } })
     // pressed again: hidden, and kept so
     await ui.press({ key: 'usage' })
     expect([store.get('usageShown'), (await texts()).join('\n').includes('Usage by project')]).toEqual([false, false])
@@ -3893,7 +3923,7 @@ describe('usage', () => {
     usageWorld()
     const slot = String(NOW - (NOW % 600_000) - 600_000)
     files.set(`${HOME}/Library/Caches/live-sessions/usage.json`, JSON.stringify({
-      version: 1, at: NOW - 60_000, files: {}, slots: { 'codex\t\t/Users/u/dev/api': { [slot]: 5 } }, codexLimits: { '': { '7d': { at: NOW - 60_000, used: 33, resetsAt: NOW + 86_400_000 } } },
+      version: 2, at: NOW - 60_000, files: {}, seen: {}, slots: { 'codex\t\t/Users/u/dev/api': { [slot]: 5 } }, codexLimits: { '': { '7d': { at: NOW - 60_000, used: 33, resetsAt: NOW + 86_400_000 } } },
     }))
     await $.session.start(START)
     await $.command.run(SESSIONS)
@@ -3905,47 +3935,77 @@ describe('usage', () => {
     expect(world.scanned).toEqual([])
   })
 
-  test('reading: a batch of files at a time, from where each was left; not again within two minutes; a cut run not taken; limits shared', { timeoutMs: 60_000 }, async ($, on) => {
+  test('this account\'s Claude limits: within a window the highest of this session\'s and its other sessions\'; times by the Mac\'s clock then', { timeoutMs: 30_000 }, async ($, on) => {
+    const { files, clock } = engine(on, machine, { termProgram: 'Apple_Terminal', isOwnAccount: true })
+    on('session.usage', async () => ({ value: { startedAt: NOW, context: { window: 1_000_000 }, rateLimits } }))
+    usageWorld()
+    // another session of this account read 50% of the same 5-hour window; this one's last response said 4%
+    files.set(`${HOME}/Library/Caches/live-sessions/limits.json`, JSON.stringify({ '': { '5h': { used: 50, at: NOW - 60_000, resetsAt: NOW + 3 * 3_600_000 } } }))
+    // Codex's week ends after daylight saving does (1 Nov): said by the Mac's clock then, 8 hours behind UTC
+    world.scan[rollout] = scanOf(rollout, [`L\t2026-10-09T15:21:00.000Z\t42\t10080\t${Date.UTC(2026, 10, 2, 16, 0) / 1000}`], '700\t1000,0,0\t/Users/u/dev/api')
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    await clock.advance(1)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    expect((await ui.findAll({ type: 'Text' })).map(t => t.text)).toContain('Claude 5h 50% ↻11:40 · 7d 19% ↻Sun 08:40 │ Codex 7d 42% ↻Mon 2 Nov 08:00')
+    await ui.unmount()
+  })
+
+  test('reading: a batch of files at a time, from where each was left; not again within two minutes; a cut run\'s whole files taken; limits shared', { timeoutMs: 60_000 }, async ($, on) => {
     const { files, clock, runs } = engine(on, machine, { termProgram: 'Apple_Terminal', isOwnAccount: true })
     let limits = rateLimits
     on('session.usage', async () => ({ value: { startedAt: NOW, context: { window: 1_000_000 }, rateLimits: limits } }))
     const many = Array.from({ length: 450 }, (_, i) => `${HOME}/.claude/projects/-p/${i}.jsonl`)
     world.usageFiles = `${many.join('\n')}\n`
-    world.scan = { [many[3]!]: scanOf(many[3]!, [], '100\tmsg_3') }
+    world.scan = { [many[3]!]: scanOf(many[3]!, ['I\tmsg_3\t2026-10-09T15:30'], '100\tmsg_3,7') }
     const usagePath = `${HOME}/Library/Caches/live-sessions/usage.json`
     const limitsPath = `${HOME}/Library/Caches/live-sessions/limits.json`
+    const kept = () => JSON.parse(files.get(usagePath)!) as { files: Record<string, { offset: number; mark: string }>; seen: Record<string, number> }
     // another account's limits are there already, and kept
     files.set(limitsPath, JSON.stringify({ work: { '7d': { used: 61, at: NOW - 60_000 } } }))
     await $.session.start(START)
     await $.command.run(SESSIONS)
     await clock.advance(1)
-    // three runs: 200, 200, 50 files; every file's mark kept
-    expect(world.scanned.map(s => s.split('\n').filter(Boolean).length)).toEqual([200, 200, 50])
-    expect(Object.keys((JSON.parse(files.get(usagePath)!) as { files: object }).files)).toHaveLength(450)
+    // five runs: 100 files each, then 50; every file's mark kept, each reply counted known
+    expect(world.scanned.map(s => s.split('\n').filter(l => l !== '' && !l.startsWith('S\t')).length)).toEqual([100, 100, 100, 100, 50])
+    expect(Object.keys(kept().files)).toHaveLength(450)
+    expect(kept().seen).toEqual({ msg_3: Date.UTC(2026, 9, 9, 15, 30) })
     // not read again within two minutes, while the pane stays in view
     for (let t = 0; t < 100_000; t += 4_000) await clock.advance(4_000)
-    expect(world.scanned).toHaveLength(3)
-    // after two minutes: again, each from where it was left
+    expect(world.scanned).toHaveLength(5)
+    // after two minutes: again, each from where it was left, the replies counted named first
     for (let t = 0; t < 40_000; t += 4_000) await clock.advance(4_000)
-    expect(world.scanned).toHaveLength(6)
-    expect(world.scanned[3]).toContain(`${many[3]}\t100\tmsg_3\n`)
-    // a run whose output was cut: not taken, said; what was kept stays as it was
-    const before = files.get(usagePath)
+    expect(world.scanned).toHaveLength(10)
+    expect(world.scanned[5]).toMatch(new RegExp(`^S\tmsg_3\n${many[0]}\t0\t\n`))
+    expect(world.scanned[5]).toContain(`${many[3]}\t100\tmsg_3,7\n`)
+    // runs whose output was cut: the files each finished are taken, its last one read again next time
     world.scanCut = true
-    world.scan = { [many[0]!]: scanOf(many[0]!, ['C\t2026-10-09T15:30\tclaude-opus-5-5\t/x\t0\t0\t0\t0\t1'], '1\tmsg_0') }
+    world.scan = { [many[0]!]: scanOf(many[0]!, [], '11\tmsg_0,1'), [many[99]!]: scanOf(many[99]!, [], '12\tmsg_99,1') }
     for (let t = 0; t < 124_000; t += 4_000) await clock.advance(4_000)
-    expect(world.scanned).toHaveLength(7)
-    expect(files.get(usagePath)).toBe(before)
+    expect(world.scanned).toHaveLength(15)
+    expect([kept().files[many[0]!]?.offset, kept().files[many[99]!]?.offset]).toEqual([11, 0])
     const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
     await ui.press({ key: 'usage' })
-    expect((await ui.findAll({ type: 'Text' })).map(t => t.text)).toContain('! usage: too much output')
+    expect((await ui.findAll({ type: 'Text' })).map(t => t.text).filter(t => t.startsWith('!'))).toEqual([])
+    // a run that finishes no file at all: said
+    world.usageFiles = `${many[99]}\n`
+    for (let t = 0; t < 124_000; t += 4_000) await clock.advance(4_000)
+    expect((await ui.findAll({ type: 'Text' })).map(t => t.text)).toContain('! usage: too much output from one file')
     await ui.unmount()
     // this session's own Claude limits, shared for the other accounts' panes, theirs kept; changed: shared again
     const shared = () => JSON.parse(files.get(limitsPath)!) as Record<string, Record<string, { used: number }>>
     expect([shared()['']?.['5h']?.used, shared()['']?.['7d']?.used, shared().work?.['7d']?.used]).toEqual([4, 19, 61])
+    // a higher reading of the same window: shared, the other window kept; a lower one (an idle session's): not
     limits = [{ kind: 'five_hour', percentUsed: 9, resetsAt: rateLimits[0]!.resetsAt }]
     await clock.advance(4_000)
-    expect(shared()['']).toEqual({ '5h': { used: 9, at: expect.any(Number) as unknown as number, resetsAt: NOW + 3 * 3_600_000 } })
+    expect([shared()['']?.['5h']?.used, shared()['']?.['7d']?.used]).toEqual([9, 19])
+    limits = [{ kind: 'five_hour', percentUsed: 2, resetsAt: rateLimits[0]!.resetsAt }]
+    for (let t = 0; t < 64_000; t += 4_000) await clock.advance(4_000)
+    expect([shared()['']?.['5h']?.used, shared()['']?.['7d']?.used]).toEqual([9, 19])
+    // the next window's: shared, whatever it says
+    limits = [{ kind: 'five_hour', percentUsed: 1, resetsAt: new Date(NOW + 8 * 3_600_000).toISOString() }]
+    await clock.advance(4_000)
+    expect(shared()['']?.['5h']?.used).toBe(1)
     // perl is the only thing that reads the records; the listing names the config folders only
     const listing = runs.find(r => r[2] === USAGE_FILES_SCRIPT)!
     expect(listing.slice(4)).toEqual([`${HOME}/.claude`, `${HOME}/.claude-work`, `${HOME}/.claude-profiles`, `${HOME}/.codex`, `${HOME}/.codex-work`])
