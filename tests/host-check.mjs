@@ -1349,12 +1349,14 @@ except ChildProcessError: pass
     const waitingSnap = join(scratch, 'old-snapshot.json')
     writeFileSync(waitingSnap, JSON.stringify({ version: 6, snapshot: { claude: [], codex: [] } }))
     for (let k = 0; k < 4; k++) runs.push(spawnSync('python3', closedArgs, { encoding: 'utf8', timeout: 20_000, env: { ...env, LIVE_SESSIONS_SNAPSHOT: waitingSnap } }).stdout.trim())
-    // (read without waiting on it: a screen waiting for a snapshot writes one line, then nothing)
-    const noSignalWaitingArgs = [noSignalArgs[0], noSignalArgs[1]
+    // (read without waiting on it: a screen waiting for a snapshot writes one line, then nothing; a drawing screen read
+    // so is often still on its terminal's end when it closes, which it ends on too)
+    const noSignalQuietArgs = [noSignalArgs[0], noSignalArgs[1]
       .replace("import os, pty, sys, time, subprocess, fcntl, termios, struct", "import os, pty, sys, time, subprocess, fcntl, termios, struct, select")
       .replace("    try: os.read(master, 65536)", "    r, _, _ = select.select([master], [], [], 0.1)\n    if not r: continue\n    try: os.read(master, 65536)"), ...noSignalArgs.slice(2)]
-    for (let k = 0; k < 4; k++) runs.push(spawnSync('python3', noSignalWaitingArgs, { encoding: 'utf8', timeout: 30_000, env: { ...env, LIVE_SESSIONS_SNAPSHOT: waitingSnap } }).stdout.trim())
-    check('ops: its terminal closed under it, it ends, with a hang-up or without, drawing or waiting for a snapshot (twenty-four times over)', runs.length === 24 && runs.every(x => x === 'ended'), JSON.stringify(runs))
+    for (let k = 0; k < 4; k++) runs.push(spawnSync('python3', noSignalQuietArgs, { encoding: 'utf8', timeout: 30_000, env: { ...env, LIVE_SESSIONS_SNAPSHOT: waitingSnap } }).stdout.trim())
+    for (let k = 0; k < 6; k++) runs.push(spawnSync('python3', noSignalQuietArgs, { encoding: 'utf8', timeout: 30_000, env }).stdout.trim())
+    check('ops: its terminal closed under it, it ends, with a hang-up or without, drawing or waiting for a snapshot (thirty times over)', runs.length === 30 && runs.every(x => x === 'ended'), JSON.stringify(runs))
     // drawn live in a terminal (a private tmux pane): every row keeps its right border
     t('new-session', '-d', '-s', 'drawn', '-x', '100', '-y', '24', `env LIVE_SESSIONS_SNAPSHOT='${snapFile}' LIVE_SESSIONS_EVENTS='${events}' LIVE_SESSIONS_OSASCRIPT='${stub}' HOME='${scratch}' '${process.execPath}' --no-warnings '${opsFile}'`)
     await new Promise(res => setTimeout(res, 2_000))
@@ -1449,6 +1451,13 @@ except ChildProcessError: pass
     const waitProbes = () => (existsSync(probesWait) ? readFileSync(probesWait, 'utf8').trim().split('\n').filter(Boolean).length : 0)
     // a screen whose folder goes back to code from before a screen could start again in place (no `--loads`)
     const opsOld = copyOf('plugin-old')
+    // a screen beside whose code other files are written (Finder's .DS_Store, an editor's swap file): no change of code
+    const opsStill = copyOf('plugin-still')
+    const countedStill = join(scratch, 'counted-still')
+    mkdirSync(countedStill)
+    const probesStill = join(scratch, 'probes-still.log')
+    writeFileSync(join(countedStill, 'node'), `#!/bin/sh\ncase " $* " in *" --loads "*) echo probe >> '${probesStill}';; esac\nexec -a node '${process.execPath}' "$@"\n`)
+    execFileSync('/bin/chmod', ['+x', join(countedStill, 'node')])
     const nodeLink = join(bin, 'node-link')
     symlinkSync(process.execPath, nodeLink)
     const snap = join(scratch, 'snapshot.json')
@@ -1459,6 +1468,7 @@ except ChildProcessError: pass
     t('new-session', '-d', '-s', 'ops', '-x', '120', '-y', '30', `exec env LIVE_SESSIONS_SNAPSHOT='${snap}' LIVE_SESSIONS_EVENTS='${join(scratch, 'events.jsonl')}' HOME='${scratch}' node --no-warnings '${opsCopy}' --account ''`)
     t('new-session', '-d', '-s', 'kept', '-x', '120', '-y', '30', `exec env LIVE_SESSIONS_SNAPSHOT='${snap}' LIVE_SESSIONS_EVENTS='${join(scratch, 'events.jsonl')}' HOME='${scratch}' '${nodeLink}' --no-warnings '${opsKept}' --account ''`)
     t('new-session', '-d', '-s', 'waiting', '-x', '200', '-y', '30', `exec env PATH='${countedWait}':"$PATH" LIVE_SESSIONS_SNAPSHOT='${waitingSnap}' LIVE_SESSIONS_EVENTS='${join(scratch, 'events.jsonl')}' HOME='${scratch}' node --no-warnings '${opsWaiting}' --account ''`)
+    t('new-session', '-d', '-s', 'still', '-x', '120', '-y', '30', `exec env PATH='${countedStill}':"$PATH" LIVE_SESSIONS_SNAPSHOT='${snap}' LIVE_SESSIONS_EVENTS='${join(scratch, 'events.jsonl')}' HOME='${scratch}' node --no-warnings '${opsStill}' --account ''`)
     t('new-session', '-d', '-s', 'old', '-x', '200', '-y', '30', `exec env LIVE_SESSIONS_SNAPSHOT='${snap}' LIVE_SESSIONS_EVENTS='${join(scratch, 'events.jsonl')}' HOME='${scratch}' node --no-warnings '${opsOld}' --account ''`)
     t('new-session', '-d', '-s', 'broken', '-x', '160', '-y', '30', `exec env PATH='${counted}':"$PATH" LIVE_SESSIONS_SNAPSHOT='${snap}' LIVE_SESSIONS_EVENTS='${join(scratch, 'events.jsonl')}' HOME='${scratch}' node --no-warnings '${opsBroken}' --account ''`)
     await new Promise(res => setTimeout(res, 2_000))
@@ -1486,6 +1496,8 @@ except ChildProcessError: pass
     const brokenPid = pidOf('broken')
     writeFileSync(relayOfBroken, `${relayText}\n<<<<<<< HEAD\n`)
     writeFileSync(relayOfWaiting, `${relayText}\n<<<<<<< HEAD\n`)
+    writeFileSync(join(dirname(opsStill), '.DS_Store'), 'x')
+    writeFileSync(join(dirname(dirname(opsStill)), 'hooks', '.relay.ts.swp'), 'x')
     writeFileSync(opsOld, readFileSync(opsOld, 'utf8').replace("if (process.argv.includes('--loads')) {\n  process.stdout.write('loads\\n')", "if (false) {\n  process.stdout.write('loads\\n')"))
     await new Promise(res => setTimeout(res, 7_000))
     const waitingSaid = t('capture-pane', '-p', '-t', '=waiting:').stdout
@@ -1510,6 +1522,8 @@ except ChildProcessError: pass
       /the plugin's new code does not load \(SyntaxError.*still waiting/.test(waitingSaid.replace(/\n/g, ' ')) && waitProbes() === 1 &&
       waitedDrawn.includes('LIVE//SESSIONS :: OPS') && /╚.*the plugin's new code does not load/.test(waitedDrawn),
       `probes ${waitProbes()} ${JSON.stringify(waitingSaid.split('\n').filter(l => /does not load/.test(l)).map(l => l.slice(0, 90)))} ${JSON.stringify(waitedDrawn.split('\n').filter(l => /╚|SESSIONS ::/.test(l)).map(l => l.trim().slice(0, 100)))}`)
+    check('shown: files other than code written beside a screen\'s code are no change: it never checks or starts again',
+      t('has-session', '-t', '=still').status === 0 && !existsSync(probesStill), existsSync(probesStill) ? readFileSync(probesStill, 'utf8').trim() : '')
     check('shown: a screen whose folder goes back to code that cannot start it again in place says so, never waiting on it',
       oldDrawn.includes('LIVE//SESSIONS :: OPS') && /╚.*the plugin there cannot start this screen again in place/.test(oldDrawn),
       JSON.stringify(oldDrawn.split('\n').filter(l => /╚/.test(l)).map(l => l.trim().slice(0, 120))))

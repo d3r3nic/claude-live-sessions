@@ -64,12 +64,15 @@ function nodeToRestart() {
     }
   })
 }
-/** When its code (this folder's files and the plugin's hooks it loads) last changed; 0 when it cannot tell. */
+/**
+ * When its code (this folder's and the plugin's hooks' code files) last changed; 0 when it cannot tell. Other files there
+ * (an editor's swap file, Finder's .DS_Store) are no change.
+ */
 function codeAt() {
   try {
     return Math.max(0, ...['.', '../hooks'].flatMap(dir => {
       const path = fileURLToPath(new URL(`${dir}/`, import.meta.url))
-      return readdirSync(path, { withFileTypes: true }).filter(e => e.isFile()).map(e => statSync(path + e.name).mtimeMs)
+      return readdirSync(path, { withFileTypes: true }).filter(e => e.isFile() && /\.(m?js|tsx?|pl)$/.test(e.name)).map(e => statSync(path + e.name).mtimeMs)
     }))
   } catch {
     return 0
@@ -473,10 +476,11 @@ if (process.argv.includes('--frame')) {
     process.exit(0)
   }
   for (const signal of ['SIGHUP', 'SIGTERM', 'SIGINT']) process.on(signal, quit)
-  // its terminal gone (the window closed): nothing to give back or say, it just ends
+  // its terminal gone (the window closed, with a hang-up or without): nothing to give back or say, it just ends
   const isGone = error => ['EIO', 'EPIPE', 'ENXIO', 'EBADF'].includes(error?.code)
   process.stdout.on('error', () => process.exit(0))
   process.stdin.on('error', () => process.exit(0))
+  process.stdin.on('end', () => process.exit(0))
   for (const event of ['uncaughtException', 'unhandledRejection']) {
     process.on(event, error => {
       if (isGone(error)) process.exit(0)
