@@ -47,9 +47,10 @@ if (process.argv.includes('--loads')) {
 
 const HOME = process.env.HOME
 /**
- * The Node to start the screen again with: `node` as it was started, found where a new window would find it now (a Node
- * updated meanwhile is the new one), else the one running; none when there is none, or this Node cannot replace
- * itself. Checked first: a Node that replaces itself with a program not there ends then and there.
+ * The Node to start the screen again with: `node` on the PATH it was started with (a Node updated there meanwhile is the
+ * new one), else the one running; the path it was started with, if it was started by a path; none when there is none,
+ * or this Node cannot replace itself. Checked first: a Node that replaces itself with a program not there ends then and
+ * there.
  */
 function nodeToRestart() {
   if (typeof process.execve !== 'function' || !existsSync(process.argv[1])) return undefined
