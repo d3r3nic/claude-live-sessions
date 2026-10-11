@@ -277,6 +277,9 @@ if (process.argv.includes('--slow')) {
     // used by hand: the mouse on in this session, and each side's border naming its agent
     const t6 = (...args) => spawnSync('tmux', ['-L', socket, '-f', '/dev/null', ...args], { encoding: 'utf8' }).stdout.trim()
     check('workspace: the mouse on in its session; borders shown', t6('show-options', '-t', 'ws-check', '-v', 'mouse') === 'on' && t6('show-window-options', '-t', 'ws-check:', '-v', 'pane-border-status') === 'top')
+    // its bar at the top, its one window listing nothing (tmux's `0:peers*` said nothing), as tmux holds them
+    const barSaid = [t6('show-options', '-t', 'ws-check', '-v', 'status-position'), t6('show-window-options', '-t', 'ws-check:', 'window-status-format'), t6('show-window-options', '-t', 'ws-check:', 'window-status-current-format')]
+    check('workspace: its bar at the top; its one window not listed', barSaid[0] === 'top' && /^window-status-format (''|"")?$/.test(barSaid[1]) && /^window-status-current-format (''|"")?$/.test(barSaid[2]), JSON.stringify(barSaid))
     const sides = Object.fromEntries(Object.values(w.parsePanes(t6('list-panes', '-a', '-F', w.PANES_FORMAT))).filter(p => p.session === 'ws-check').map(p => [p.window, p.pane]))
     const border = pane => t6('display-message', '-p', '-t', pane, '#{E:pane-border-format}')
     check('workspace: each side\'s border names its agent; the side with the keys says so', border(sides.claude).startsWith('Claude') && border(sides.codex).startsWith('Codex') &&
@@ -339,7 +342,7 @@ def pump(s):
             except OSError: return
 pump(1.5)
 before = t('list-clients', '-t', '=ws-check', '-F', '#{client_tty}')
-os.write(fd, b'\\x1b[<0;90;30M\\x1b[<0;90;30m'); pump(1.5)
+os.write(fd, b'\\x1b[<0;90;1M\\x1b[<0;90;1m'); pump(1.5)
 after = t('list-clients', '-t', '=ws-check', '-F', '#{client_tty}')
 print(before or '-', after or '-')
 os.close(fd)
@@ -377,7 +380,7 @@ pump(1.5)
 tty = t('list-clients', '-F', '#{client_tty}')
 t('switch-client', '-c', tty, '-t', '=ws-check'); pump(1)
 on = t('list-clients', '-F', '#{client_session}')
-os.write(fd, b'\\x1b[<0;90;30M\\x1b[<0;90;30m'); pump(1.5)
+os.write(fd, b'\\x1b[<0;90;1M\\x1b[<0;90;1m'); pump(1.5)
 print(on, t('list-clients', '-F', '#{client_session}') or '-')
 t('detach-client', '-t', tty); pump(0.5)
 os.close(fd)
