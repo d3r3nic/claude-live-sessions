@@ -306,9 +306,12 @@ export function workspacePlacement(seen: { screens: readonly Screen[]; fontSize:
   return agentPlacement((kept === undefined ? undefined : screenShowing(kept, seen.screens)) ?? seen.screens[0]!, seen.fontSize)
 }
 
-/** The font a window this plugin opens gets: that of the window it is opened from; 0 (as its profile has it) when not known. */
+/**
+ * The font a window this plugin opens gets: a little smaller than that of the window it is opened from (80% of it, 6
+ * points at least); 0 (as its profile has it) when not known.
+ */
 export function openedFontSize(fontSize: number): number {
-  return fontSize >= 6 && fontSize <= 72 ? Math.round(fontSize) : 0
+  return fontSize >= 6 && fontSize <= 72 ? Math.max(6, Math.round(fontSize * 0.8)) : 0
 }
 
 /** How much of the screen's free part a window of agents takes, across and down. */
@@ -316,8 +319,8 @@ export const AGENT_WINDOW_SHARE = 0.6
 
 /**
  * A window of agents this plugin opens (a workspace's, a session opened in the background's): 60% of the screen's free
- * part (what the menu bar and Dock leave) across and down, centred, in the font size of the window it is opened from
- * (openedFontSize); never a profile's small default window, nor the size and font it had before.
+ * part (what the menu bar and Dock leave) across and down, centred, a little smaller than the font of the window it is
+ * opened from (openedFontSize); never a profile's small default window, nor the size and font it had before.
  */
 export function agentPlacement(screen: Screen, fontSize: number): Placement {
   const width = Math.round(screen.width * AGENT_WINDOW_SHARE)

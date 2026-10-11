@@ -2,6 +2,15 @@
 
 What each version changed, newest first. Each links its pull request, which holds the details, the checks and the reviews. After updating, run `/reload-plugins` in your sessions.
 
+## 0.23.0 — 2026-10-11
+- **Ops screen:**
+  - a workspace where any agent works says `● WORKING` in front of its name, in amber;
+  - an idle workspace is drawn lighter, with `done 5m ago`;
+  - each agent line shows only its state and its `context`, coloured by how full it is (amber from two thirds of where it should compact, red past it); no window size, no conversation name;
+  - the header says `updated 4s ago` as plain text;
+  - only a workspace's `OPEN` button, down its left side, opens it; its agent lines open nothing.
+- **Agent windows** use a font a little smaller than your tab's (80% of it).
+
 ## 0.22.2 — 2026-10-11 ([#29](https://github.com/d3r3nic/claude-live-sessions/pull/29))
 - Agent windows (a workspace's, from /sessions or the Ops screen, and a background session's) open at 60% of the screen across and down, centred, in your tab's own font (twice the half size of 0.22.1).
 

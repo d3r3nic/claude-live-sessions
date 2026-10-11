@@ -1163,15 +1163,19 @@ except ChildProcessError: pass
     // while the owner has not typed since a cue for them
     {
       const readFile = join(scratch, 'reads.json')
-      const codexIn = { key: 'cx', title: 'Continue the reading work', cwd: scratch, profile: 'codex', surface: 'terminal', tty: 'ttys991', updatedAt: now, lastActive: now, agents: 0, context: { tokens: 117363, window: 258400 } }
+      const codexIn = { key: 'cx', title: 'Continue the reading work', cwd: scratch, profile: 'codex', surface: 'terminal', tty: 'ttys991', updatedAt: now, lastActive: now, agents: 0, context: { tokens: 200000, window: 258400 } }
+      // a workspace whose one agent finished 5 minutes ago: idle, running
+      const codexDone = { key: 'cd', title: 'Finished work', cwd: scratch, profile: 'codex', surface: 'terminal', tty: 'ttys992', updatedAt: now - 300_000, lastActive: now - 300_000, agents: 0, context: { tokens: 50000, window: 258400 } }
       const relayed = (status, typedAgo) => ({ mode: 'auto', since: now - 9e6, streak: 2, status, at: now - 3 * 3_600_000, ...(typedAgo === undefined ? {} : { typedAt: now - typedAgo }) })
-      writeFileSync(readFile, snapshot({ codex: [codexIn], workspaces: [
+      writeFileSync(readFile, snapshot({ codex: [codexIn, codexDone], tmux: { panes: { ttys990: { session: 'ws-opsx', window: 'claude', pane: '%90' }, ttys991: { session: 'ws-opsx', window: 'codex', pane: '%91' }, ttys992: { session: 'ws-donex', window: 'codex', pane: '%92' } }, clients: {} }, workspaces: [
+        { id: 'donex', name: 'Done One', env: '', dir: scratch, createdAt: 0, only: 'codex' },
         { id: 'opsx', name: 'Answered One', env: '', dir: scratch, createdAt: 1, relay: relayed('needs you', 600_000) },
         { id: 'waits', name: 'Waiting One', env: 'mmm', dir: scratch, createdAt: 2, relay: relayed('needs you', 5 * 3_600_000) },
         { id: 'flying', name: 'Flying One', env: '', dir: scratch, createdAt: 3, relay: { ...relayed('passed to Codex'), at: now - 5_000 } },
         { id: 'failed', name: 'Failed One', env: '', dir: scratch, createdAt: 4, relay: { ...relayed('could not pass to Codex (its pane is scrolled back)'), at: now - 5_000 } },
       ] }))
-      const reads = (...extra) => spawnSync(process.execPath, ['--no-warnings', opsFile, '--frame', '--plain', ...extra], { encoding: 'utf8', env: { ...env, LIVE_SESSIONS_SNAPSHOT: readFile, COLS: '120', ROWS: '40', NOW: String(now) } }).stdout.split('\n')
+      const reads = (...extra) => spawnSync(process.execPath, ['--no-warnings', opsFile, '--frame', '--plain', ...extra], { encoding: 'utf8', env: { ...env, LIVE_SESSIONS_SNAPSHOT: readFile, COLS: '120', ROWS: '44', NOW: String(now) } }).stdout.split('\n')
+      const colored = spawnSync(process.execPath, ['--no-warnings', opsFile, '--frame'], { encoding: 'utf8', env: { ...env, LIVE_SESSIONS_SNAPSHOT: readFile, COLS: '120', ROWS: '44', NOW: String(now) } }).stdout.split('\n')
       const every = reads()
       const own = reads('--account', '')
       const row = (frame, text) => frame.find(l => l.includes(text)) ?? ''
@@ -1181,9 +1185,22 @@ except ChildProcessError: pass
         /Answered One ░▒▓\s+default\s/.test(row(every, 'Answered One')) && /Waiting One ░▒▓\s+mmm · stopped\s/.test(row(every, 'Waiting One')) &&
         /Answered One ░▒▓\s+║$/.test(row(own, 'Answered One').trimEnd()) && !every.some(l => /window open|hidden|env /.test(l)),
         `${JSON.stringify(row(every, 'Answered One').trim())} ${JSON.stringify(row(every, 'Waiting One').trim())} ${JSON.stringify(row(own, 'Answered One').trim())}`)
-      check('ops: an agent\'s row says it is working (never exec), its context and its title',
-        /\[CODEX\]\s+● working \S{3}\s+ctx 117k\/258k\s+Continue the reading work/.test(after(every, 'Answered One', 2)) && /\[CLAUDE\]\s+offline/.test(after(every, 'Answered One', 1)) && !every.some(l => /EXEC|exec/.test(l)),
+      check('ops: an agent\'s row says it is working (never exec) and its context, never its window or its conversation\'s name',
+        /\[CODEX\]\s+● working \S{3}\s+context 200k\s+║$/.test(after(every, 'Answered One', 2).trimEnd()) && /\[CLAUDE\]\s+offline/.test(after(every, 'Answered One', 1)) &&
+        !every.some(l => /EXEC|exec|\/258k|Continue the reading work|Finished work/.test(l)),
         JSON.stringify(after(every, 'Answered One', 2).trim()))
+      // its context coloured by how full it is: 200k of a 258k window amber (two thirds or more), 50k plain
+      const amber = '\x1b[38;2;255;176;0m'
+      check('ops: an agent\'s context is coloured by how full it is',
+        after(colored, 'Answered One', 2).includes(`${amber}200k`) && !after(colored, 'Done One', 1).includes(`${amber}50k`) && after(colored, 'Done One', 1).includes('50k'),
+        JSON.stringify(after(colored, 'Answered One', 2).slice(-80)))
+      // working: said in front of its name, its name in amber; idle and running: lighter, with when its agents finished
+      check('ops: a working workspace says so in front of its name, in amber; an idle one says when it was done',
+        /\|O\| ● WORKING  ▓▒░ Answered One ░▒▓/.test(row(every, 'Answered One')) && row(colored, 'Answered One').includes(`${amber}\x1b[1m▓▒░ Answered One`) &&
+        /\|O\| ▓▒░ Done One ░▒▓  done 5m ago/.test(row(own, 'Done One')) && !row(own, 'Done One').includes('WORKING'),
+        `${JSON.stringify(row(every, 'Answered One').trim())} ${JSON.stringify(row(own, 'Done One').trim())}`)
+      // the header's freshness is plain text
+      check('ops: the header says how fresh the snapshot is as plain text', /updated \d+s ago/.test(every[1]) && !/SIGNAL/.test(every[1]), JSON.stringify(every[1].trim()))
       check('ops: a hand-off passed a moment ago runs toward its agent; one it could not pass does not',
         /relay\s+auto  \S*▸\S* passed to Codex 5s ago/.test(after(every, 'Flying One', 3)) && !/[▸◂]/.test(after(every, 'Failed One', 3)) && after(every, 'Failed One', 3).includes('could not pass to Codex'),
         `${JSON.stringify(after(every, 'Flying One', 3).trim())} ${JSON.stringify(after(every, 'Failed One', 3).trim())}`)
@@ -1192,12 +1209,13 @@ except ChildProcessError: pass
         after(every, 'Waiting One', 4).includes('OPERATOR INPUT REQUIRED') && !/· you typed \S+ ago/.test(after(every, 'Waiting One', 3)),
         `${JSON.stringify(after(every, 'Answered One', 3).trim())} ${JSON.stringify(after(every, 'Waiting One', 4).trim())}`)
     }
-    // a workspace of one agent: that agent's row alone, no relay line; a click on the row opens it
+    // a workspace of one agent: that agent's row alone, no relay line; its OPEN button down its left
     const solo = at('Solo X')
-    check('ops: a workspace of one agent shows that agent alone, with no relay, and its row opens that agent',
+    check('ops: a workspace of one agent shows that agent alone, with no relay; only its OPEN button opens it',
       solo > 0 && rows[solo + 1].includes('[CODEX]') && !rows[solo + 1].includes('[CLAUDE]') && !rows[solo + 2].includes('relay') &&
-      JSON.stringify(targets[solo + 1]) === JSON.stringify({ kind: 'workspace', id: 'solox', agent: 'codex' }),
-      `${JSON.stringify(rows[solo + 1])} ${JSON.stringify(targets[solo + 1])}`)
+      [0, 1, 2, 3].map(k => rows[solo + k].slice(2, 5)).join('') === '|O||P||E||N|' &&
+      [0, 1, 2, 3].every(k => JSON.stringify(targets[solo + k]) === JSON.stringify({ kind: 'workspace', id: 'solox', cols: [3, 5] })),
+      `${JSON.stringify(rows.slice(solo, solo + 4).map(l => l.slice(0, 30)))} ${JSON.stringify(targets[solo + 1])}`)
     // the screen, live in a terminal: clicks, keys, signals
     const live = (script, extraEnv = {}, args = []) => spawnSync('python3', ['-c', [
       'import os, pty, sys, time, select, struct, fcntl, termios, signal',
@@ -1248,18 +1266,20 @@ except ChildProcessError: pass
     check('ops, live: another account\'s session events, seen while every account was shown, are gone when its own view comes back',
       during.includes('THEIRS TITLE') && back.includes('ACCOUNT default') && !back.includes('THEIRS TITLE'),
       `${during.includes('THEIRS TITLE')} ${back.includes('ACCOUNT default')} ${back.includes('THEIRS TITLE')}`)
-    // Claude's row, then Codex's: each pane gets the keys; a stopped workspace: said, nothing done
+    // a click on an agent's row (not its button) does nothing; one on the OPEN button opens the workspace's window, as
+    // /sessions places one (60% of the screen, a little smaller than its font), its panes as they were; a stopped
+    // workspace's button: said, nothing done
     t('select-pane', '-t', right)
     const outA = live(`os.write(fd, b"\\x1b[<0;60;${rowOf('[CLAUDE]')}M\\x1b[<0;60;${rowOf('[CLAUDE]')}m")`)
-    const activeA = t('display-message', '-p', '-t', '=ws-opsx:peers', '#{pane_id}').stdout.trim()
-    const outB = live(`os.write(fd, b"\\x1b[<0;6;${rowOf('[CODEX]')}M\\x1b[<0;6;${rowOf('[CODEX]')}m")`)
+    const openedByRow = existsSync(asked) ? readFileSync(asked, 'utf8').trim().split('\n').filter(Boolean).length : 0
+    const outB = live(`os.write(fd, b"\\x1b[<0;4;${rowOf('[CODEX]')}M\\x1b[<0;4;${rowOf('[CODEX]')}m")`)
     const activeB = t('display-message', '-p', '-t', '=ws-opsx:peers', '#{pane_id}').stdout.trim()
-    const outC = live(`os.write(fd, b"\\x1b[<0;10;${rowOf('Stopped one')}M")`)
+    const outC = live(`os.write(fd, b"\\x1b[<0;4;${rowOf('Stopped one')}M")`)
     const opens = existsSync(asked) ? readFileSync(asked, 'utf8').trim().split('\n') : []
-    check('ops: a click on an agent\'s row gives that agent\'s pane the keys and opens a window attached to it, 60% of the screen in its font; a stopped workspace is left to /sessions',
-      activeA === left && activeB === right && outC.includes('Stopped one is not running: open it from /sessions') &&
-      opens.length === 2 && opens.every(l => l === `OPEN tmux -L '${socket}' -f /dev/null attach -t '=ws-opsx' {"x":512,"y":312,"width":1536,"height":846,"fontSize":12}`),
-      `${activeA}/${left} ${activeB}/${right} ${JSON.stringify(opens)}`)
+    check('ops: only a workspace\'s OPEN button opens its window (60% of the screen, a little smaller than its font); its agent rows open nothing; a stopped workspace is left to /sessions',
+      openedByRow === 0 && activeB === right && outC.includes('Stopped one is not running: open it from /sessions') &&
+      opens.length === 1 && opens[0] === `OPEN tmux -L '${socket}' -f /dev/null attach -t '=ws-opsx' {"x":512,"y":312,"width":1536,"height":846,"fontSize":10}`,
+      `${openedByRow} ${activeB}/${right} ${JSON.stringify(opens)}`)
     void outA; void outB
     // however it ends, the terminal is given back: q (typed twice too), Ctrl-C, a signal
     const restored = out => out.includes('\x1b[?1049l') && out.includes('\x1b[?1000l') && out.includes('\x1b[?25h') && out.includes('\x1b[?7h')
