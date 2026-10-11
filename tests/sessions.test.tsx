@@ -1637,7 +1637,8 @@ describe('workspaces, from the pane', () => {
     const width = async (key: string) => (await props(key))?.width
     expect([await width('ws-head practice-rbac'), await width('ws-dir practice-rbac'), await width('ws-relay practice-rbac'), await width('ws-check practice-rbac'), await width('claude-101')])
       .toEqual([106, 104, 104, 104, 106])
-    expect(((await props('open claude-101'))?.label as string).length).toBe(59)
+    // (10 columns of it are each session's context)
+    expect(((await props('open claude-101'))?.label as string).length).toBe(49)
     await reveal(ui, 'item:claude-101')
     expect(await width('bar item:claude-101')).toBe(100)
     await reveal(ui, 'ws:practice-rbac')
