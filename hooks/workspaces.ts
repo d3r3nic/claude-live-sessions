@@ -216,7 +216,7 @@ export const CLOSE_SCRIPT = `function run(argv) {
     const tabs = w.tabs()
     if (tabs.length !== 1) return 'shared'
     if (!tabs[0].busy()) {
-      // where it was and its font, so the workspace opens there again
+      // where it was, so the workspace opens on that screen again
       const b = w.bounds()
       const place = { x: b.x, y: b.y, width: b.width, height: b.height, fontSize: tabs[0].fontSize() }
       w.close()
@@ -276,13 +276,34 @@ export function placementFrom(raw: unknown): Placement | undefined {
 /** A screen's free part (what the menu bar and Dock leave), from the top left of the menu bar's screen, as Terminal places windows. */
 export type Screen = { x: number; y: number; width: number; height: number }
 
-/** The screen a kept placement still shows on: of the screens there are now, the one with most of it, at least a quarter. */
+/**
+ * The screen a kept window is on: of the screens there are now, the one with most of it (on a tie, the one listed
+ * first: the screen in use); none when it shows on none.
+ */
 export function screenShowing(place: Placement, screens: readonly Screen[]): Screen | undefined {
-  const area = place.width * place.height
   const shown = (s: Screen) =>
     Math.max(0, Math.min(place.x + place.width, s.x + s.width) - Math.max(place.x, s.x)) * Math.max(0, Math.min(place.y + place.height, s.y + s.height) - Math.max(place.y, s.y))
   const best = [...screens].sort((a, b) => shown(b) - shown(a))[0]
-  return best !== undefined && shown(best) > 0 && shown(best) >= area / 4 ? best : undefined
+  return best !== undefined && shown(best) > 0 ? best : undefined
+}
+
+/** SCREEN_SCRIPT's answer: the screens there are (each of some size), the screen in use first, and the tab's font size. */
+export function screensFrom(stdout: string): { screens: Screen[]; fontSize: number } | undefined {
+  try {
+    const seen = JSON.parse(stdout) as { screens?: Screen[]; fontSize?: number }
+    const all = (seen.screens ?? []).filter(s => [s.x, s.y, s.width, s.height].every(n => typeof n === 'number' && Number.isFinite(n)) && s.width > 0 && s.height > 0)
+    return all.length === 0 ? undefined : { screens: all, fontSize: typeof seen.fontSize === 'number' ? seen.fontSize : 0 }
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * A workspace's window, opened from /sessions or the ops screen: maximized on the screen it was on when last hidden
+ * (`kept`), while that is still there, else on the screen in use; in half the font of the window it is opened from.
+ */
+export function workspacePlacement(seen: { screens: readonly Screen[]; fontSize: number }, kept: Placement | undefined): Placement {
+  return agentPlacement((kept === undefined ? undefined : screenShowing(kept, seen.screens)) ?? seen.screens[0]!, seen.fontSize)
 }
 
 /**
@@ -301,7 +322,7 @@ export function openedFontSize(fontSize: number): number {
  * (openedFontSize); never a profile's small default window, nor the size and font it had before.
  */
 export function agentPlacement(screen: Screen, fontSize: number): Placement {
-  return { x: screen.x, y: screen.y, width: screen.width, height: screen.height, fontSize: openedFontSize(fontSize) }
+  return { x: Math.round(screen.x), y: Math.round(screen.y), width: Math.round(screen.width), height: Math.round(screen.height), fontSize: openedFontSize(fontSize) }
 }
 
 /**

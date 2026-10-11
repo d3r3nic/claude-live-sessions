@@ -2,7 +2,6 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { ClaudeSession, CodexSession, Place, Relay, SessionContext, Snapshot, Thread, UsageView, Workspace } from '../types'
-import type { Screen } from './workspaces'
 import { accountOfFile, applyScan, claudeLimits, clockOf, currentLimits, EMPTY_USAGE, limitSaid, markKey, mergeLimits, offsetOf, OFFSETS_SCRIPT, parseContexts, rankUsage, scanInput, sharedLimitsFrom, usageFrom, USAGE_FILES_SCRIPT, USAGE_KEEP_MS, WINDOW_MS, wholeFiles } from './usage'
 import type { Limit, UsageState } from './usage'
 import { AGENT_COMMANDS, afterOwner, afterStep, claudeKeep, COMPACT_FROM, cueOf, cutBytes, eventOf, EVENT_SCRIPT, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, tokensSaid, TURN_SCRIPT } from './relay'
@@ -42,7 +41,8 @@ import {
   parseWorktrees,
   WORKTREES_SCRIPT,
   agentPlacement,
-  screenShowing,
+  screensFrom,
+  workspacePlacement,
   hideBinding,
   hidePath,
   placementFrom,
@@ -734,7 +734,7 @@ async function openWorkspace($: EngineInterface, ws: Workspace, at?: { window: s
   // half the font of the window it is opened from: never the size and font it had
   const kept = await $.fs.read(placementPath(home, name)).then(text => placementFrom(JSON.parse(text))).catch(() => undefined)
   const seen = await screens($, osascript)
-  const place = seen === undefined ? undefined : agentPlacement((kept === undefined ? undefined : screenShowing(kept, seen.screens)) ?? seen.screens[0]!, seen.fontSize)
+  const place = seen === undefined ? undefined : workspacePlacement(seen, kept)
   const opened = await osascript(OPEN_SCRIPT, command, ...(place === undefined ? [] : [JSON.stringify(place)]))
   const isOpened = opened.exitCode === 0 && opened.stdout.trim() === 'opened'
   // the window makes the session (made new, or again after it ended): once it is there, its bar gets Hide
@@ -781,13 +781,7 @@ async function terminalProcesses($: EngineInterface): Promise<Proc[]> {
 async function screens($: EngineInterface, osascript: (script: string, ...args: string[]) => Promise<{ stdout: string }>) {
   const selfId = await $.session.id()
   const tty = (await read($, snapshot)).claude.find(s => s.sessionId === selfId)?.tty ?? ''
-  try {
-    const seen = JSON.parse((await osascript(SCREEN_SCRIPT, /^ttys\d+$/.test(tty) ? tty : 'none')).stdout) as { screens?: Screen[]; fontSize?: number }
-    const all = (seen.screens ?? []).filter(s => [s.x, s.y, s.width, s.height].every(n => typeof n === 'number' && Number.isFinite(n)) && s.width > 0 && s.height > 0)
-    return all.length === 0 ? undefined : { screens: all, fontSize: typeof seen.fontSize === 'number' ? seen.fontSize : 0 }
-  } catch {
-    return undefined
-  }
+  return screensFrom((await osascript(SCREEN_SCRIPT, /^ttys\d+$/.test(tty) ? tty : 'none').catch(() => ({ stdout: '' }))).stdout)
 }
 
 /** Brings a session's Terminal tab to the front: a background session's, the tab attached to it, else a new window attached to it. */

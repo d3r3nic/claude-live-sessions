@@ -352,8 +352,8 @@ const tmux = (...args) => run(['tmux', ...(SOCKET === undefined ? [] : ['-L', SO
 /**
  * Opens what a row is about: a session's own Terminal tab; or a running workspace's window (its tmux session, marked
  * as this workspace's), at its agent's pane when the row is one agent's: the terminal attached to it brought up, else
- * a new window attached to it, where its window last was. A workspace not running is opened from /sessions, which
- * checks it first. Says what it did.
+ * a new window attached to it, maximized as /sessions opens one (on the screen it was on when last hidden, in half
+ * this screen's font). A workspace not running is opened from /sessions, which checks it first. Says what it did.
  */
 function open(target, snap) {
   if (target.kind === 'tty') {
@@ -375,9 +375,19 @@ function open(target, snap) {
   for (const tty of attached) {
     if (run([OSASCRIPT, '-l', 'JavaScript', '-e', c.FOCUS_SCRIPT, tty.slice(5)]).stdout.trim() === 'shown') return `brought up ${clean(ws.name)}`
   }
-  // a new window at Terminal's own place and size (where it last was may be on a screen no longer there)
+  // a new window, placed as /sessions places one; at Terminal's own place and size when the screens cannot be read
   const attach = `tmux ${SOCKET === undefined ? '' : `-L ${w.shellQuote(SOCKET)} -f /dev/null `}attach -t ${w.shellQuote(`=${name}`)}`
-  const opened = run([OSASCRIPT, '-l', 'JavaScript', '-e', c.OPEN_SCRIPT, attach])
+  const ownTty = run(['/bin/ps', '-o', 'tty=', '-p', String(process.pid)]).stdout.trim()
+  const seen = w.screensFrom(run([OSASCRIPT, '-l', 'JavaScript', '-e', w.SCREEN_SCRIPT, /^ttys\d+$/.test(ownTty) ? ownTty : 'none']).stdout)
+  const kept = (() => {
+    try {
+      return w.placementFrom(JSON.parse(readFileSync(w.placementPath(HOME, name), 'utf8')))
+    } catch {
+      return undefined
+    }
+  })()
+  const place = seen === undefined ? undefined : w.workspacePlacement(seen, kept)
+  const opened = run([OSASCRIPT, '-l', 'JavaScript', '-e', c.OPEN_SCRIPT, attach, ...(place === undefined ? [] : [JSON.stringify(place)])])
   return opened.stdout.trim() === 'opened' ? `opened ${clean(ws.name)}` : `${clean(ws.name)} did not open`
 }
 

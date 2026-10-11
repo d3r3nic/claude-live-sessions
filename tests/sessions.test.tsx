@@ -76,6 +76,7 @@ import {
   agentPlacement,
   openedFontSize,
   screenShowing,
+  screensFrom,
   hideBinding,
   hidePath,
   placementFrom,
@@ -944,7 +945,7 @@ describe('pane', () => {
     await ui.press({ key: 'open claude-102' })
     await ui.press({ key: 'open codex-1cdaec1d-0ec7-4f0a-811f-5c29c9bcb3b7' })
     expect(osa()).toEqual([['focus', 'ttys004'], ['open', 'claude attach a1b2c3d4'], ['focus', 'ttys045']])
-    // the background one in a window of most of the screen, in half this tab's font (12: 6), never the profile's small one
+    // the background one in a window maximized on the screen in use, in half this tab's font (12: 6), never the profile's small one
     expect(JSON.parse(runs.find(r => r[5] === 'claude attach a1b2c3d4')![6]!)).toEqual({ x: 0, y: 30, width: 2560, height: 1410, fontSize: 6 })
     // this session, and a thread with no terminal, are not pressed to open
     expect(await ui.find({ key: 'open claude-104' })).toBeUndefined()
@@ -3382,13 +3383,22 @@ describe('workspace windows open where they were', () => {
     // half, 6 points at least; a size this does not read: the profile's
     expect([openedFontSize(13), openedFontSize(9), openedFontSize(72), openedFontSize(0), openedFontSize(200)]).toEqual([7, 6, 36, 0, 0])
     expect(agentPlacement({ x: 0, y: 30, width: 2560, height: 1410 }, 0).fontSize).toBe(0)
-    // the screen it still shows on: the one with most of it, at least a quarter
+    // the screen it is on: the one with most of it (any part); on a tie, the one listed first (the screen in use)
     const main = { x: 0, y: 30, width: 2560, height: 1410 }
     const side = { x: 2560, y: 0, width: 1920, height: 1080 }
     const at = (x: number, y: number) => screenShowing({ x, y, width: 1000, height: 800, fontSize: 0 }, [main, side])
-    // most of it on the main screen (660 of 1000 wide), most on the side one (740), off both, a fifth on one: none
-    expect([at(100, 100), at(1900, 100), at(2300, 100), at(5200, -2000), at(4300, 100)]).toEqual([main, main, side, undefined, undefined])
-    expect(screenShowing({ x: 2500, y: 100, width: 1000, height: 800, fontSize: 0 }, [main])).toBeUndefined()
+    // most of it on the main screen (660 of 1000 wide), most on the side one (740), a fifth on the side one, half on
+    // each, off both
+    expect([at(100, 100), at(1900, 100), at(2300, 100), at(4300, 100), at(2060, 100), at(5200, -2000)]).toEqual([main, main, side, side, main, undefined])
+    expect(screenShowing({ x: 2060, y: 100, width: 1000, height: 800, fontSize: 0 }, [side, main])).toEqual(side)
+    // larger than the screen it is on: still that screen
+    expect(screenShowing({ x: 2600, y: -500, width: 6000, height: 3000, fontSize: 0 }, [main, side])).toEqual(side)
+    // a screen whose free part is not in whole points: the window's place is
+    expect(agentPlacement({ x: 0, y: 37.5, width: 1512.4, height: 944.6 }, 12)).toEqual({ x: 0, y: 38, width: 1512, height: 945, fontSize: 6 })
+    // SCREEN_SCRIPT's answer: screens of no size or not numbers dropped; none, or not its answer at all: nothing
+    expect(screensFrom(JSON.stringify({ screens: [main, { x: 0, y: 0, width: 0, height: 900 }, { x: 'a', y: 0, width: 10, height: 10 }], fontSize: 13 }))).toEqual({ screens: [main], fontSize: 13 })
+    expect([screensFrom(JSON.stringify({ screens: [], fontSize: 13 })), screensFrom('nope'), screensFrom('')]).toEqual([undefined, undefined, undefined])
+    expect(screensFrom(JSON.stringify({ screens: [main] }))).toEqual({ screens: [main], fontSize: 0 })
   })
 
   test('a workspace\'s window opens maximized on the screen it was on when hidden (else the one in use), in half this tab\'s font, never its old size and font', async ($, on) => {

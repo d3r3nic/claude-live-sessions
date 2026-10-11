@@ -1110,7 +1110,8 @@ except ChildProcessError: pass
     // osascript stood in for: what it is asked is recorded, and no Terminal window is opened or brought up
     const asked = join(scratch, 'osascript.log')
     const stub = join(scratch, 'osascript')
-    writeFileSync(stub, `#!/bin/sh\nscript=$4\nshift 4\ncase $script in *doScript*) printf 'OPEN %s\\n' "$1" >> '${asked}'; echo opened;; *) printf 'FOCUS %s\\n' "$1" >> '${asked}';; esac\n`)
+    // (its screens: one, the menu bar's 30 points left out, this tab in 12 points)
+    writeFileSync(stub, `#!/bin/sh\nscript=$4\nshift 4\ncase $script in *NSScreen*) echo '{"screens":[{"x":0,"y":30,"width":2560,"height":1410}],"fontSize":12}';; *doScript*) printf 'OPEN %s %s\\n' "$1" "$2" >> '${asked}'; echo opened;; *) printf 'FOCUS %s\\n' "$1" >> '${asked}';; esac\n`)
     execFileSync('/bin/chmod', ['+x', stub])
     const env = { ...process.env, LIVE_SESSIONS_SNAPSHOT: snapFile, LIVE_SESSIONS_EVENTS: events, LIVE_SESSIONS_TMUX_SOCKET: socket, LIVE_SESSIONS_OSASCRIPT: stub, HOME: scratch }
     const draw = (cols, rows, extra = []) => spawnSync(process.execPath, ['--no-warnings', opsFile, '--frame', ...extra], { encoding: 'utf8', env: { ...env, COLS: String(cols), ROWS: String(rows) } }).stdout
@@ -1255,9 +1256,9 @@ except ChildProcessError: pass
     const activeB = t('display-message', '-p', '-t', '=ws-opsx:peers', '#{pane_id}').stdout.trim()
     const outC = live(`os.write(fd, b"\\x1b[<0;10;${rowOf('Stopped one')}M")`)
     const opens = existsSync(asked) ? readFileSync(asked, 'utf8').trim().split('\n') : []
-    check('ops: a click on an agent\'s row gives that agent\'s pane the keys and opens a window attached to it; a stopped workspace is left to /sessions',
+    check('ops: a click on an agent\'s row gives that agent\'s pane the keys and opens a window attached to it, maximized in half its font; a stopped workspace is left to /sessions',
       activeA === left && activeB === right && outC.includes('Stopped one is not running: open it from /sessions') &&
-      opens.length === 2 && opens.every(l => l === `OPEN tmux -L '${socket}' -f /dev/null attach -t '=ws-opsx'`),
+      opens.length === 2 && opens.every(l => l === `OPEN tmux -L '${socket}' -f /dev/null attach -t '=ws-opsx' {"x":0,"y":30,"width":2560,"height":1410,"fontSize":6}`),
       `${activeA}/${left} ${activeB}/${right} ${JSON.stringify(opens)}`)
     void outA; void outB
     // however it ends, the terminal is given back: q (typed twice too), Ctrl-C, a signal
