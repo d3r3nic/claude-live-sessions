@@ -2,6 +2,10 @@
 
 What each version changed, newest first. Each links its pull request, which holds the details, the checks and the reviews. After updating, run `/reload-plugins` in your sessions.
 
+## 0.25.0 — 2026-10-12
+- **Background work counts as work.** A Claude session whose turn is over while a command, monitor or agent it started in the background still runs is `background` (◐), never idle or `done`, in /sessions and the Ops screen; the work is listed under it (`↳ monitor  Wait for CI on PR 826 · 4m`), in the event log as `BG WORK`, and counted in the header and status line.
+- **Ops screen, compact view** (the default; `COMPACT` in the toolbar, key `v`, kept): each workspace a small tile, as many a row as the window holds, coloured and marked by what it does; `[📁]` opens its window, `[»]` or a click on it shows all its details over the screen (esc closes). `COMPACT` off is the detailed view as before.
+
 ## 0.24.0 — 2026-10-12 ([#31](https://github.com/d3r3nic/claude-live-sessions/pull/31))
 - **`ABC-XYZ`: names kept off the screens**, for a screen others see. List them in `~/Library/Application Support/live-sessions/names.json` (`{"names": ["Acme Corp"]}`). While `ABC-XYZ` is lit, in /sessions or the Ops screen, each shows as dots (`•••• Practice`, `~/dev/••••-2025/app`) in any letter case and spelling (`acme-corp`, `AcmeCorp`), in the pane, its toasts, the Ops screen and the relay's notifications. One press turns it on or off on every screen.
 - **Ops screen toolbar:** `GRID` and `EVENTS` show or hide the grid and the event log (keys `g` and `e`, names `n`); the choice is kept.

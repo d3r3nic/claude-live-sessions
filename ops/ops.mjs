@@ -2,8 +2,10 @@
 // drawn from the snapshot every Claude Code session with this plugin keeps, and the relay's event log. A click on
 // a workspace's OPEN button, or on an event, opens what it is about: the workspace's window, or a session's tab.
 //   node ops/ops.mjs [--account <env>]     live, full screen, one account's or every one's (a accounts, t theme, g grid,
-//                                          e events, n names hidden or shown, q quit)
-//   node ops/ops.mjs --frame [--plain]     one frame, printed (COLS, ROWS, TICK); --targets prints what each row opens
+//                                          e events, n names hidden or shown, v compact or detailed view, esc closes a
+//                                          workspace's details, q quit)
+//   node ops/ops.mjs --frame [--plain]     one frame, printed (COLS, ROWS, TICK; MODAL: a workspace's details open);
+//                                          --targets prints what each row opens
 import { accessSync, constants, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync, writeSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import * as nodeModule from 'node:module'
@@ -95,14 +97,15 @@ const THEMES = {
   PAPER: { bg: '#f4f1e8', hi: '#0b3d20', mid: '#14532d', lo: '#6b8f71', dim: '#c8d5c3', amber: '#b45309', red: '#b91c1c', cyan: '#0e7490' },
 }
 const NAMES = Object.keys(THEMES)
-// what the person chose here, kept for the next screen: the theme, and whether the grid and the event log are shown
+// what the person chose here, kept for the next screen: the theme, whether the grid and the event log are shown, and
+// how the workspaces are drawn: `compact`, tiles several a row (the default), or `detailed`, each in full
 const PREFS = `${HOME}/Library/Application Support/live-sessions/ops.json`
 const prefs = (() => {
   try {
     const kept = JSON.parse(readFileSync(PREFS, 'utf8'))
-    return { theme: NAMES.includes(kept.theme) ? kept.theme : 'MATRIX', grid: kept.grid !== false, events: kept.events !== false }
+    return { theme: NAMES.includes(kept.theme) ? kept.theme : 'MATRIX', grid: kept.grid !== false, events: kept.events !== false, view: kept.view === 'detailed' ? 'detailed' : 'compact' }
   } catch {
-    return { theme: 'MATRIX', grid: true, events: true }
+    return { theme: 'MATRIX', grid: true, events: true, view: 'compact' }
   }
 })()
 let themeName = prefs.theme
@@ -178,8 +181,14 @@ function toggleShown(what) {
   savePrefs()
   return `${what === 'grid' ? 'grid' : 'event log'} ${prefs[what] ? 'shown' : 'hidden'}`
 }
+/** The workspaces as tiles or in full; kept for the next screen. */
+function toggleView() {
+  prefs.view = prefs.view === 'compact' ? 'detailed' : 'compact'
+  savePrefs()
+  return `${prefs.view} view`
+}
 /** A toolbar button pressed: what it turned, as said on the bottom line. */
-const press = what => (what === 'names' ? toggleHiding() : toggleShown(what))
+const press = what => (what === 'names' ? toggleHiding() : what === 'view' ? toggleView() : toggleShown(what))
 const strip = s => s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')
 const graphemes = new Intl.Segmenter('en', { granularity: 'grapheme' })
 const isWideCode = n => (n >= 0x1100 && n <= 0x115f) || (n >= 0x2e80 && n <= 0xa4cf) || (n >= 0xac00 && n <= 0xd7a3) || (n >= 0xf900 && n <= 0xfaff) ||
@@ -214,9 +223,27 @@ const cut = (s, n) => {
   const shown = hide(s)
   return width(shown) > n ? clip(shown, Math.max(0, n - 1)) + '…' : shown
 }
+/** The cells `from` to `to` of a line without colour codes, exactly that wide: half of a wide character at an end is a space. */
+function cellsOf(plain, from, to) {
+  let at = 0
+  let out = ''
+  for (const { segment } of graphemes.segment(plain)) {
+    if (at >= to) break
+    const n = cells(segment)
+    if (at >= from && at + n <= to) out += segment
+    else if (at + n > from) out += ' '.repeat(Math.min(at + n, to) - Math.max(at, from))
+    at += n
+  }
+  return out + ' '.repeat(Math.max(0, to - from - width(out)))
+}
 // text from the records, one line: no control characters (C0, C1), no invisible direction or joining controls
 const clean = s => String(s ?? '').replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g, ' ')
 const RAIN = 'ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄ01234567890ABCDEF<>/\\|=+*'
+/** The compact view's tiles: at least this many cells wide, and at most this many. */
+const TILE_MIN = 32
+const TILE_MAX = 44
+/** An agent's background work listed under it: the oldest this many, then how many more. */
+const TASKS_SHOWN = 3
 
 /** The shared snapshot, when it is one of this version (an older plugin writes another shape): else undefined. */
 function load() {
@@ -287,9 +314,12 @@ function diff(snap, now) {
     const said = (kind, item) => seen.unshift({ at: now, kind, text: `${item.tool.toUpperCase()} ${clean(item.title)}`, target: targetOf(item) })
     for (const [key, item] of state) {
       const before = previous.state.get(key)
+      // at work: its own turn, or background work it started (a Claude session whose turn is over, not done)
+      const isAtWork = state => state === 'working' || state === 'background'
       if (before === undefined) said('SPAWN', item)
       else if (before.state !== item.state && item.state === 'working') said('WORKING', item)
-      else if (before.state !== item.state && before.state === 'working') said('IDLE', item)
+      else if (before.state !== item.state && item.state === 'background') said('BG WORK', item)
+      else if (before.state !== item.state && isAtWork(before.state) && !isAtWork(item.state)) said('IDLE', item)
     }
     for (const [key, item] of previous.state) if (!state.has(key)) said('EXIT', item)
   }
@@ -299,11 +329,15 @@ function diff(snap, now) {
 /** Every event, newest first: the relay's own log, and what the snapshots showed. */
 const allEvents = () => [...relayEvents(), ...seen].sort((a, b) => b.at - a.at)
 
-/** One frame: its lines, and what a click on each row opens. */
-function frame(snap, now, cols, rows, tick, note = '') {
+/**
+ * One frame: its lines, what a click on each row opens, and the workspace whose details it shows over the rest (`modal`,
+ * the one asked for while it is there).
+ */
+function frame(snap, now, cols, rows, tick, note = '', modal = undefined) {
   const view = c.viewOf(snap, { home: HOME, now, windowMs: 0, selfId: '' })
   const all = [...view.workspaces.flatMap(ws => ws.items), ...view.repos.flatMap(r => r.trees.flatMap(t => t.items))]
   const working = all.filter(i => i.state === 'working').length
+  const inBackground = all.filter(i => i.state === 'background').length
   const age = Math.round((now - snap.checkedAt) / 1000)
   const inner = cols - 2
   const out = []
@@ -320,12 +354,12 @@ function frame(snap, now, cols, rows, tick, note = '') {
   }
   const clock = new Date(now).toTimeString().slice(0, 8)
   rule('LIVE//SESSIONS :: OPS', '╔', '╗')
-  line(` ${rgb(G.hi, clock)}   ${rgb(G.lo, account === c.ALL_ACCOUNTS ? 'ALL ACCOUNTS' : `ACCOUNT ${clean(account) || 'default'}`)}   ${rgb(G.mid, `CLAUDE ${snap.claude.length}`)}  ${rgb(G.mid, `CODEX ${snap.codex.length}`)}  ${rgb(working > 0 ? G.amber : G.lo, `WORKING ${working}`)}   ${rgb(age < 40 ? G.lo : G.red, `updated ${age}s ago`)}`)
-  // what the screen shows, a button each (its key beside it), lit while on: the grid, the event log, and ABC-XYZ, the
-  // names kept out of sight on every screen
+  line(` ${rgb(G.hi, clock)}   ${rgb(G.lo, account === c.ALL_ACCOUNTS ? 'ALL ACCOUNTS' : `ACCOUNT ${clean(account) || 'default'}`)}   ${rgb(G.mid, `CLAUDE ${snap.claude.length}`)}  ${rgb(G.mid, `CODEX ${snap.codex.length}`)}  ${rgb(working > 0 ? G.amber : G.lo, `WORKING ${working}`)}${inBackground > 0 ? `  ${rgb(G.cyan, `BACKGROUND ${inBackground}`)}` : ''}   ${rgb(age < 40 ? G.lo : G.red, `updated ${age}s ago`)}`)
+  // what the screen shows, a button each (its key beside it), lit while on: the grid, the event log, ABC-XYZ (the names
+  // kept out of sight on every screen), and the compact view (the workspaces as tiles; off, each in full)
   let toolbar = ''
   const presses = []
-  for (const [what, label, key, isOn] of [['grid', 'GRID', 'g', prefs.grid], ['events', 'EVENTS', 'e', prefs.events], ['names', 'ABC-XYZ', 'n', isHiding()]]) {
+  for (const [what, label, key, isOn] of [['grid', 'GRID', 'g', prefs.grid], ['events', 'EVENTS', 'e', prefs.events], ['names', 'ABC-XYZ', 'n', isHiding()], ['view', 'COMPACT', 'v', prefs.view === 'compact']]) {
     const button = `[${isOn ? '▣' : '□'} ${label}]`
     toolbar += toolbar === '' ? ' ' : '   '
     // its cells on the screen: the row starts after the border, in the second
@@ -334,52 +368,92 @@ function frame(snap, now, cols, rows, tick, note = '') {
     toolbar += `${isOn ? rgb(G.hi, bold(button)) : rgb(G.lo, button)} ${rgb(G.lo, key)}`
   }
   line(toolbar, presses)
-  // workspaces: nodes, each its agents and the link the relay passes hand-offs over
+  // workspaces: nodes, each its agents and the link the relay passes hand-offs over; as tiles, several a row (the
+  // compact view), or each in full (the detailed view)
   rule(`NODES ${view.workspaces.length}`)
   // a session's context as its records say it: its size, against the line where it should compact (Claude: the
   // workspace's line; Codex: its window); amber from two thirds of it, red from it
   const contextOf = item => (item.tool === 'claude' ? snap.claude.find(s => `claude-${s.pid}` === item.key) : snap.codex.find(s => `codex-${s.key}` === item.key))?.context
-  for (const ws of view.workspaces) {
+  /** What a workspace shows, worked out once for every way it is drawn. */
+  const nodeOf = ws => {
     const raw = snap.workspaces.find(x => x.id === ws.key)
-    const relay = raw?.relay
-    const claude = ws.items.find(i => i.tool === 'claude')
-    const codex = ws.items.find(i => i.tool === 'codex')
     // one agent the owner chose: its row alone, no relay (it has no one to pass to)
     const only = raw?.only === 'claude' || raw?.only === 'codex' ? raw.only : undefined
     // as the pane says it: a cue, a pass it could not make or a pane left scrolled back, until the owner types
     const needs = only === undefined && ws.relay.needsOwner
-    // working while any agent of it works; idle, it is drawn lighter, with when its agents last finished
+    // at work while any agent of it works, or waits on background work it started; idle, it is drawn lighter, with
+    // when its agents last finished
     const isWorking = ws.items.some(i => i.state === 'working')
-    const isBright = isWorking || needs
-    const doneAt = Math.max(0, ...ws.items.map(i => (Number.isFinite(i.lastActive) ? i.lastActive : 0)))
+    const isBackground = ws.items.some(i => i.state === 'background')
+    return {
+      ws,
+      relay: raw?.relay,
+      only,
+      needs,
+      isWorking,
+      isBackground,
+      isBright: isWorking || isBackground || needs,
+      claude: ws.items.find(i => i.tool === 'claude'),
+      codex: ws.items.find(i => i.tool === 'codex'),
+      doneAt: Math.max(0, ...ws.items.map(i => (Number.isFinite(i.lastActive) ? i.lastActive : 0))),
+      // only an id as the plugin makes them names a workspace to open
+      isOpenable: WORKSPACE_ID.test(ws.key),
+    }
+  }
+  const nodes = view.workspaces.map(nodeOf)
+  const contextShown = (n, item) => {
+    const context = contextOf(item)
+    if (context === undefined) return undefined
+    const limit = item.tool === 'claude' ? (n.ws.compactFrom > 0 ? n.ws.compactFrom : context.window) : context.window
+    const share = context.isCompacted === true || !(limit > 0) ? 0 : context.tokens / limit
+    const color = share >= 1 ? G.red : share >= 2 / 3 ? G.amber : n.isBright ? G.mid : G.lo
+    return rgb(color, context.isCompacted === true ? 'compacted' : r.tokensSaid(context.tokens))
+  }
+  // an agent's background work, a row each under its own: what it is, what its call said it does, for how long (the
+  // oldest few, then how many more)
+  const taskRows = item => {
+    const tasks = Array.isArray(item?.tasks) ? item.tasks : []
+    const shown = tasks.slice(0, TASKS_SHOWN)
+    return [
+      ...shown.map(t => `${' '.repeat(9)}${rgb(G.lo, '↳')} ${rgb(G.cyan, clean(t.kind))}${clean(t.what) === '' ? '' : `  ${rgb(G.mid, cut(clean(t.what), 72))}`} ${rgb(G.lo, `· ${c.ago(now - t.since)}`)}`),
+      ...(tasks.length > shown.length ? [`${' '.repeat(9)}${rgb(G.lo, `↳ ${tasks.length - shown.length} more`)}`] : []),
+    ]
+  }
+  /** A workspace in full: its name and tags, a row for each agent (and its background work), the relay, the alert. */
+  const nodeRows = n => {
+    const { ws, relay, only, needs, isWorking, isBackground, isBright } = n
     const rows = []
     const name = bold(`▓▒░ ${clean(ws.name)} ░▒▓`)
-    const head = needs ? rgb(tick % 6 < 3 ? G.red : G.hi, name) : isWorking ? `${rgb(G.amber, bold('● WORKING'))}  ${rgb(G.amber, name)}` : rgb(G.mid, name)
+    const head = needs
+      ? rgb(tick % 6 < 3 ? G.red : G.hi, name)
+      : isWorking
+        ? `${rgb(G.amber, bold('● WORKING'))}  ${rgb(G.amber, name)}`
+        : isBackground
+          ? `${rgb(G.cyan, bold('◐ BACKGROUND'))}  ${rgb(G.cyan, name)}`
+          : rgb(G.mid, name)
     // the account is the screen's, in its header; each workspace's only when every account is shown
     const tags = [
       ...(account === c.ALL_ACCOUNTS ? [clean(ws.env) || 'default'] : []),
       ...(ws.isRunning ? [] : ['stopped']),
-      ...(ws.isRunning && !isWorking && doneAt > 0 ? [`done ${c.ago(now - doneAt)} ago`] : []),
+      ...(ws.isRunning && !isWorking && !isBackground && n.doneAt > 0 ? [`done ${c.ago(now - n.doneAt)} ago`] : []),
     ]
     rows.push(`${head}${tags.length === 0 ? '' : `  ${rgb(G.lo, tags.join(' · '))}`}`)
-    // an agent a line: what it does, and how large its context is
+    // an agent a line: what it does, and how large its context is; under it, its background work
     const agent = (tool, item) => {
       const label = rgb(isBright ? G.hi : G.lo, pad(`[${tool.toUpperCase()}]`, 8))
-      if (item === undefined) return `${label} ${rgb(G.dim, 'offline')}`
+      if (item === undefined) return [`${label} ${rgb(G.dim, 'offline')}`]
       const state = item.state === 'working'
         ? `${rgb(G.amber, '● working')} ${rgb(G.amber, '▁▂▃▅▇▅▃▂'.slice(tick % 8, (tick % 8) + 3).padEnd(3, '▁'))}`
-        : rgb(isBright ? G.mid : G.lo, pad('○ idle', 13))
-      const context = contextOf(item)
-      if (context === undefined) return `${label} ${state}`
-      const line = item.tool === 'claude' ? (ws.compactFrom > 0 ? ws.compactFrom : context.window) : context.window
-      const share = context.isCompacted === true || !(line > 0) ? 0 : context.tokens / line
-      const color = share >= 1 ? G.red : share >= 2 / 3 ? G.amber : isBright ? G.mid : G.lo
-      return `${label} ${state}  ${rgb(G.lo, 'context')} ${rgb(color, context.isCompacted === true ? 'compacted' : r.tokensSaid(context.tokens))}`
+        : item.state === 'background'
+          ? rgb(G.cyan, pad('◐ background', 13))
+          : rgb(isBright ? G.mid : G.lo, pad('○ idle', 13))
+      const context = contextShown(n, item)
+      return [context === undefined ? `${label} ${state}` : `${label} ${state}  ${rgb(G.lo, 'context')} ${context}`, ...taskRows(item)]
     }
-    if (only !== undefined) rows.push(agent(only, only === 'claude' ? claude : codex))
+    if (only !== undefined) rows.push(...agent(only, only === 'claude' ? n.claude : n.codex))
     else {
-      rows.push(agent('claude', claude))
-      rows.push(agent('codex', codex))
+      rows.push(...agent('claude', n.claude))
+      rows.push(...agent('codex', n.codex))
       // what it last did: a hand-off in flight for 20 s after it passed, toward who got it
       const sinceRelay = relay?.at === undefined ? Infinity : now - relay.at
       const status = clean(relay?.status)
@@ -398,11 +472,122 @@ function frame(snap, now, cols, rows, tick, note = '') {
       rows.push(`${rgb(G.lo, pad('relay', 8))} ${rgb(mode === 'auto' && isBright ? G.hi : G.lo, mode)}${last}${streak}`)
     }
     if (needs) rows.push(`${rgb(tick % 6 < 3 ? G.red : G.amber, bold('⚠ OPERATOR INPUT REQUIRED ⚠'))}`)
-    // the one thing a click opens here: the button down its left side (its window, as /sessions opens one)
-    while (rows.length < 4) rows.push('')
-    const node = WORKSPACE_ID.test(ws.key) ? { kind: 'workspace', id: ws.key, cols: [3, 5] } : undefined
-    rows.forEach((row, k) => line(` ${rgb(needs ? G.red : isBright ? G.cyan : G.lo, `|${'OPEN'[k] ?? ' '}|`)} ${row}`, node))
-    line()
+    return rows
+  }
+  /**
+   * A workspace as a tile `w` cells wide, five rows: its name in its border, coloured by what it does (red: it needs
+   * the owner, amber: working, cyan: background work, dim: stopped) and marked at its right (⚠ ● ◐ ■, or since when it
+   * is idle); a row for each agent, what it does and its context; the relay's mode and last hand-off, and its two
+   * buttons: 📁 opens its window, » its details.
+   */
+  const tileOf = (n, w) => {
+    const blink = tick % 6 < 3
+    const edge = n.needs ? (blink ? G.red : G.hi) : n.isWorking ? G.amber : n.isBackground ? G.cyan : n.ws.isRunning ? G.lo : G.dim
+    const mark = n.needs
+      ? rgb(blink ? G.red : G.hi, '⚠')
+      : n.isWorking ? rgb(G.amber, '●') : n.isBackground ? rgb(G.cyan, '◐') : !n.ws.isRunning ? rgb(G.dim, '■') : n.doneAt > 0 ? rgb(G.lo, c.ago(now - n.doneAt)) : ''
+    const markCells = mark === '' ? 0 : width(mark) + 2
+    const name = cut(clean(n.ws.name), Math.max(1, w - 7 - markCells))
+    const top = `${rgb(edge, '╭─ ')}${rgb(n.isBright ? G.hi : G.mid, bold(name))}${rgb(edge, ` ${'─'.repeat(Math.max(1, w - 6 - width(name) - markCells))}`)}${mark === '' ? '' : ` ${mark} `}${rgb(edge, '─╮')}`
+    // a row inside the border: what it says at its left, and at its right
+    const room = w - 4
+    const inside = (left, right = '') => {
+      // what is at its right (a context, the buttons) kept whole: its left is cut to the room left
+      const shown = clip(left, Math.max(0, room - width(right) - (right === '' ? 0 : 1)))
+      const text = `${shown}${' '.repeat(Math.max(0, room - width(shown) - width(right)))}${right}`
+      return `${rgb(edge, '│')} ${text} ${rgb(edge, '│')}`
+    }
+    const agent = (tool, item) => {
+      if (item === undefined) return inside(`${rgb(G.dim, '·')} ${rgb(G.dim, pad(tool, 6))} ${rgb(G.dim, 'offline')}`)
+      const [icon, word, color] = item.state === 'working'
+        ? ['●', 'working', G.amber]
+        : item.state === 'background' ? ['◐', 'background', G.cyan] : ['○', 'idle', n.isBright ? G.mid : G.lo]
+      return inside(`${rgb(color, icon)} ${rgb(n.isBright ? G.hi : G.mid, pad(tool, 6))} ${rgb(color, word)}`, contextShown(n, item) ?? '')
+    }
+    const relayRow = () => {
+      const buttons = n.isOpenable ? `${rgb(G.hi, '[📁]')} ${rgb(G.hi, '[»]')}` : ''
+      if (!n.ws.isRunning) return inside(rgb(G.dim, '■ stopped'), buttons)
+      if (n.only !== undefined) return inside(rgb(G.lo, 'one agent'), buttons)
+      const mode = clean(n.relay?.mode ?? 'off')
+      const status = clean(n.relay?.status)
+      const passed = /^passed to (Codex|Claude)/.exec(status)
+      const since = n.relay?.at === undefined ? '' : ` ${c.ago(now - n.relay.at)}`
+      const what = n.needs
+        ? rgb(blink ? G.red : G.amber, '⚠ needs you')
+        : passed !== null ? rgb(now - (n.relay?.at ?? 0) < 20_000 ? G.cyan : G.lo, `→ ${passed[1]}${since}`) : ''
+      return inside(`${rgb(mode === 'auto' && n.isBright ? G.hi : G.lo, `⇄ ${mode}`)}${what === '' ? '' : `  ${what}`}`, buttons)
+    }
+    const first = n.only === 'codex' ? agent('CODEX', n.codex) : agent('CLAUDE', n.claude)
+    const second = n.only !== undefined ? inside('') : agent('CODEX', n.codex)
+    return [top, first, second, relayRow(), rgb(edge, `╰${'─'.repeat(w - 2)}╯`)]
+  }
+  if (prefs.view === 'compact') {
+    // as many tiles a row as the window holds, at least TILE_MIN cells each, sharing the row's width
+    const across = Math.max(1, Math.floor(inner / (TILE_MIN + 1)))
+    const w = Math.min(TILE_MAX, Math.floor((inner - 1 - (across - 1)) / across))
+    for (let k = 0; k < nodes.length; k += across) {
+      const row = nodes.slice(k, k + across)
+      const drawn = row.map(n => tileOf(n, w))
+      for (let y = 0; y < 5; y++) {
+        // a click on a tile shows its details; on its 📁, opens its window (the row starts after the border, in the
+        // second cell, then a space)
+        const presses = row.flatMap((n, j) => {
+          if (!n.isOpenable) return []
+          const left = 3 + j * (w + 1)
+          return [...(y === 3 ? [{ kind: 'workspace', id: n.ws.key, cols: [left + w - 10, left + w - 7] }] : []), { kind: 'details', id: n.ws.key, cols: [left, left + w - 1] }]
+        })
+        line(` ${drawn.map(t => t[y]).join(' ')}`, presses.length === 0 ? undefined : presses)
+      }
+    }
+  } else {
+    for (const n of nodes) {
+      const rows = nodeRows(n)
+      // the one thing a click opens here: the button down its left side (its window, as /sessions opens one)
+      while (rows.length < 4) rows.push('')
+      const node = n.isOpenable ? { kind: 'workspace', id: n.ws.key, cols: [3, 5] } : undefined
+      rows.forEach((row, k) => line(` ${rgb(n.needs ? G.red : n.isBright ? G.cyan : G.lo, `|${'OPEN'[k] ?? ' '}|`)} ${row}`, node))
+      line()
+    }
+  }
+  // one workspace's details over the screen, the rest dimmed behind it: all the detailed view says of it, its folder,
+  // and its buttons; a click anywhere else, or esc, closes it
+  const details = modal === undefined ? undefined : nodes.find(n => n.isOpenable && n.ws.key === modal)
+  const overlay = n => {
+    const dir = clean(n.ws.dir)
+    const content = [rgb(G.lo, HOME !== '' && dir.startsWith(`${HOME}/`) ? `~${dir.slice(HOME.length)}` : dir), '', ...nodeRows(n)]
+    const open = '[📁 open window]'
+    const close = '[✕ close]'
+    const buttons = `${rgb(G.hi, bold(open))}   ${rgb(G.hi, close)}`
+    const bw = Math.min(inner - 2, Math.max(64, ...content.map(l => width(l) + 4)))
+    // its rows: as many as the screen holds below the header, the rest cut
+    const fits = Math.max(0, rows - 6 - 4)
+    const body = content.slice(0, fits)
+    const boxRow = s => `${rgb(G.hi, '║')} ${pad(clip(hide(s), bw - 4), bw - 4)} ${rgb(G.hi, '║')}`
+    const title = cut(clean(n.ws.name), bw - 7)
+    const box = [
+      rgb(G.hi, `╔═ ${bold(title)} ${'═'.repeat(Math.max(1, bw - 5 - width(title)))}╗`),
+      ...body.map(boxRow),
+      boxRow(''),
+      boxRow(buttons),
+      rgb(G.hi, `╚${'═'.repeat(bw - 2)}╝`),
+    ]
+    const x = Math.floor((cols - bw) / 2)
+    const top = Math.max(3, Math.min(Math.floor((rows - box.length) / 2), rows - 1 - box.length))
+    // behind it, everything dimmed, and a click there closes it
+    for (let y = 0; y < out.length; y++) {
+      const plain = strip(out[y])
+      const inBox = y >= top && y < top + box.length
+      // (the bottom line, which says esc closes it, as it is)
+      if (y < out.length - 1) out[y] = inBox ? `${rgb(G.dim, cellsOf(plain, 0, x))}${box[y - top]}${rgb(G.dim, cellsOf(plain, x + bw, cols))}` : rgb(G.dim, plain)
+      // (screen columns count from 1)
+      const span = { kind: 'none', cols: [x + 1, x + bw] }
+      const at = x + 3
+      targets[y] = !inBox
+        ? { kind: 'close' }
+        : y === top + box.length - 2
+          ? [{ kind: 'workspace', id: n.ws.key, cols: [at, at + width(open) - 1] }, { kind: 'close', cols: [at + width(open) + 3, at + width(open) + 2 + width(close)] }, span, { kind: 'close' }]
+          : [span, { kind: 'close' }]
+    }
   }
   if (view.workspaces.length === 0) line(rgb(G.lo, '  no nodes: + New workspace in /sessions'))
   // the repositories, each agent a cell (while shown)
@@ -411,8 +596,9 @@ function frame(snap, now, cols, rows, tick, note = '') {
     for (const repo of view.repos.slice(0, 8)) {
       const items = repo.trees.flatMap(t => t.items)
       const busy = items.filter(i => i.state === 'working').length
-      const row = items.map(i => (i.state === 'working' ? rgb(G.amber, '▮') : rgb(G.lo, '▮'))).join('')
-      line(` ${rgb(G.mid, pad(cut(clean(repo.label), 34), 34))} ${row}${' '.repeat(Math.max(0, 14 - items.length))} ${rgb(G.lo, `${items.length} agent${items.length === 1 ? '' : 's'}`)}${busy > 0 ? rgb(G.amber, ` · ${busy} working`) : ''}`)
+      const waits = items.filter(i => i.state === 'background').length
+      const row = items.map(i => rgb(i.state === 'working' ? G.amber : i.state === 'background' ? G.cyan : G.lo, '▮')).join('')
+      line(` ${rgb(G.mid, pad(cut(clean(repo.label), 34), 34))} ${row}${' '.repeat(Math.max(0, 14 - items.length))} ${rgb(G.lo, `${items.length} agent${items.length === 1 ? '' : 's'}`)}${busy > 0 ? rgb(G.amber, ` · ${busy} working`) : ''}${waits > 0 ? rgb(G.cyan, ` · ${waits} background`) : ''}`)
     }
   }
   // what happened, newest first (while shown)
@@ -423,7 +609,7 @@ function frame(snap, now, cols, rows, tick, note = '') {
     const shownIds = new Set(snap.workspaces.map(x => x.id))
     const events = allEvents().filter(e => account === c.ALL_ACCOUNTS || e.target?.kind !== 'workspace' || shownIds.has(e.target.id))
     for (const e of events.slice(0, room)) {
-      const color = /ALERT|NEEDS|WAITS|DRIFT|FAILED/.test(e.kind) ? G.red : /RELAY|PASS|NOTIFY/.test(e.kind) ? G.cyan : /WORKING|COMPACT/.test(e.kind) ? G.amber : G.mid
+      const color = /ALERT|NEEDS|WAITS|DRIFT|FAILED/.test(e.kind) ? G.red : /RELAY|PASS|NOTIFY|BG WORK/.test(e.kind) ? G.cyan : /WORKING|COMPACT/.test(e.kind) ? G.amber : G.mid
       line(` ${rgb(G.lo, new Date(e.at).toTimeString().slice(0, 8))}  ${rgb(color, pad(e.kind, 7))} ${rgb(G.mid, cut(e.text, inner - 22))}${e.target !== undefined ? rgb(G.lo, ' ›') : ''}`, e.target)
     }
   }
@@ -441,11 +627,12 @@ function frame(snap, now, cols, rows, tick, note = '') {
     out.push(rgb(G.lo, '║') + rain + rgb(G.lo, '║'))
     targets.push(undefined)
   }
-  const keys = hide(` ${note === '' ? '' : `${clean(note)} · `}click opens · ${OWN === c.ALL_ACCOUNTS ? '' : `a ${account === c.ALL_ACCOUNTS ? 'this account' : 'all accounts'} · `}t theme: ${themeName} · q quit `)
+  const keys = hide(` ${note === '' ? '' : `${clean(note)} · `}${details === undefined ? '' : 'esc closes · '}click opens · ${OWN === c.ALL_ACCOUNTS ? '' : `a ${account === c.ALL_ACCOUNTS ? 'this account' : 'all accounts'} · `}t theme: ${themeName} · q quit `)
   out.push(rgb(G.lo, '╚' + '═'.repeat(Math.max(0, inner - width(keys) - 2))) + rgb(note === '' ? G.mid : G.amber, keys) + rgb(G.lo, '══╝'))
   targets.push(undefined)
+  if (details !== undefined) overlay(details)
   // the theme's background under every cell, to the line's end
-  return { lines: out.map(l => bgOn() + clip(l, cols) + ' '.repeat(Math.max(0, cols - width(l))) + `${ESC}49m`), targets }
+  return { lines: out.map(l => bgOn() + clip(l, cols) + ' '.repeat(Math.max(0, cols - width(l))) + `${ESC}49m`), targets, modal: details?.ws.key }
 }
 
 const run = (argv) => {
@@ -503,7 +690,7 @@ if (process.argv.includes('--frame')) {
   const loaded = load()
   const now = Number(process.env.NOW ?? Date.now())
   diff(seenAs(loaded.snap), now)
-  const { lines, targets } = frame(seenAs(loaded.snap), now, Number(process.env.COLS ?? 110), Number(process.env.ROWS ?? 34), Number(process.env.TICK ?? 3))
+  const { lines, targets } = frame(seenAs(loaded.snap), now, Number(process.env.COLS ?? 110), Number(process.env.ROWS ?? 34), Number(process.env.TICK ?? 3), '', process.env.MODAL)
   if (process.argv.includes('--targets')) process.stdout.write(`${JSON.stringify(targets)}\n`)
   else process.stdout.write((process.argv.includes('--plain') ? lines.map(strip) : lines).join('\n') + '\n')
 } else {
@@ -576,6 +763,8 @@ if (process.argv.includes('--frame')) {
   let note = stale
   let noteUntil = 0
   let shown = { targets: [] }
+  // the workspace whose details are open over the screen, if any
+  let modal
   // its own screen, no cursor, no wrapping (a long line is cut, never pushed onto the next), and the mouse taken,
   // so the wheel never scrolls the terminal's history and a click comes here
   process.stdout.write('\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[?1000h\x1b[?1006h' + bgOn() + '\x1b[2J')
@@ -620,14 +809,18 @@ if (process.argv.includes('--frame')) {
       const at = shown.targets[Number(m[3]) - 1]
       // a row whose buttons are part of it (one, or a toolbar of several): only a click on a button
       const target = (Array.isArray(at) ? at : [at]).find(t => t != null && (t.cols === undefined || (Number(m[2]) >= t.cols[0] && Number(m[2]) <= t.cols[1])))
-      if (target !== undefined) {
-        try {
-          note = target.kind === 'toggle' ? press(target.what) : open(target, loaded.snap)
-        } catch (error) {
-          note = `could not open it (${String(error).split('\n')[0]})`
-        }
-        noteUntil = Date.now() + 4_000
+      if (target === undefined || target.kind === 'none') continue
+      // a workspace's details shown over the screen, or closed
+      if (target.kind === 'details' || target.kind === 'close') {
+        modal = target.kind === 'details' ? target.id : undefined
+        continue
       }
+      try {
+        note = target.kind === 'toggle' ? press(target.what) : open(target, loaded.snap)
+      } catch (error) {
+        note = `could not open it (${String(error).split('\n')[0]})`
+      }
+      noteUntil = Date.now() + 4_000
     }
     const keys = text.replace(/\x1b\[<[0-9;]*[Mm]/g, '')
     if (keys.includes('q') || d.includes(3)) quit()
@@ -635,8 +828,10 @@ if (process.argv.includes('--frame')) {
       nextTheme()
       process.stdout.write(bgOn() + '\x1b[2J')
     }
+    // esc alone (not the start of a mouse report or any other sequence) closes a workspace's details
+    if (keys === '\x1b') modal = undefined
     // a toolbar key typed alone, never one inside pasted text
-    for (const [key, what] of [['g', 'grid'], ['e', 'events'], ['n', 'names']]) {
+    for (const [key, what] of [['g', 'grid'], ['e', 'events'], ['n', 'names'], ['v', 'view']]) {
       if (keys !== key) continue
       note = press(what)
       noteUntil = Date.now() + 4_000
@@ -686,7 +881,9 @@ if (process.argv.includes('--frame')) {
       // too small a window: said, nothing else drawn
       shown = cols < 40 || rows < 8
         ? { lines: [...Array(rows)].map((_, r) => bgOn() + clip(r === 0 ? rgb(G.mid, ' window too small for ops') : '', cols) + `${ESC}49m`), targets: [] }
-        : frame(seenAs(loaded.snap), Date.now(), cols, rows, tick, note)
+        : frame(seenAs(loaded.snap), Date.now(), cols, rows, tick, note, modal)
+      // details asked for a workspace no longer shown are closed
+      modal = shown.modal
     } catch (error) {
       shown = { lines: [bgOn() + clip(rgb(G.red, ` cannot draw: ${hide(clean(String(error).split('\n')[0]))}`), cols) + `${ESC}49m`], targets: [] }
     }

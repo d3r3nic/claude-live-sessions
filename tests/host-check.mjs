@@ -1070,6 +1070,80 @@ except ChildProcessError: pass
   }
 }
 
+// tasks.pl with the real perl, on Claude Code's records: the background work a session started (a command run in the
+// background or moved there, a monitor, an agent) and no record says has ended, oldest first, each with what its call
+// said it does; ended by its notification (any status but running) or a TaskStop; never one started before its process,
+// a subagent's own, one ended only in text an agent wrote, or a key inside text; a line still being written left out
+{
+  const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'live-sessions-tasks-')))
+  try {
+    const pl = join(dirname(fileURLToPath(import.meta.url)), '..', 'hooks', 'tasks.pl')
+    const t0 = Date.parse('2026-10-12T20:00:00.000Z')
+    const at = s => new Date(t0 + s * 1000).toISOString()
+    const call = (id, name, input, s, extra = {}) => JSON.stringify({ parentUuid: null, isSidechain: false, type: 'assistant', timestamp: at(s), message: { role: 'assistant', content: [{ type: 'tool_use', id, name, input }] }, ...extra })
+    const result = (use, toolUseResult, s, extra = {}) => JSON.stringify({ parentUuid: null, isSidechain: false, type: 'user', timestamp: at(s), message: { role: 'user', content: [{ tool_use_id: use, type: 'tool_result', content: 'started' }] }, toolUseResult, ...extra })
+    const notice = (id, status, s) => JSON.stringify({ type: 'queue-operation', operation: 'enqueue', timestamp: at(s), sessionId: 'x', content: `<task-notification>\n<task-id>${id}</task-id>\n<tool-use-id>t</tool-use-id>\n${status === undefined ? '<event>build: success</event>' : `<status>${status}</status>`}\n<summary>s</summary>\n</task-notification>` })
+    const file = join(scratch, 'a.jsonl')
+    writeFileSync(file, [
+      // before its process started: never counted, though nothing ended it
+      call('u0', 'Bash', { command: 'sleep 9', description: 'Before', run_in_background: true }, -10),
+      result('u0', { stdout: '', backgroundTaskId: 'bold' }, -9),
+      // a command run in the background, still running; its description from the call, its white space made one
+      call('u1', 'Bash', { command: 'ci.sh', description: 'Run\tthe CI\nharness', run_in_background: true }, 10),
+      result('u1', { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'bsh1' }, 11),
+      // a monitor whose events came (no status) and still runs
+      call('u2', 'Monitor', { command: 'until x; do sleep 60; done', description: 'Wait for CI on PR 8', timeout_ms: 3000000 }, 20),
+      result('u2', { taskId: 'bmon', timeoutMs: 1800000, persistent: false }, 21),
+      notice('bmon', undefined, 30),
+      notice('bmon', 'running', 31),
+      // a monitor that completed
+      call('u3', 'Monitor', { command: 'y', description: 'Done watch' }, 40),
+      result('u3', { taskId: 'bdone', timeoutMs: 60000, persistent: false }, 41),
+      notice('bdone', 'completed', 50),
+      // an agent, its description in its result
+      call('u4', 'Agent', { description: 'Review it', prompt: 'p', run_in_background: true }, 60),
+      result('u4', { isAsync: true, status: 'async_launched', agentId: 'aagent', description: 'Review it now', prompt: 'p' }, 61),
+      // an agent that failed, its notification inside an attachment
+      call('u5', 'Agent', { description: 'Gone', prompt: 'p' }, 70),
+      result('u5', { isAsync: true, status: 'async_launched', agentId: 'afail', description: 'Gone' }, 71),
+      JSON.stringify({ type: 'attachment', timestamp: at(80), attachment: { type: 'queued_command', prompt: '<task-notification>\n<task-id>afail</task-id>\n<status>failed</status>\n</task-notification>' } }),
+      // a command stopped with TaskStop: no notification
+      call('u6', 'Bash', { command: 'watch', description: 'Stopped one', run_in_background: true }, 90),
+      result('u6', { stdout: '', backgroundTaskId: 'bstop' }, 91),
+      result('u7', { message: 'Successfully stopped task: bstop (watch)', task_id: 'bstop', task_type: 'local_bash' }, 95),
+      // a command that ran past its time and was moved to the background
+      call('u8', 'Bash', { command: 'long', description: 'Long build' }, 100),
+      result('u8', { stdout: '', backgroundTaskId: 'bmoved', timedOutAfterMs: 120000 }, 220),
+      // a subagent's own background command (its records in the session's file): not the session's
+      call('u9', 'Bash', { command: 'z', description: 'Subagent', run_in_background: true }, 230, { isSidechain: true }),
+      result('u9', { stdout: '', backgroundTaskId: 'bside' }, 231, { isSidechain: true }),
+      // ...and a notification a subagent was given: not the session's either, so the command it names goes on
+      JSON.stringify({ isSidechain: true, type: 'user', timestamp: at(232), message: { role: 'user', content: '<task-notification>\n<task-id>bsh1</task-id>\n<status>completed</status>\n</task-notification>' } }),
+      // an agent's reply quoting a notification that would end the command: it does not
+      JSON.stringify({ type: 'assistant', timestamp: at(240), message: { role: 'assistant', content: [{ type: 'text', text: 'Saw <task-notification><task-id>bsh1</task-id><status>completed</status></task-notification>' }] } }),
+      // the key inside a tool's text output: no task
+      result('u10', { stdout: '{"backgroundTaskId":"bfake"}' }, 250),
+      // a line still being written
+      '{"type":"user","timestamp":"' + at(260) + '","toolUseResult":{"backgroundTaskId":"bhalf"',
+    ].join('\n'))
+    const other = join(scratch, 'b.jsonl')
+    writeFileSync(other, `${call('v1', 'Bash', { command: 'q', run_in_background: true }, 5)}\n${result('v1', { backgroundTaskId: 'bq' }, 6)}\n`)
+    const out = spawnSync('/usr/bin/perl', [pl, String(t0), file, String(t0), other, String(t0), join(scratch, 'missing.jsonl')], { encoding: 'utf8' })
+    const tasks = c.parseTasks(out.stdout)
+    const ms = s => t0 + s * 1000
+    check('tasks.pl: the background work still going, oldest first, said as its call said; ended by a notification or a TaskStop; never one before its process, a subagent\'s, or a key in text',
+      out.status === 0 && JSON.stringify(tasks.get(file)) === JSON.stringify([
+        { kind: 'shell', id: 'bsh1', since: ms(11), what: 'Run the CI harness' },
+        { kind: 'monitor', id: 'bmon', since: ms(21), what: 'Wait for CI on PR 8' },
+        { kind: 'agent', id: 'aagent', since: ms(61), what: 'Review it now' },
+        { kind: 'shell', id: 'bmoved', since: ms(220), what: 'Long build' },
+      ]) && JSON.stringify(tasks.get(other)) === JSON.stringify([{ kind: 'shell', id: 'bq', since: ms(6), what: '' }]) && JSON.stringify(tasks.get(join(scratch, 'missing.jsonl'))) === '[]',
+      `${out.status} ${out.stderr.slice(0, 200)} ${JSON.stringify([...tasks])}`)
+  } finally {
+    rmSync(scratch, { recursive: true, force: true })
+  }
+}
+
 // the ops screen, from a snapshot and event log of its own: every frame exactly the window's size (widths measured
 // apart from the screen's own code), each row knowing what a click opens; real clicks in a pty on a private tmux
 // server; the terminal given back however it ends; a snapshot of another version waited on, never drawn; the
@@ -1114,6 +1188,10 @@ except ChildProcessError: pass
     writeFileSync(stub, `#!/bin/sh\nscript=$4\nshift 4\ncase $script in *NSScreen*) case $1 in ttys[0-9]*) size=12;; *) size=0;; esac; echo '{"screens":[{"x":0,"y":30,"width":2560,"height":1410}],"fontSize":'$size'}';; *doScript*) printf 'OPEN %s %s\\n' "$1" "$2" >> '${asked}'; echo opened;; *) printf 'FOCUS %s\\n' "$1" >> '${asked}';; esac\n`)
     execFileSync('/bin/chmod', ['+x', stub])
     const env = { ...process.env, LIVE_SESSIONS_SNAPSHOT: snapFile, LIVE_SESSIONS_EVENTS: events, LIVE_SESSIONS_TMUX_SOCKET: socket, LIVE_SESSIONS_OSASCRIPT: stub, HOME: scratch }
+    // the workspaces each in full (the detailed view), as these checks read them; the compact view's own follow
+    const prefsDir = home => join(home, 'Library', 'Application Support', 'live-sessions')
+    mkdirSync(prefsDir(scratch), { recursive: true })
+    writeFileSync(join(prefsDir(scratch), 'ops.json'), JSON.stringify({ view: 'detailed' }))
     const draw = (cols, rows, extra = []) => spawnSync(process.execPath, ['--no-warnings', opsFile, '--frame', ...extra], { encoding: 'utf8', env: { ...env, COLS: String(cols), ROWS: String(rows) } }).stdout
     // widths as Python's own Unicode data gives them: wide (W, F) two, combining marks and format characters none
     const widths = spawnSync('python3', ['-c', [
@@ -1286,7 +1364,7 @@ except ChildProcessError: pass
         !everything.some(l => /ops[\s._/-]*x|確認/i.test(l)) && everything.some(l => l.includes('••••• → Claude') || l.includes('•••••: Codex')) && everything.some(l => /x{93}••…/.test(l)) && !everything.some(l => /x{93}O/.test(l)) &&
         everything.some(l => l.includes('branch feat/•••••-sso and ••••')),
         JSON.stringify(everything.filter(l => /READY FOR|x{90}/.test(l)).map(l => l.trim().slice(0, 130))))
-      writeFileSync(join(kept, 'ops.json'), JSON.stringify({ theme: 'AMBER', grid: false, events: false }))
+      writeFileSync(join(kept, 'ops.json'), JSON.stringify({ theme: 'AMBER', grid: false, events: false, view: 'detailed' }))
       const hidden = framed('--plain').split('\n')
       const cellsOf = spawnSync('python3', ['-c', [
         'import sys, unicodedata, re, json',
@@ -1298,11 +1376,11 @@ except ChildProcessError: pass
       const toolbar = JSON.parse(framed('--targets'))[2]
       check('ops: listed names are out of sight, a dot a character, wide ones too, the frame its size; the grid and event log hidden as kept',
         !hidden.some(l => /ops x|確認/i.test(l)) && hidden.some(l => l.includes('▓▒░ ••••• 要•• ✅ é ░▒▓')) &&
-        !hidden.some(l => /GRID \d|EVENT LOG/.test(l)) && hidden[2].includes('[□ GRID] g   [□ EVENTS] e   [▣ ABC-XYZ] n') &&
+        !hidden.some(l => /GRID \d|EVENT LOG/.test(l)) && hidden[2].includes('[□ GRID] g   [□ EVENTS] e   [▣ ABC-XYZ] n   [□ COMPACT] v') &&
         JSON.parse(cellsOf || '[]').length === 30 && JSON.parse(cellsOf || '[]').every(n => n === 120),
         `${JSON.stringify(hidden[2]?.trim())} ${JSON.stringify(hidden.find(l => l.includes('要'))?.trim())} ${cellsOf.trim().slice(0, 80)}`)
       check('ops: the toolbar is a row of buttons, each a click on its own cells',
-        JSON.stringify(toolbar) === JSON.stringify([{ kind: 'toggle', what: 'grid', cols: [3, 10] }, { kind: 'toggle', what: 'events', cols: [16, 25] }, { kind: 'toggle', what: 'names', cols: [31, 41] }]),
+        JSON.stringify(toolbar) === JSON.stringify([{ kind: 'toggle', what: 'grid', cols: [3, 10] }, { kind: 'toggle', what: 'events', cols: [16, 25] }, { kind: 'toggle', what: 'names', cols: [31, 41] }, { kind: 'toggle', what: 'view', cols: [47, 57] }]),
         JSON.stringify(toolbar))
       writeFileSync(join(kept, 'names.json'), JSON.stringify({ names: ['ops x', '確認'], hidden: false }))
       const shown = framed('--plain')
@@ -1361,6 +1439,116 @@ except ChildProcessError: pass
       check('ops, live: names turned on another screen are followed within a second; a half-written file leaves them hidden',
         whileShown.includes('Ops X') && !whileHidden.includes('Ops X') && whileHidden.includes('•••••') && !halfWritten.includes('Ops X') && halfWritten.includes('•••••'),
         `${whileShown.includes('Ops X')} ${whileHidden.includes('Ops X')} ${halfWritten.includes('Ops X')}`)
+    }
+    // the compact view (the default): each workspace a tile, as many a row as the window holds, each the same size;
+    // a click on a tile shows its details over the screen, on its 📁 opens its window; an agent at background work
+    // (its turn over, work it started still running) is at work, its work listed in full; v turns the view, kept
+    {
+      const compactHome = join(scratch, 'compact-home')
+      mkdirSync(prefsDir(compactHome), { recursive: true })
+      const compactFile = join(scratch, 'compact.json')
+      const claudeIn = { pid: 990, sessionId: 's-990', jobId: '', name: 'C', cwd: scratch, startCwd: scratch, status: 'shell', kind: 'interactive', profile: 'claude', tty: 'ttys990', isForeground: true, since: now - 3 * 3_600_000, context: { tokens: 208000 },
+        tasks: [{ kind: 'monitor', id: 'b1', since: now - 240_000, what: 'Wait for CI on PR 8' }, { kind: 'shell', id: 'b2', since: now - 60_000, what: '' }] }
+      writeFileSync(compactFile, snapshot({ claude: [claudeIn] }))
+      const compactEnv = { ...env, HOME: compactHome, LIVE_SESSIONS_SNAPSHOT: compactFile, NOW: String(now) }
+      const show = (extra = {}, args = ['--plain']) => spawnSync(process.execPath, ['--no-warnings', opsFile, '--frame', ...args], { encoding: 'utf8', env: { ...compactEnv, COLS: '120', ROWS: '30', ...extra } }).stdout
+      const tiles = show().split('\n')
+      const tileTargets = JSON.parse(show({}, ['--targets']))
+      const cellsOfLines = text => JSON.parse(spawnSync('python3', ['-c', [
+        'import sys, unicodedata, re, json',
+        'def w(s):',
+        '    s = re.sub(r"\\x1b\\[[0-9;?]*[A-Za-z]", "", s)',
+        '    return sum(0 if unicodedata.category(c) in ("Mn", "Me", "Cf") else 2 if unicodedata.east_asian_width(c) in ("W", "F") else 1 for c in s)',
+        'print(json.dumps([w(l) for l in sys.stdin.read().rstrip("\\n").split("\\n")]))',
+      ].join('\n')], { input: text, encoding: 'utf8' }).stdout || '[]')
+      // a cell's screen column (from 1) where a text starts in a row, wide characters counted as two
+      const columnOf = (row, text) => cellsOfLines(row.slice(0, row.indexOf(text)))[0] + 1
+      const first = tiles.findIndex(l => l.includes('╭─ Ops X'))
+      const relayRow = tiles[first + 3] ?? ''
+      check('ops, compact: each workspace a tile, three a row at 120 columns, each 38 cells, the frame its size, wide names too',
+        tiles[2].includes('[▣ COMPACT] v') && first > 0 && (tiles[first].match(/╭─/g) ?? []).length === 3 && (tiles[first + 5].match(/╭─/g) ?? []).length === 1 &&
+        cellsOfLines(tiles[first].slice(tiles[first].indexOf('╭'), tiles[first].indexOf('╮') + 1))[0] === 38 &&
+        cellsOfLines(show({}, [])).every(n => n === 120) && cellsOfLines(show({ MODAL: 'opsx' }, [])).every(n => n === 120) && !tiles.some(l => /\|O\|/.test(l)),
+        JSON.stringify(tiles.slice(first, first + 5).map(l => l.trim().slice(0, 60))))
+      check('ops, compact: an agent at background work is at work in its tile (never idle or done), its context beside it',
+        /╭─ Ops X 要確認 ✅ é ─+ ◐ ─╮/.test(tiles[first]) && /│ ◐ CLAUDE background +208k │/.test(tiles[first + 1]) && /│ · CODEX +offline +│/.test(tiles[first + 2]) &&
+        /│ ⇄ off +\[📁\] \[»\] │/.test(relayRow) && tiles[1].includes('BACKGROUND 1') && !tiles.some(l => /done \d/.test(l)),
+        JSON.stringify(tiles.slice(first, first + 4).map(l => l.slice(0, 44))))
+      // a click on the tile's 📁 opens it; anywhere else on it shows its details; a forged id is no tile to press
+      const folderAt = columnOf(relayRow, '[📁]')
+      const tileAt = columnOf(tiles[first], '╭─ Ops X')
+      check('ops, compact: a click on a tile\'s 📁 opens its window, anywhere else on it its details; a forged workspace\'s tile presses nothing',
+        JSON.stringify(tileTargets[first + 3]?.slice(0, 2)) === JSON.stringify([{ kind: 'workspace', id: 'opsx', cols: [folderAt, folderAt + 3] }, { kind: 'details', id: 'opsx', cols: [tileAt, tileAt + 37] }]) &&
+        [0, 1, 2, 4].every(k => JSON.stringify(tileTargets[first + k]?.[0]) === JSON.stringify({ kind: 'details', id: 'opsx', cols: [tileAt, tileAt + 37] })) &&
+        !JSON.stringify(tileTargets).includes('../..'),
+        `${folderAt} ${tileAt} ${JSON.stringify(tileTargets[first + 3])}`)
+      // its details: over the screen, the rest dimmed, all the detailed view says of it, its background work listed;
+      // its buttons open its window and close them, a click anywhere else closes them
+      const modalLines = show({ MODAL: 'opsx' }).split('\n')
+      const modalColored = show({ MODAL: 'opsx' }, []).split('\n')
+      const modalTargets = JSON.parse(show({ MODAL: 'opsx' }, ['--targets']))
+      const buttonsRow = modalLines.findIndex(l => l.includes('[📁 open window]'))
+      const openAt = columnOf(modalLines[buttonsRow] ?? '', '[📁 open window]')
+      const closeAt = columnOf(modalLines[buttonsRow] ?? '', '[✕ close]')
+      const dim = `\x1b[38;2;${[1, 3, 5].map(k => parseInt('#0a4a22'.slice(k, k + 2), 16)).join(';')}m`
+      check('ops, compact: a workspace\'s details over the screen: what the detailed view says, its background work listed, the rest dimmed',
+        modalLines.some(l => l.includes('◐ BACKGROUND  ▓▒░ Ops X 要確認 ✅ é ░▒▓')) && modalLines.some(l => /\[CLAUDE\] ◐ background +context 208k/.test(l)) &&
+        modalLines.some(l => l.includes('↳ monitor  Wait for CI on PR 8 · 4m')) && modalLines.some(l => l.includes('↳ shell · 1m')) &&
+        modalLines.some(l => l.includes('[✕ close]')) && modalLines.filter(l => l !== '').at(-1).includes('esc closes') && modalColored[first].startsWith(`\x1b[48;2;2;10;5m${dim}`),
+        JSON.stringify(modalLines.filter(l => l.includes('║ ') && /BACKGROUND|↳|open window/.test(l)).map(l => l.trim().slice(0, 100))))
+      check('ops, compact: its details\' buttons open its window and close them; a click anywhere else closes them',
+        buttonsRow > 0 && JSON.stringify(modalTargets[buttonsRow].slice(0, 2)) === JSON.stringify([{ kind: 'workspace', id: 'opsx', cols: [openAt, openAt + 15] }, { kind: 'close', cols: [closeAt, closeAt + 8] }]) &&
+        JSON.stringify(modalTargets[buttonsRow].at(-1)) === JSON.stringify({ kind: 'close' }) && JSON.stringify(modalTargets[2]) === JSON.stringify({ kind: 'close' }) &&
+        modalTargets.filter(t => Array.isArray(t)).every(t => t.some(x => x.kind === 'none')),
+        JSON.stringify(modalTargets[buttonsRow]))
+      // names listed: out of sight in the tiles and the details too
+      writeFileSync(join(prefsDir(compactHome), 'names.json'), JSON.stringify({ names: ['ops x', '確認'] }))
+      const masked = [show(), show({ MODAL: 'opsx' })].join('\n')
+      check('ops, compact: listed names are out of sight in the tiles and in a workspace\'s details',
+        !/ops[\s._/-]*x|確認/i.test(masked) && masked.includes('╭─ ••••• 要•• ✅ é') && masked.includes('▓▒░ ••••• 要•• ✅ é ░▒▓'),
+        JSON.stringify(masked.split('\n').filter(l => l.includes('要')).map(l => l.trim().slice(0, 60))))
+      rmSync(join(prefsDir(compactHome), 'names.json'))
+      // the detailed view: the agent at background work there too, its work under it, no `done … ago`
+      writeFileSync(join(prefsDir(compactHome), 'ops.json'), JSON.stringify({ view: 'detailed' }))
+      const detailed = show({ ROWS: '40' }).split('\n')
+      const node = detailed.findIndex(l => l.includes('▓▒░ Ops X'))
+      check('ops, detailed: an agent at background work says so, its work under it; its workspace is at work, never done',
+        /\|O\| ◐ BACKGROUND  ▓▒░ Ops X 要確認 ✅ é ░▒▓/.test(detailed[node]) && /\[CLAUDE\] ◐ background +context 208k/.test(detailed[node + 1]) &&
+        detailed[node + 2].includes('↳ monitor  Wait for CI on PR 8 · 4m') && detailed[node + 3].includes('↳ shell · 1m') && !detailed[node].includes('done'),
+        JSON.stringify(detailed.slice(node, node + 4).map(l => l.trim().slice(0, 80))))
+      rmSync(join(prefsDir(compactHome), 'ops.json'))
+      // live: a click on a tile shows its details, esc closes them; one on its 📁 opens its window; v shows each in full,
+      // kept; an agent whose turn ended with background work still running is logged BG WORK, not IDLE
+      const workingIn = { ...claudeIn, status: 'busy', since: now - 5_000, tasks: undefined }
+      writeFileSync(compactFile, snapshot({ claude: [workingIn] }))
+      const tileRow = rowOfIn => rowOfIn + 1
+      // (osascript stood in for as above, recording what it is asked apart from the checks after)
+      const askedHere = join(scratch, 'osascript-compact.log')
+      const stubHere = join(scratch, 'osascript-compact')
+      writeFileSync(stubHere, readFileSync(stub, 'utf8').replaceAll(asked, askedHere))
+      execFileSync('/bin/chmod', ['+x', stubHere])
+      const pressed = bare(live([
+        `os.write(fd, b"\\x1b[<0;${tileAt + 5};${tileRow(first + 1)}M\\x1b[<0;${tileAt + 5};${tileRow(first + 1)}m")`, 'drain(1.0)', 'out += b"<<DETAILS>>"',
+        'os.write(fd, b"\\x1b")', 'drain(1.0)', 'out += b"<<CLOSED>>"',
+        `os.write(fd, b"\\x1b[<0;${folderAt};${tileRow(first + 3)}M\\x1b[<0;${folderAt};${tileRow(first + 3)}m")`, 'drain(1.0)', 'out += b"<<OPENED>>"',
+        `open(${JSON.stringify(compactFile)}, "w").write(${JSON.stringify(snapshot({ claude: [claudeIn] }))})`, 'drain(1.5)', 'out += b"<<BACKGROUND>>"',
+        'os.write(fd, b"v")', 'drain(1.0)',
+      ].join('\n'), { HOME: compactHome, LIVE_SESSIONS_SNAPSHOT: compactFile, LIVE_SESSIONS_OSASCRIPT: stubHere, NOW: '' }))
+      const lastFrame = (text, end) => {
+        const drawn = text.slice(0, end)
+        const close = drawn.lastIndexOf('╚')
+        return drawn.slice(drawn.lastIndexOf('LIVE//SESSIONS', close), close + 1)
+      }
+      const opensAfter = existsSync(askedHere) ? readFileSync(askedHere, 'utf8').trim().split('\n').filter(Boolean) : []
+      const keptView = JSON.parse(readFileSync(join(prefsDir(compactHome), 'ops.json'), 'utf8')).view
+      check('ops, compact, live: a click on a tile shows its details and esc closes them; its 📁 opens its window; v shows each in full, kept',
+        lastFrame(pressed, pressed.indexOf('<<DETAILS>>')).includes('[📁 open window]') && !lastFrame(pressed, pressed.indexOf('<<CLOSED>>')).includes('[📁 open window]') &&
+        opensAfter.length === 1 && opensAfter[0].startsWith(`OPEN tmux -L '${socket}' -f /dev/null attach -t '=ws-opsx'`) &&
+        lastFrame(pressed, pressed.length).includes('|O|') && lastFrame(pressed, pressed.length).includes('[□ COMPACT] v') && keptView === 'detailed',
+        `${lastFrame(pressed, pressed.indexOf('<<DETAILS>>')).includes('[📁 open window]')} ${lastFrame(pressed, pressed.indexOf('<<CLOSED>>')).includes('[📁 open window]')} ${JSON.stringify(opensAfter)} ${keptView}`)
+      check('ops, live: an agent whose turn ends with background work still running is logged BG WORK, never IDLE',
+        /BG WORK CLAUDE/.test(lastFrame(pressed, pressed.length)) && !/IDLE +CLAUDE/.test(lastFrame(pressed, pressed.length)),
+        JSON.stringify(lastFrame(pressed, pressed.length).split('\n').filter(l => /WORK|IDLE/.test(l)).map(l => l.trim().slice(0, 60))))
     }
     // a click on an agent's row (not its button) does nothing; one on the OPEN button opens the workspace's window, as
     // /sessions places one (60% of the screen, a little smaller than its font), its panes as they were; a stopped
