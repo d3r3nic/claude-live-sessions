@@ -7,6 +7,7 @@ import type { Limit, UsageState } from './usage'
 import { AGENT_COMMANDS, afterOwner, afterStep, claudeKeep, COMPACT_FROM, cueOf, cutBytes, eventOf, EVENT_SCRIPT, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, tokensSaid, TURN_SCRIPT } from './relay'
 import type { RelayEvent, Side, Step } from './relay'
 import { branchOf, checkDue, DRIFT_EVERY, driftRequest, isDueAfterCompaction, parseVerdict, recordFolderOf, RECORDS_SCRIPT } from './drift'
+import { hiddenNames, hideInTree, hideNames, hidingFrom, namesPath, NO_HIDING, turned } from './names'
 import { bringable, codexDir, envOfProfile, codexFlags, CODEX_MODE_SCRIPT, CODEX_TASK_SCRIPT, codexTaskState, JOB_COMMANDS, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, toggled, withThreads } from './bring'
 import {
   agentsOf,
@@ -187,6 +188,8 @@ const ledgerPath = (home: string) => `${home}/Library/Application Support/live-s
 
 /** The person's own order of repositories, worktrees and sessions; kept in `$.store` as `order`. */
 const manualOrder = atom({ plugin: 'live-sessions', key: 'order' } as const, {} as Record<string, string[]>)
+/** The names kept off the screens, and their switch (ABC-XYZ), as the shared file last said. */
+const hiding = atom({ plugin: 'live-sessions', key: 'hiding' } as const, NO_HIDING)
 
 /** Registry files already parsed, by path, kept while their mtime holds. */
 const registry = new Map<string, { mtimeMs: number; raw: unknown }>()
@@ -583,6 +586,63 @@ async function toggleAccounts($: EngineInterface) {
   $.ui.status(await summaryShown($, (await $.env.get('HOME')) ?? '', await read($, snapshot)))
 }
 
+/** A toast, the hidden names out of sight in it. */
+async function toast($: EngineInterface, text: string, options?: { timeoutMs?: number }) {
+  const shown = hideNames(text, hiddenNames(await read($, hiding)))
+  if (options === undefined) $.ui.toast(shown)
+  else $.ui.toast(shown, options)
+}
+
+/** A notification's text, the hidden names out of sight in it as the shared file says now (any session may send it). */
+async function told($: EngineInterface, text: string) {
+  await readHiding($).catch(() => undefined)
+  return hideNames(text, hiddenNames(await read($, hiding)))
+}
+
+/**
+ * The names and their switch as the shared file says now (another screen may have turned it). A file gone hides
+ * nothing; one that cannot be read or is half written leaves them as they were, never shown by mistake.
+ */
+async function readHiding($: EngineInterface) {
+  const path = namesPath((await $.env.get('HOME')) ?? '')
+  let now = NO_HIDING
+  if (await $.fs.exists(path)) {
+    const raw = await readJson($, path)
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return
+    now = hidingFrom(raw)
+  }
+  const before = await read($, hiding)
+  if (before.isHidden !== now.isHidden || before.names.join('\n') !== now.names.join('\n')) await update($, hiding, () => now)
+}
+
+/** ABC-XYZ: the listed names hidden on every screen, or shown again; with none listed yet, says where they go. */
+async function toggleHiding($: EngineInterface) {
+  const path = namesPath((await $.env.get('HOME')) ?? '')
+  const text = await $.fs.read(path).catch(() => undefined)
+  let raw: unknown
+  if (text !== undefined) {
+    try {
+      raw = JSON.parse(text)
+    } catch {
+      raw = undefined
+    }
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+      await toast($, `Not turned: ${path} is not a list of names; fix it (as {"names": ["…"]}) or move it away.`, { timeoutMs: 15_000 })
+      return
+    }
+  }
+  const written = turned(raw, !(text !== undefined && hidingFrom(raw).isHidden))
+  try {
+    await $.fs.write(path, written)
+  } catch (error) {
+    await toast($, `Not turned: ${path} cannot be written (${message(error)}).`, { timeoutMs: 15_000 })
+    return
+  }
+  const now = hidingFrom(JSON.parse(written))
+  await update($, hiding, () => now)
+  if (now.isHidden && now.names.length === 0) await toast($, `No names to hide yet: list them in ${path}, as {"names": ["…"]}.`, { timeoutMs: 15_000 })
+}
+
 async function setWindow($: EngineInterface, ms: number) {
   await update($, activeWindow, () => ms)
   await $.store.set('windowMs', ms)
@@ -638,7 +698,7 @@ async function prepareWhenMade($: EngineInterface, home: string, ws: Workspace) 
 async function hideWorkspace($: EngineInterface, ws: Workspace) {
   const home = (await $.env.get('HOME')) ?? ''
   if (!(await isOwnSession($, ws))) {
-    $.ui.toast(`Not hidden: tmux session ${tmuxName(ws)} was not started for ${ws.name}.`)
+    await toast($, `Not hidden: tmux session ${tmuxName(ws)} was not started for ${ws.name}.`)
     return
   }
   await $.fs.write(hidePath(home), HIDE_SCRIPT)
@@ -649,7 +709,7 @@ async function hideWorkspace($: EngineInterface, ws: Workspace) {
   for (const tty of ttys) {
     await $.process.run(['/bin/sh', hidePath(home), `/dev/${tty}`], { timeoutMs: 15_000 }).catch(() => undefined)
   }
-  $.ui.toast(ttys.length === 0 ? `${ws.name} has no window open.` : `${ws.name} hidden: its agents keep running; Open brings it back.`)
+  await toast($, ttys.length === 0 ? `${ws.name} has no window open.` : `${ws.name} hidden: its agents keep running; Open brings it back.`)
   await refresh($, 0)
 }
 
@@ -768,7 +828,7 @@ async function openOps($: EngineInterface) {
   const place = seen === undefined ? undefined : { ...seen.screens[0]!, fontSize: seen.fontSize }
   const command = `node --no-warnings ${shellQuote(file)} --account ${shellQuote(account)}`
   const opened = await osascript(OPEN_SCRIPT, command, ...(place === undefined ? [] : [JSON.stringify(place)]))
-  if (opened.stdout.trim() !== 'opened') $.ui.toast(`The ops screen did not open (${firstLine(opened.stderr) || `exit ${opened.exitCode}`}). Run: ${command}`, { timeoutMs: 15_000 })
+  if (opened.stdout.trim() !== 'opened') await toast($, `The ops screen did not open (${firstLine(opened.stderr) || `exit ${opened.exitCode}`}). Run: ${command}`, { timeoutMs: 15_000 })
 }
 
 /** This person's processes that have a terminal (`ps` with neither -a nor -x); none when `ps` cannot be run. */
@@ -792,12 +852,12 @@ async function openSession($: EngineInterface, target: NonNullable<Item['target'
     const ws = (await read($, snapshot)).workspaces.find(w => tmuxName(w) === target.workspace)
     if (ws === undefined) return
     const result = await openWorkspace($, ws, target)
-    if (!result.isOpen) $.ui.toast(result.text, { timeoutMs: 20_000 })
+    if (!result.isOpen) await toast($, result.text, { timeoutMs: 20_000 })
     return
   }
   if ('tty' in target) {
     const out = await osascript(FOCUS_SCRIPT, target.tty)
-    if (out.stdout.trim() !== 'shown') $.ui.toast(`No Terminal tab runs on ${target.tty}.`)
+    if (out.stdout.trim() !== 'shown') await toast($, `No Terminal tab runs on ${target.tty}.`)
     return
   }
   // a tab showing it already: brought to the front, never a second window
@@ -832,14 +892,14 @@ const moving = new Set<number>()
  */
 async function moveToBackground($: EngineInterface, move: NonNullable<Item['move']>) {
   if (moving.has(move.pid)) {
-    $.ui.toast('That session is already being moved.')
+    await toast($, 'That session is already being moved.')
     return
   }
   moving.add(move.pid)
   try {
     await moveChecked($, move)
   } catch (error) {
-    $.ui.toast(`The move stopped: ${message(error)}`)
+    await toast($, `The move stopped: ${message(error)}`)
   } finally {
     moving.delete(move.pid)
   }
@@ -847,7 +907,7 @@ async function moveToBackground($: EngineInterface, move: NonNullable<Item['move
 
 async function moveChecked($: EngineInterface, move: NonNullable<Item['move']>) {
   const home = (await $.env.get('HOME')) ?? ''
-  const refuse = (why: string) => $.ui.toast(`Not moved: ${why}.`)
+  const refuse = async (why: string) => toast($, `Not moved: ${why}.`)
   const raw = await $.fs
     .read(`${home}/.${move.profile}/sessions/${move.pid}.json`)
     .then(text => JSON.parse(text) as unknown)
@@ -886,7 +946,7 @@ async function moveChecked($: EngineInterface, move: NonNullable<Item['move']>) 
   const out = await $.process
     .run(['/bin/sh', '-c', MOVE_SCRIPT, 'sh', String(move.pid), proc.tty, command, TYPE_SCRIPT], { timeoutMs: 40_000 })
     .catch((error: unknown) => ({ exitCode: -1, stdout: '', stderr: message(error) }))
-  $.ui.toast(
+  await toast($,
     out.exitCode === 0 && out.stdout.trim() === 'typed'
       ? `Moving to the background in ${proc.tty}: closing that tab now leaves it running.`
       : out.exitCode === 3
@@ -1149,7 +1209,7 @@ async function submitDraft($: EngineInterface) {
   })
   if (made.isCreated) {
     await update($, draft, () => NO_DRAFT)
-    $.ui.toast(made.text, { timeoutMs: 15_000 })
+    await toast($, made.text, { timeoutMs: 15_000 })
   } else {
     await update($, draft, now => ({ ...now, error: made.text }))
   }
@@ -1237,8 +1297,8 @@ async function cycleCheckEvery($: EngineInterface, id: string) {
 
 async function checkNow($: EngineInterface, id: string) {
   const home = (await $.env.get('HOME')) ?? ''
-  $.ui.toast('Checking the workspace: it takes a minute or so.', { timeoutMs: 8_000 })
-  $.ui.toast(await checkDrift($, home, id).catch((error: unknown) => `The check could not be done: ${message(error)}`), { timeoutMs: 15_000 })
+  await toast($, 'Checking the workspace: it takes a minute or so.', { timeoutMs: 8_000 })
+  await toast($, await checkDrift($, home, id).catch((error: unknown) => `The check could not be done: ${message(error)}`), { timeoutMs: 15_000 })
 }
 
 /** The account this session runs under: '' for the default one, the name of a `~/.claude-<name>` one; undefined if neither. */
@@ -1321,7 +1381,7 @@ async function checkDrift($: EngineInterface, home: string, id: string, isAfterC
     await logEvent($, home, { kind: verdict.status === 'on-track' ? 'check' : 'drift', text: said, workspace: id })
     if (verdict.status !== 'on-track') {
       await $.process
-        .run(['/bin/sh', '-c', RELAY_SCRIPT, 'sh', 'tell', ledgerPath(home), `drift-${id}-${now}`, '', '', `The agents may need your help. ${said}`, '', 'Workspace check'], { timeoutMs: 20_000 })
+        .run(['/bin/sh', '-c', RELAY_SCRIPT, 'sh', 'tell', ledgerPath(home), `drift-${id}-${now}`, '', '', await told($, `The agents may need your help. ${said}`), '', 'Workspace check'], { timeoutMs: 20_000 })
         .catch(() => undefined)
     }
     await refresh($, 0)
@@ -1418,7 +1478,8 @@ async function passCues(
       ws = fresh
     }
     const run = async (step: Step) => {
-      const args = step.kind === 'tell' ? ['tell', '', '', step.text] : ['pass', step.pane, AGENT_COMMANDS[step.to], step.line]
+      // what is told to the owner hides the names; a hand-off typed to an agent is as it was written
+      const args = step.kind === 'tell' ? ['tell', '', '', await told($, step.text)] : ['pass', step.pane, AGENT_COMMANDS[step.to], step.line]
       const out = await $.process
         .run(['/bin/sh', '-c', RELAY_SCRIPT, 'sh', args[0]!, ledgerPath(home), step.key, args[1]!, args[2]!, args[3]!, '', 'Workspace relay'], { timeoutMs: 20_000 })
         .catch(() => ({ stdout: 'failed' }))
@@ -1442,7 +1503,7 @@ async function passCues(
       const why = step.kind === 'pass' ? passFailure(outcome) : undefined
       if (step.kind === 'pass' && why !== undefined) {
         await $.process
-          .run(['/bin/sh', '-c', RELAY_SCRIPT, 'sh', 'tell', ledgerPath(home), `failed-${step.key}`, '', '', `${ws.name}: the relay did not pass the hand-off to ${step.to === 'claude' ? 'Claude' : 'Codex'}: ${why}. Paste: ${step.line}`, '', 'Workspace relay'], { timeoutMs: 20_000 })
+          .run(['/bin/sh', '-c', RELAY_SCRIPT, 'sh', 'tell', ledgerPath(home), `failed-${step.key}`, '', '', await told($, `${ws.name}: the relay did not pass the hand-off to ${step.to === 'claude' ? 'Claude' : 'Codex'}: ${why}. Paste: ${step.line}`), '', 'Workspace relay'], { timeoutMs: 20_000 })
           .catch(() => undefined)
       }
     }
@@ -1536,7 +1597,7 @@ async function assignTo($: EngineInterface, member: string, id: string) {
   const home = (await $.env.get('HOME')) ?? ''
   const isSaved = await changeWorkspaces($, home, list => assigned(list, member, id))
   await update($, assigning, () => ({ key: '', member: '' }))
-  if (!isSaved) $.ui.toast(`Not assigned: ${UNREADABLE}.`)
+  if (!isSaved) await toast($, `Not assigned: ${UNREADABLE}.`)
   await refresh($, 0)
 }
 
@@ -1549,7 +1610,7 @@ async function openWorkspaceById($: EngineInterface, id: string) {
   const ws = (await read($, snapshot)).workspaces.find(w => w.id === id)
   if (ws === undefined) return
   const result = await openWorkspace($, ws)
-  if (!result.isOpen) $.ui.toast(result.text, { timeoutMs: 20_000 })
+  if (!result.isOpen) await toast($, result.text, { timeoutMs: 20_000 })
 }
 
 async function resetOrder($: EngineInterface) {
@@ -1567,6 +1628,8 @@ async function tick($: EngineInterface, hasStatusLine: boolean) {
   // this account's Claude limits, for every account's panes; the usage, while a pane shows it
   void shareLimits($).catch(() => undefined)
   if (isVisible) void refreshUsage($).catch(() => undefined)
+  // the names' switch, as another screen may have turned it
+  if (isVisible) await readHiding($).catch(() => undefined)
   const maxAgeMs = isVisible ? VISIBLE_MAX_AGE_MS : IDLE_MAX_AGE_MS
   if ((await $.clock.now()) - lastAttemptAt < maxAgeMs) return
   await refresh($, maxAgeMs)
@@ -1781,6 +1844,7 @@ export const register: Register = on => {
     if (keptWindow === '5h' || keptWindow === '7d') await update($, usageWindow, () => keptWindow)
     const keptOrder = orderFrom(await $.store.get('order'))
     if (keptOrder !== undefined) await update($, manualOrder, () => keptOrder)
+    await readHiding($).catch(() => undefined)
     // a status line only where a person sees one; a pane wherever one is opened
     const hasStatusLine = e.isInteractive
     // a pane left open across a reload is painted without being reopened
@@ -1851,6 +1915,7 @@ export const register: Register = on => {
     }
     await refresh($, VISIBLE_MAX_AGE_MS)
     await learnBackground($)
+    await readHiding($).catch(() => undefined)
     const opened = await $.ui.open({ id: PANE, title: TITLE })
     // its limits (and usage) read as it opens, not at the next tick
     void refreshUsage($).catch(() => undefined)
@@ -1871,6 +1936,9 @@ export const register: Register = on => {
     const now = await $.clock.now()
     const selfId = await $.session.id()
     const paint = (await read($, background)) || undefined
+    // the names kept off the screens, while ABC-XYZ hides them: out of every text drawn, a row's title before it is cut
+    const isHiding = (await read($, hiding)).isHidden
+    const names = hiddenNames(await read($, hiding))
     const width = e.props.bodyColumns
     const height = e.props.scroll.bodyRows
     const hasWhere = width >= 64
@@ -1912,7 +1980,7 @@ export const register: Register = on => {
       if (asked.key === `rm:${id}` && at - asked.at < CONFIRM_MS) {
         await update($, pendingMove, () => ({ key: '', at: 0 }))
         const ws = (await read($, snapshot)).workspaces.find(w => w.id === id)
-        if (ws !== undefined) $.ui.toast(await removeWorkspace($, ws), { timeoutMs: 15_000 })
+        if (ws !== undefined) await toast($, await removeWorkspace($, ws), { timeoutMs: 15_000 })
         await update($, selected, () => '')
       } else {
         await update($, pendingMove, () => ({ key: `rm:${id}`, at }))
@@ -1963,7 +2031,7 @@ export const register: Register = on => {
       const isIdle = i.state === 'idle'
       const color = isWorking ? 'warning' : isIdle ? undefined : 'permission'
       const tool = TOOL_COLOR[i.tool]
-      const title = i.tags.length > 0 ? `${i.title} (${i.tags.join(', ')})` : i.title
+      const title = hideNames(i.tags.length > 0 ? `${i.title} (${i.tags.join(', ')})` : i.title, names)
       const target = canOpen ? i.target : undefined
       return (
         <Box key={i.key} flexDirection="row" width={w} {...(isIdle ? { backgroundColor: IDLE_BACKGROUND } : {})}>
@@ -2049,10 +2117,11 @@ export const register: Register = on => {
       <Text color="error" wrap="truncate-end">{`! ${p}`}</Text>
     ))
     if (snap.checkedAt === 0) {
-      return (
+      return hideInTree(
         <Box flexDirection="column" width={width} minHeight={height} backgroundColor={paint}>
           {problems.length === 0 ? <Text dimColor>Looking for sessions…</Text> : problems}
-        </Box>
+        </Box>,
+        names,
       )
     }
 
@@ -2117,7 +2186,7 @@ export const register: Register = on => {
         : []),
     ]
     const hidden = view.total - view.shown
-    return (
+    return hideInTree(
       <Box flexDirection="column" width={width} minHeight={height} backgroundColor={paint}>
         <Box flexDirection="row" width={width}>
           <Text bold>{`${snap.claude.length} Claude · ${snap.codex.length} Codex`}</Text>
@@ -2146,6 +2215,7 @@ export const register: Register = on => {
           {Object.keys(order).length > 0 && (
             <Button key="reset-order" label="reset order" onPress={() => void resetOrder($)} />
           )}
+          <Button key="names" label="ABC-XYZ" {...(isHiding ? { variant: 'primary' as const } : {})} onPress={() => void toggleHiding($)} />
         </Box>
         <Box key="limits" flexDirection="row" width={width} columnGap={1}>
           <Button key="usage" label={isUsageShown ? 'hide usage' : 'usage by project'} {...(isUsageShown ? { variant: 'primary' as const } : {})} onPress={() => void toggleUsage($)} />
@@ -2376,7 +2446,8 @@ export const register: Register = on => {
             {`checked ${ago(now - snap.checkedAt)} ago${hidden > 0 ? ` · ${hidden} idle longer, hidden` : ''} · [ more ] shows a row's actions; a key in ( ) presses one once this pane has the keys (ctrl+x tab) · /sessions hides`}
           </Text>
         </Box>
-      </Box>
+      </Box>,
+      names,
     )
   })
 }

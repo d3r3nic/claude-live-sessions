@@ -1266,6 +1266,81 @@ except ChildProcessError: pass
     check('ops, live: another account\'s session events, seen while every account was shown, are gone when its own view comes back',
       during.includes('THEIRS TITLE') && back.includes('ACCOUNT default') && !back.includes('THEIRS TITLE'),
       `${during.includes('THEIRS TITLE')} ${back.includes('ACCOUNT default')} ${back.includes('THEIRS TITLE')}`)
+    // names kept off the screens (ABC-XYZ), and the grid and event log hidden or shown: as their files say, the names
+    // read where every screen reads them
+    {
+      const namesHome = join(scratch, 'names-home')
+      const kept = join(namesHome, 'Library', 'Application Support', 'live-sessions')
+      mkdirSync(kept, { recursive: true })
+      writeFileSync(join(kept, 'names.json'), JSON.stringify({ names: ['ops x', '確認'] }))
+      // the events: theirs, and one cut where a name is (the row has 96 cells for its text)
+      const namedEvents = join(namesHome, 'events.jsonl')
+      writeFileSync(namedEvents, `${readFileSync(events, 'utf8')}${JSON.stringify({ at: now - 5_000, kind: 'relay', text: `${'x'.repeat(93)}Ops X and more`, workspace: 'opsx' })}\n`)
+      const framed = (...extra) => spawnSync(process.execPath, ['--no-warnings', opsFile, '--frame', ...extra], { encoding: 'utf8', env: { ...env, HOME: namesHome, LIVE_SESSIONS_EVENTS: namedEvents, COLS: '120', ROWS: extra.includes('--tall') ? '60' : '30' } }).stdout
+      const everything = framed('--plain', '--tall').split('\n')
+      check('ops: listed names are out of sight in every part of the screen, the grid and the event log too; a row cut where one is shows none of it',
+        everything.some(l => l.includes('EVENT LOG')) && everything.some(l => /GRID \d/.test(l)) && everything.some(l => l.includes('READY FOR CLAUDE')) &&
+        !everything.some(l => /ops x|確認/i.test(l)) && everything.some(l => l.includes('••••• → Claude') || l.includes('•••••: Codex')) && everything.some(l => /x{93}••…/.test(l)) && !everything.some(l => /x{93}O/.test(l)),
+        JSON.stringify(everything.filter(l => /READY FOR|x{90}/.test(l)).map(l => l.trim().slice(0, 130))))
+      writeFileSync(join(kept, 'ops.json'), JSON.stringify({ theme: 'AMBER', grid: false, events: false }))
+      const hidden = framed('--plain').split('\n')
+      const cellsOf = spawnSync('python3', ['-c', [
+        'import sys, unicodedata, re, json',
+        'def w(s):',
+        '    s = re.sub(r"\\x1b\\[[0-9;?]*[A-Za-z]", "", s)',
+        '    return sum(0 if unicodedata.category(c) in ("Mn", "Me", "Cf") else 2 if unicodedata.east_asian_width(c) in ("W", "F") else 1 for c in s)',
+        'print(json.dumps([w(l) for l in sys.stdin.read().rstrip("\\n").split("\\n")]))',
+      ].join('\n')], { input: framed(), encoding: 'utf8' }).stdout
+      const toolbar = JSON.parse(framed('--targets'))[2]
+      check('ops: listed names are out of sight, a dot a character, wide ones too, the frame its size; the grid and event log hidden as kept',
+        !hidden.some(l => /ops x|確認/i.test(l)) && hidden.some(l => l.includes('▓▒░ ••••• 要•• ✅ é ░▒▓')) &&
+        !hidden.some(l => /GRID \d|EVENT LOG/.test(l)) && hidden[2].includes('[□ GRID] g   [□ EVENTS] e   [▣ ABC-XYZ] n') &&
+        JSON.parse(cellsOf || '[]').length === 30 && JSON.parse(cellsOf || '[]').every(n => n === 120),
+        `${JSON.stringify(hidden[2]?.trim())} ${JSON.stringify(hidden.find(l => l.includes('要'))?.trim())} ${cellsOf.trim().slice(0, 80)}`)
+      check('ops: the toolbar is a row of buttons, each a click on its own cells',
+        JSON.stringify(toolbar) === JSON.stringify([{ kind: 'toggle', what: 'grid', cols: [3, 10] }, { kind: 'toggle', what: 'events', cols: [16, 25] }, { kind: 'toggle', what: 'names', cols: [31, 41] }]),
+        JSON.stringify(toolbar))
+      writeFileSync(join(kept, 'names.json'), JSON.stringify({ names: ['ops x', '確認'], hidden: false }))
+      const shown = framed('--plain')
+      check('ops: with the names shown, they are as they are', shown.includes('Ops X 要確認') && shown.includes('[□ ABC-XYZ] n'), JSON.stringify(shown.split('\n')[2]?.trim()))
+      // live: a click on ABC-XYZ hides them and keeps it for every screen; g and e hide the grid and the event log and
+      // keep that; the names turned on another screen are followed within a second, a half-written file changing nothing
+      const liveHome = join(scratch, 'names-live')
+      const liveKept = join(liveHome, 'Library', 'Application Support', 'live-sessions')
+      mkdirSync(liveKept, { recursive: true })
+      const namesFile = join(liveKept, 'names.json')
+      writeFileSync(namesFile, JSON.stringify({ names: ['ops x'], hidden: false }))
+      const clicked = bare(live([
+        'os.write(fd, b"\\x1b[<0;35;3M\\x1b[<0;35;3m")', 'drain(1.5)', 'out += b"<<CLICKED>>"',
+        'os.write(fd, b"ge")', 'drain(1.5)',
+      ].join('\n'), { HOME: liveHome }))
+      // the last whole frame drawn before a point of the output (a frame read in part is left out)
+      const frameBefore = (text, end) => {
+        const drawn = text.slice(0, end)
+        const close = drawn.lastIndexOf('╚')
+        return drawn.slice(drawn.lastIndexOf('LIVE//SESSIONS', close), close)
+      }
+      const before = clicked.slice(0, clicked.indexOf('<<CLICKED>>'))
+      const after = frameBefore(clicked, clicked.length)
+      const keptNames = JSON.parse(readFileSync(namesFile, 'utf8'))
+      const keptPrefs = JSON.parse(readFileSync(join(liveKept, 'ops.json'), 'utf8'))
+      check('ops, live: ABC-XYZ clicked hides the names and keeps it for every screen; g and e hide the grid and the event log, kept',
+        before.includes('Ops X') && !after.includes('Ops X') && after.includes('•••••') && clicked.includes('names hidden') &&
+        JSON.stringify(keptNames) === JSON.stringify({ names: ['ops x'], hidden: true }) &&
+        keptPrefs.grid === false && keptPrefs.events === false && keptPrefs.theme === 'MATRIX' && !after.includes('EVENT LOG') && after.includes('[□ GRID] g'),
+        `${before.includes('Ops X')} ${after.includes('Ops X')} ${JSON.stringify(keptNames)} ${JSON.stringify(keptPrefs)}`)
+      const followed = bare(live([
+        `open(${JSON.stringify(namesFile)}, "w").write(${JSON.stringify(JSON.stringify({ names: ['ops x'], hidden: false }))})`, 'drain(2.0)', 'out += b"<<SHOWN>>"',
+        `open(${JSON.stringify(namesFile)}, "w").write(${JSON.stringify(JSON.stringify({ names: ['ops x'], hidden: true }))})`, 'drain(2.0)', 'out += b"<<HIDDEN>>"',
+        `open(${JSON.stringify(namesFile)}, "w").write('{"names": ["op')`, 'drain(2.0)',
+      ].join('\n'), { HOME: liveHome }))
+      const whileShown = frameBefore(followed, followed.indexOf('<<SHOWN>>'))
+      const whileHidden = frameBefore(followed, followed.indexOf('<<HIDDEN>>'))
+      const halfWritten = frameBefore(followed, followed.length)
+      check('ops, live: names turned on another screen are followed within a second; a half-written file leaves them hidden',
+        whileShown.includes('Ops X') && !whileHidden.includes('Ops X') && whileHidden.includes('•••••') && !halfWritten.includes('Ops X') && halfWritten.includes('•••••'),
+        `${whileShown.includes('Ops X')} ${whileHidden.includes('Ops X')} ${halfWritten.includes('Ops X')}`)
+    }
     // a click on an agent's row (not its button) does nothing; one on the OPEN button opens the workspace's window, as
     // /sessions places one (60% of the screen, a little smaller than its font), its panes as they were; a stopped
     // workspace's button: said, nothing done

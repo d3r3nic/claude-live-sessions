@@ -211,6 +211,8 @@ declare module 'claude-code' {
       usageWindow: '5h' | '7d'
       /** The limits and the usage by project, as last read. */
       usage: UsageView
+      /** The names kept off the screens, and whether they are hidden now, as the shared file last said. */
+      hiding: { names: string[]; isHidden: boolean }
     }
   }
 }

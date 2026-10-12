@@ -1,9 +1,10 @@
 // The live-sessions ops screen: a full-screen console of the workspaces, their agents and what the relay does,
 // drawn from the snapshot every Claude Code session with this plugin keeps, and the relay's event log. A click on
 // a workspace's OPEN button, or on an event, opens what it is about: the workspace's window, or a session's tab.
-//   node ops/ops.mjs [--account <env>]     live, full screen, one account's or every one's (a accounts, t theme, q quit)
+//   node ops/ops.mjs [--account <env>]     live, full screen, one account's or every one's (a accounts, t theme, g grid,
+//                                          e events, n names hidden or shown, q quit)
 //   node ops/ops.mjs --frame [--plain]     one frame, printed (COLS, ROWS, TICK); --targets prints what each row opens
-import { accessSync, constants, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync, writeSync } from 'node:fs'
+import { accessSync, constants, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync, writeSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import * as nodeModule from 'node:module'
 import { fileURLToPath } from 'node:url'
@@ -31,11 +32,12 @@ nodeModule.registerHooks({
     }
   },
 })
-let c, w, r
+let c, w, r, nm
 try {
   c = await import(new URL('../hooks/collect.ts', import.meta.url).href)
   w = await import(new URL('../hooks/workspaces.ts', import.meta.url).href)
   r = await import(new URL('../hooks/relay.ts', import.meta.url).href)
+  nm = await import(new URL('../hooks/names.ts', import.meta.url).href)
 } catch (error) {
   await fail(`The ops screen could not load its code (${String(error).split('\n')[0]}). It needs Node 22.18 or later, which runs TypeScript as it is; this is Node ${process.versions.node}.`, String(error).split('\n')[0])
 }
@@ -93,25 +95,78 @@ const THEMES = {
   PAPER: { bg: '#f4f1e8', hi: '#0b3d20', mid: '#14532d', lo: '#6b8f71', dim: '#c8d5c3', amber: '#b45309', red: '#b91c1c', cyan: '#0e7490' },
 }
 const NAMES = Object.keys(THEMES)
+// what the person chose here, kept for the next screen: the theme, and whether the grid and the event log are shown
 const PREFS = `${HOME}/Library/Application Support/live-sessions/ops.json`
-let themeName = (() => {
+const prefs = (() => {
   try {
-    const name = JSON.parse(readFileSync(PREFS, 'utf8')).theme
-    return NAMES.includes(name) ? name : 'MATRIX'
+    const kept = JSON.parse(readFileSync(PREFS, 'utf8'))
+    return { theme: NAMES.includes(kept.theme) ? kept.theme : 'MATRIX', grid: kept.grid !== false, events: kept.events !== false }
   } catch {
-    return 'MATRIX'
+    return { theme: 'MATRIX', grid: true, events: true }
   }
 })()
+let themeName = prefs.theme
 let G = THEMES[themeName]
 const bgOn = () => `${ESC}48;2;${parseInt(G.bg.slice(1, 3), 16)};${parseInt(G.bg.slice(3, 5), 16)};${parseInt(G.bg.slice(5, 7), 16)}m`
+function savePrefs() {
+  try {
+    mkdirSync(PREFS.slice(0, PREFS.lastIndexOf('/')), { recursive: true })
+    writeFileSync(PREFS, JSON.stringify({ ...prefs, theme: themeName }))
+  } catch {}
+}
 function nextTheme() {
   themeName = NAMES[(NAMES.indexOf(themeName) + 1) % NAMES.length]
   G = THEMES[themeName]
-  try {
-    mkdirSync(PREFS.slice(0, PREFS.lastIndexOf('/')), { recursive: true })
-    writeFileSync(PREFS, JSON.stringify({ theme: themeName }))
-  } catch {}
+  savePrefs()
 }
+
+// the names kept off the screens (ABC-XYZ), as every screen reads them: out of every row drawn while hidden
+const NAMES_FILE = nm.namesPath(HOME)
+/**
+ * The names and their switch as the file says now: none when there is no file; as they were when it cannot be read or
+ * is half written, so a name never shows by mistake.
+ */
+function readHiding(before) {
+  if (!existsSync(NAMES_FILE)) return nm.NO_HIDING
+  try {
+    const raw = JSON.parse(readFileSync(NAMES_FILE, 'utf8'))
+    return typeof raw === 'object' && raw !== null && !Array.isArray(raw) ? nm.hidingFrom(raw) : before
+  } catch {
+    return before
+  }
+}
+let hiding = readHiding(nm.NO_HIDING)
+const hide = s => nm.hideNames(s, nm.hiddenNames(hiding))
+/** The names hidden, or shown again, on every screen; said why not when the file cannot be read or written. */
+function toggleHiding() {
+  let raw
+  if (existsSync(NAMES_FILE)) {
+    try {
+      raw = JSON.parse(readFileSync(NAMES_FILE, 'utf8'))
+    } catch {}
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return `not turned: ${NAMES_FILE} is not a list of names`
+  }
+  const written = nm.turned(raw, !(raw !== undefined && nm.hidingFrom(raw).isHidden))
+  try {
+    mkdirSync(NAMES_FILE.slice(0, NAMES_FILE.lastIndexOf('/')), { recursive: true })
+    // whole or not at all: another screen reading it meanwhile never finds half a file
+    writeFileSync(`${NAMES_FILE}.${process.pid}`, written)
+    renameSync(`${NAMES_FILE}.${process.pid}`, NAMES_FILE)
+  } catch (error) {
+    return `not turned: ${NAMES_FILE} cannot be written (${String(error?.code ?? error)})`
+  }
+  hiding = nm.hidingFrom(JSON.parse(written))
+  if (!hiding.isHidden) return 'names shown'
+  return hiding.names.length === 0 ? `no names to hide yet: list them in ${NAMES_FILE}, as {"names": ["…"]}` : 'names hidden'
+}
+/** The grid or the event log shown, or not; kept for the next screen. */
+function toggleShown(what) {
+  prefs[what] = !prefs[what]
+  savePrefs()
+  return `${what === 'grid' ? 'grid' : 'event log'} ${prefs[what] ? 'shown' : 'hidden'}`
+}
+/** A toolbar button pressed: what it turned, as said on the bottom line. */
+const press = what => (what === 'names' ? toggleHiding() : toggleShown(what))
 const strip = s => s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')
 const graphemes = new Intl.Segmenter('en', { granularity: 'grapheme' })
 const isWideCode = n => (n >= 0x1100 && n <= 0x115f) || (n >= 0x2e80 && n <= 0xa4cf) || (n >= 0xac00 && n <= 0xd7a3) || (n >= 0xf900 && n <= 0xfaff) ||
@@ -141,7 +196,11 @@ function clip(line, n) {
   return out
 }
 const pad = (s, n) => s + ' '.repeat(Math.max(0, n - width(s)))
-const cut = (s, n) => (width(s) > n ? clip(s, Math.max(0, n - 1)) + '…' : s)
+// the names out of sight before it is cut, so no part of one is left before the …
+const cut = (s, n) => {
+  const shown = hide(s)
+  return width(shown) > n ? clip(shown, Math.max(0, n - 1)) + '…' : shown
+}
 // text from the records, one line: no control characters (C0, C1), no invisible direction or joining controls
 const clean = s => String(s ?? '').replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g, ' ')
 const RAIN = 'ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄ01234567890ABCDEF<>/\\|=+*'
@@ -237,17 +296,31 @@ function frame(snap, now, cols, rows, tick, note = '') {
   const out = []
   const targets = []
   const line = (s = '', target) => {
-    // cut inside the border, so a long row never takes the border off the window's edge
-    out.push(rgb(G.lo, '║') + pad(clip(s, inner), inner) + rgb(G.lo, '║'))
+    // cut inside the border, so a long row never takes the border off the window's edge; the names out of sight first
+    out.push(rgb(G.lo, '║') + pad(clip(hide(s), inner), inner) + rgb(G.lo, '║'))
     targets.push(target)
   }
   const rule = (title, left = '╠', right = '╣') => {
-    out.push(rgb(G.lo, left + '══ ') + rgb(G.hi, bold(title)) + rgb(G.lo, ' ' + '═'.repeat(Math.max(0, inner - width(title) - 4)) + right))
+    const shown = hide(title)
+    out.push(rgb(G.lo, left + '══ ') + rgb(G.hi, bold(shown)) + rgb(G.lo, ' ' + '═'.repeat(Math.max(0, inner - width(shown) - 4)) + right))
     targets.push(undefined)
   }
   const clock = new Date(now).toTimeString().slice(0, 8)
   rule('LIVE//SESSIONS :: OPS', '╔', '╗')
   line(` ${rgb(G.hi, clock)}   ${rgb(G.lo, account === c.ALL_ACCOUNTS ? 'ALL ACCOUNTS' : `ACCOUNT ${clean(account) || 'default'}`)}   ${rgb(G.mid, `CLAUDE ${snap.claude.length}`)}  ${rgb(G.mid, `CODEX ${snap.codex.length}`)}  ${rgb(working > 0 ? G.amber : G.lo, `WORKING ${working}`)}   ${rgb(age < 40 ? G.lo : G.red, `updated ${age}s ago`)}`)
+  // what the screen shows, a button each (its key beside it), lit while on: the grid, the event log, and ABC-XYZ, the
+  // names kept out of sight on every screen
+  let toolbar = ''
+  const presses = []
+  for (const [what, label, key, isOn] of [['grid', 'GRID', 'g', prefs.grid], ['events', 'EVENTS', 'e', prefs.events], ['names', 'ABC-XYZ', 'n', hiding.isHidden]]) {
+    const button = `[${isOn ? '▣' : '□'} ${label}]`
+    toolbar += toolbar === '' ? ' ' : '   '
+    // its cells on the screen: the row starts after the border, in the second
+    const from = 2 + width(toolbar)
+    presses.push({ kind: 'toggle', what, cols: [from, from + width(button) - 1] })
+    toolbar += `${isOn ? rgb(G.hi, bold(button)) : rgb(G.lo, button)} ${rgb(G.lo, key)}`
+  }
+  line(toolbar, presses)
   // workspaces: nodes, each its agents and the link the relay passes hand-offs over
   rule(`NODES ${view.workspaces.length}`)
   // a session's context as its records say it: its size, against the line where it should compact (Claude: the
@@ -319,22 +392,27 @@ function frame(snap, now, cols, rows, tick, note = '') {
     line()
   }
   if (view.workspaces.length === 0) line(rgb(G.lo, '  no nodes: + New workspace in /sessions'))
-  // the repositories, each agent a cell
-  rule(`GRID ${view.repos.length}`)
-  for (const repo of view.repos.slice(0, 8)) {
-    const items = repo.trees.flatMap(t => t.items)
-    const busy = items.filter(i => i.state === 'working').length
-    const row = items.map(i => (i.state === 'working' ? rgb(G.amber, '▮') : rgb(G.lo, '▮'))).join('')
-    line(` ${rgb(G.mid, pad(cut(clean(repo.label), 34), 34))} ${row}${' '.repeat(Math.max(0, 14 - items.length))} ${rgb(G.lo, `${items.length} agent${items.length === 1 ? '' : 's'}`)}${busy > 0 ? rgb(G.amber, ` · ${busy} working`) : ''}`)
+  // the repositories, each agent a cell (while shown)
+  if (prefs.grid) {
+    rule(`GRID ${view.repos.length}`)
+    for (const repo of view.repos.slice(0, 8)) {
+      const items = repo.trees.flatMap(t => t.items)
+      const busy = items.filter(i => i.state === 'working').length
+      const row = items.map(i => (i.state === 'working' ? rgb(G.amber, '▮') : rgb(G.lo, '▮'))).join('')
+      line(` ${rgb(G.mid, pad(cut(clean(repo.label), 34), 34))} ${row}${' '.repeat(Math.max(0, 14 - items.length))} ${rgb(G.lo, `${items.length} agent${items.length === 1 ? '' : 's'}`)}${busy > 0 ? rgb(G.amber, ` · ${busy} working`) : ''}`)
+    }
   }
-  rule('EVENT LOG · click one to open it')
-  const room = Math.max(3, rows - out.length - 2)
-  // the relay's events of the workspaces shown (one account's: its own; every account: all of them)
-  const shownIds = new Set(snap.workspaces.map(x => x.id))
-  const events = allEvents().filter(e => account === c.ALL_ACCOUNTS || e.target?.kind !== 'workspace' || shownIds.has(e.target.id))
-  for (const e of events.slice(0, room)) {
-    const color = /ALERT|NEEDS|WAITS|DRIFT|FAILED/.test(e.kind) ? G.red : /RELAY|PASS|NOTIFY/.test(e.kind) ? G.cyan : /WORKING|COMPACT/.test(e.kind) ? G.amber : G.mid
-    line(` ${rgb(G.lo, new Date(e.at).toTimeString().slice(0, 8))}  ${rgb(color, pad(e.kind, 7))} ${rgb(G.mid, cut(e.text, inner - 22))}${e.target !== undefined ? rgb(G.lo, ' ›') : ''}`, e.target)
+  // what happened, newest first (while shown)
+  if (prefs.events) {
+    rule('EVENT LOG · click one to open it')
+    const room = Math.max(3, rows - out.length - 2)
+    // the relay's events of the workspaces shown (one account's: its own; every account: all of them)
+    const shownIds = new Set(snap.workspaces.map(x => x.id))
+    const events = allEvents().filter(e => account === c.ALL_ACCOUNTS || e.target?.kind !== 'workspace' || shownIds.has(e.target.id))
+    for (const e of events.slice(0, room)) {
+      const color = /ALERT|NEEDS|WAITS|DRIFT|FAILED/.test(e.kind) ? G.red : /RELAY|PASS|NOTIFY/.test(e.kind) ? G.cyan : /WORKING|COMPACT/.test(e.kind) ? G.amber : G.mid
+      line(` ${rgb(G.lo, new Date(e.at).toTimeString().slice(0, 8))}  ${rgb(color, pad(e.kind, 7))} ${rgb(G.mid, cut(e.text, inner - 22))}${e.target !== undefined ? rgb(G.lo, ' ›') : ''}`, e.target)
+    }
   }
   // never more than the screen holds: the rest is cut, never scrolled
   out.length = Math.min(out.length, rows - 1)
@@ -350,7 +428,7 @@ function frame(snap, now, cols, rows, tick, note = '') {
     out.push(rgb(G.lo, '║') + rain + rgb(G.lo, '║'))
     targets.push(undefined)
   }
-  const keys = ` ${note === '' ? '' : `${clean(note)} · `}click opens · ${OWN === c.ALL_ACCOUNTS ? '' : `a ${account === c.ALL_ACCOUNTS ? 'this account' : 'all accounts'} · `}t theme: ${themeName} · q quit `
+  const keys = hide(` ${note === '' ? '' : `${clean(note)} · `}click opens · ${OWN === c.ALL_ACCOUNTS ? '' : `a ${account === c.ALL_ACCOUNTS ? 'this account' : 'all accounts'} · `}t theme: ${themeName} · q quit `)
   out.push(rgb(G.lo, '╚' + '═'.repeat(Math.max(0, inner - width(keys) - 2))) + rgb(note === '' ? G.mid : G.amber, keys) + rgb(G.lo, '══╝'))
   targets.push(undefined)
   // the theme's background under every cell, to the line's end
@@ -527,11 +605,11 @@ if (process.argv.includes('--frame')) {
     for (const m of text.matchAll(/\x1b\[<(\d+);(\d+);(\d+)([Mm])/g)) {
       if (m[1] !== '0' || m[4] !== 'M') continue
       const at = shown.targets[Number(m[3]) - 1]
-      // a row whose button is part of it: only a click on the button
-      const target = at?.cols === undefined || (Number(m[2]) >= at.cols[0] && Number(m[2]) <= at.cols[1]) ? at : undefined
+      // a row whose buttons are part of it (one, or a toolbar of several): only a click on a button
+      const target = (Array.isArray(at) ? at : [at]).find(t => t != null && (t.cols === undefined || (Number(m[2]) >= t.cols[0] && Number(m[2]) <= t.cols[1])))
       if (target !== undefined) {
         try {
-          note = open(target, loaded.snap)
+          note = target.kind === 'toggle' ? press(target.what) : open(target, loaded.snap)
         } catch (error) {
           note = `could not open it (${String(error).split('\n')[0]})`
         }
@@ -543,6 +621,11 @@ if (process.argv.includes('--frame')) {
     if (keys.includes('t')) {
       nextTheme()
       process.stdout.write(bgOn() + '\x1b[2J')
+    }
+    for (const [key, what] of [['g', 'grid'], ['e', 'events'], ['n', 'names']]) {
+      if (!keys.includes(key)) continue
+      note = press(what)
+      noteUntil = Date.now() + 4_000
     }
     // this account's or every one's; what came and went is counted afresh, so the switch is no news
     if (keys.includes('a') && OWN !== c.ALL_ACCOUNTS) {
@@ -580,6 +663,8 @@ if (process.argv.includes('--frame')) {
       } catch {}
     }
     tick++
+    // the names' switch, as another screen may have turned it: looked at about once a second
+    if (tick % 7 === 0) hiding = readHiding(hiding)
     if (Date.now() > noteUntil) note = stale
     const cols = process.stdout.columns ?? 80
     const rows = process.stdout.rows ?? 24
@@ -589,7 +674,7 @@ if (process.argv.includes('--frame')) {
         ? { lines: [...Array(rows)].map((_, r) => bgOn() + clip(r === 0 ? rgb(G.mid, ' window too small for ops') : '', cols) + `${ESC}49m`), targets: [] }
         : frame(seenAs(loaded.snap), Date.now(), cols, rows, tick, note)
     } catch (error) {
-      shown = { lines: [bgOn() + clip(rgb(G.red, ` cannot draw: ${clean(String(error).split('\n')[0])}`), cols) + `${ESC}49m`], targets: [] }
+      shown = { lines: [bgOn() + clip(rgb(G.red, ` cannot draw: ${hide(clean(String(error).split('\n')[0]))}`), cols) + `${ESC}49m`], targets: [] }
     }
     // each row at its place, erased first (nothing of an earlier frame stays where a row came out short); no
     // newline, so the screen never scrolls

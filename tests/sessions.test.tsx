@@ -105,6 +105,7 @@ import {
   words,
   workspacesFrom,
 } from '../hooks/workspaces'
+import { hiddenNames, hideInTree, hideNames, hidingFrom, namesPath, NO_HIDING, turned } from '../hooks/names'
 import {
   ENV_LINES,
   GIT,
@@ -4264,5 +4265,151 @@ describe('usage', () => {
     // perl is the only thing that reads the records; the listing names the config folders only
     const listing = runs.find(r => r[2] === USAGE_FILES_SCRIPT)!
     expect(listing.slice(4)).toEqual([`${HOME}/.claude`, `${HOME}/.claude-work`, `${HOME}/.claude-profiles`, `${HOME}/.codex`, `${HOME}/.codex-work`])
+  })
+})
+
+describe('names kept off the screens', () => {
+  test('each case of a name hidden, its length kept; colour codes left as they are; the file read and turned', () => {
+    expect(hideNames('ACME Practice · acme-app · ~/dev/Acme-2025', ['acme'])).toBe('•••• Practice · ••••-app · ~/dev/••••-2025')
+    // the longest first, so a name that holds another goes whole; a name's own characters as they are, dashes too
+    expect(hideNames('Acme Inc and Acme', ['Acme', 'acme inc'])).toBe('•••••••• and ••••')
+    expect(hideNames('a.b (x) a+b a-b axb', ['a.b', '(x)', 'a+b', 'a-b'])).toBe('••• ••• ••• ••• axb')
+    // a terminal's colour codes are not text, even where a name is a letter of one
+    expect(hideNames('\x1b[38;2;1;2;3mACME\x1b[39m m', ['acme', 'm'])).toBe('\x1b[38;2;1;2;3m••••\x1b[39m •')
+    expect([hideNames('nothing hidden', []), hideNames('', ['acme'])]).toEqual(['nothing hidden', ''])
+    // the file: names as text, trimmed, once; blank, overlong, control characters and others left out; hidden unless it says not
+    expect(hidingFrom({ names: [' Acme ', '', 'x'.repeat(65), 'a\nb', 3, 'Acme', 'Beta'] })).toEqual({ names: ['Acme', 'Beta'], isHidden: true })
+    expect(hidingFrom({ names: ['Acme'], hidden: false })).toEqual({ names: ['Acme'], isHidden: false })
+    expect(hidingFrom({ names: [...Array(60)].map((_, k) => `n${k}`) }).names.length).toBe(50)
+    expect([hidingFrom(undefined), hidingFrom(['Acme']), hidingFrom('Acme'), hidingFrom({ names: 'Acme' })]).toEqual([NO_HIDING, NO_HIDING, NO_HIDING, { names: [], isHidden: true }])
+    expect([hiddenNames({ names: ['Acme'], isHidden: false }), hiddenNames({ names: ['Acme'], isHidden: true })]).toEqual([[], ['Acme']])
+    // turned: its names, and anything else in it, kept
+    expect(JSON.parse(turned({ names: ['Acme'], note: 'mine' }, false))).toEqual({ names: ['Acme'], note: 'mine', hidden: false })
+    expect(JSON.parse(turned(undefined, true))).toEqual({ names: [], hidden: true })
+  })
+
+  test('a drawing: its strings, a button\'s label, an input\'s label and placeholder, a choice\'s text; never a key, a value or what is typed', () => {
+    const plain = { type: 'Text', children: ['plain'] }
+    const tree = {
+      type: 'Box',
+      props: { width: 40 },
+      children: [
+        'Acme',
+        { type: 'Text', props: { color: 'warning' }, children: ['at ACME', plain] },
+        { type: 'Button', props: { key: 'open acme', label: 'Open Acme' } },
+        { type: 'Input', props: { key: 'acme', label: 'Acme', placeholder: 'acme-app', value: 'Acme typed' } },
+        { type: 'Select', props: { key: 'pick', value: '/x/acme', options: [{ value: '/acme', label: 'Acme' }, { value: '/x/acme' }, { value: '/b', label: 'b' }] } },
+        plain,
+      ],
+    }
+    const hidden = hideInTree(tree as never, ['acme']) as unknown as typeof tree
+    expect(hidden).toEqual({
+      type: 'Box',
+      props: { width: 40 },
+      children: [
+        '••••',
+        { type: 'Text', props: { color: 'warning' }, children: ['at ••••', plain] },
+        { type: 'Button', props: { key: 'open acme', label: 'Open ••••' } },
+        { type: 'Input', props: { key: 'acme', label: '••••', placeholder: '••••-app', value: 'Acme typed' } },
+        { type: 'Select', props: { key: 'pick', value: '/x/acme', options: [{ value: '/acme', label: '••••' }, { value: '/x/acme', label: '/x/••••' }, { value: '/b', label: 'b' }] } },
+        plain,
+      ],
+    })
+    // what shows no name is the element it was; nothing hidden, the drawing as it was
+    expect(hidden.children[5]).toBe(plain)
+    expect((hidden.children[4] as typeof tree).props).not.toBe(tree.children[4])
+    expect(((hidden.children[4] as { props: { options: unknown[] } }).props.options[2])).toBe((tree.children[4] as { props: { options: unknown[] } }).props.options[2])
+    expect(hideInTree(tree as never, [])).toBe(tree)
+    expect(hideInTree({ type: 'Box', children: [plain] } as never, ['acme'])).toEqual({ type: 'Box', children: [plain] })
+  })
+
+  test('ABC-XYZ keeps the listed names off the pane and its toasts while on, on every screen at once; pressed again, shows them', async ($, on) => {
+    const { files, runs, toasts, clock } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [practice] }))
+    world.tmuxPanes = 'ws-practice-rbac\tpeers\t/dev/ttys004\t%1\tclaude\n'
+    world.tmuxClients = 'ws-practice-rbac\t/dev/ttys001\n'
+    world.tmuxOwner = String(NOW)
+    const NAMES = namesPath(HOME)
+    expect(NAMES).toBe('/Users/u/Library/Application Support/live-sessions/names.json')
+    files.set(NAMES, JSON.stringify({ names: ['rbac', 'Web'], hidden: false }))
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    const drawn = async () => [...(await ui.findAll({ type: 'Text' })).map(t => t.text), ...(await ui.findAll({ type: 'Button' })).map(b => (b.props as { label: string }).label)].join('\n')
+    // off: the names as they are (a workspace's, sessions' titles and folders)
+    expect(await drawn()).toMatch(/Practice RBAC/)
+    expect(await drawn()).toMatch(/WEB CONSOLE/)
+    expect((await ui.find({ key: 'names' }))?.props).toMatchObject({ label: 'ABC-XYZ' })
+    expect((await ui.find({ key: 'names' }))?.props.variant).toBeUndefined()
+    await ui.press({ key: 'names' })
+    // on: kept in the file every screen reads, its names as they were; lit
+    expect(JSON.parse(files.get(NAMES)!)).toEqual({ names: ['rbac', 'Web'], hidden: true })
+    expect((await ui.find({ key: 'names' }))?.props.variant).toBe('primary')
+    const hiddenNow = await drawn()
+    expect(hiddenNow).not.toMatch(/rbac|web/i)
+    expect(hiddenNow).toMatch(/Practice ••••/)
+    expect(hiddenNow).toMatch(/••• CONSOLE/)
+    // a title's button, its text hidden, still opens its session (here in the workspace's pane: its window, on ttys001)
+    expect((await ui.find({ key: 'open claude-101' }))?.props.label).toMatch(/^••• CONSOLE/)
+    await ui.press({ key: 'open claude-101' })
+    expect(runs.filter(r => r[0] === '/usr/bin/osascript' && r[4] === FOCUS_SCRIPT).map(r => r[5])).toEqual(['ttys001'])
+    // a press does what it did (the keys keep the names); its toast hides them too
+    await reveal(ui, 'ws:practice-rbac')
+    await ui.press({ key: 'hide practice-rbac' })
+    expect(runs.filter(r => r[0] === '/bin/sh' && r[1] === hidePath(HOME)).map(r => r[2])).toEqual(['/dev/ttys001'])
+    expect(toasts.at(-1)).toBe('Practice •••• hidden: its agents keep running; Open brings it back.')
+    // turned off on another screen (the ops screen): the pane follows at its next look
+    files.set(NAMES, JSON.stringify({ names: ['rbac', 'Web'], hidden: false }))
+    await clock.advance(4_000)
+    expect(await drawn()).toMatch(/Practice RBAC/)
+    // half written meanwhile: left as it was, never shown by mistake
+    await ui.press({ key: 'names' })
+    files.set(NAMES, '{"names": ["rb')
+    await clock.advance(4_000)
+    expect(await drawn()).not.toMatch(/rbac/i)
+    // the file gone: nothing hidden
+    files.delete(NAMES)
+    await clock.advance(4_000)
+    expect(await drawn()).toMatch(/Practice RBAC/)
+    // a file that is not a list of names is left as it is, and said
+    files.set(NAMES, '["rbac"]')
+    await ui.press({ key: 'names' })
+    expect(files.get(NAMES)).toBe('["rbac"]')
+    expect(toasts.at(-1)).toMatch(/^Not turned: .*names\.json is not a list of names/)
+    // none listed yet: on, and said where they go
+    files.delete(NAMES)
+    await ui.press({ key: 'names' })
+    expect(JSON.parse(files.get(NAMES)!)).toEqual({ names: [], hidden: true })
+    expect(toasts.at(-1)).toMatch(/^No names to hide yet: list them in .*names\.json/)
+    await ui.unmount()
+    // a title cut to a narrow row's width shows no part of a name before its …
+    files.set(NAMES, JSON.stringify({ names: ['console'] }))
+    await clock.advance(4_000)
+    const narrow = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(45) })
+    const titles = (await narrow.findAll({ type: 'Button' })).map(b => (b.props as { label: string }).label).filter(l => l.startsWith('WEB'))
+    expect(titles).toContain('WEB •••…')
+    expect(titles.join('\n')).not.toMatch(/C/)
+    await narrow.unmount()
+  })
+  test('the relay\'s notifications hide the names too; a hand-off typed to an agent is as it was written', async ($, on) => {
+    const { files, runs, clock } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    const at = (ms: number) => new Date(NOW - ms).toISOString()
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, checkout: '/Users/u/dev/web-app', relay: relayOn({ streak: RELAY_CAP - 1 }) }] }))
+    files.set(namesPath(HOME), JSON.stringify({ names: ['rbac'] }))
+    world.tmuxPanes = 'ws-practice-rbac\tpeers\t/dev/ttys022\t%1\tclaude\nws-practice-rbac\tpeers\t/dev/ttys045\t%2\tcodex\n'
+    world.tmuxOwner = String(NOW)
+    world.paneCommands = { '%1': 'claude', '%2': 'codex' }
+    world.turns = { 'session-104': `done\tturn-c1\t${at(60_000)}\t${READY_CODEX}`, '/rollouts/a.jsonl': `done\tturn-x0\t${at(120_000)}\t` }
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    // held at the cap: the owner is told, the names out of sight
+    world.turns = { ...world.turns, '/rollouts/a.jsonl': `done\tturn-x2\t${at(10_000)}\t${READY_CLAUDE}` }
+    await clock.advance(4_000)
+    await $.command.run(SESSIONS)
+    const sent = runs.filter(r => r[2] === RELAY_SCRIPT).map(r => ({ kind: r[4], text: r[9]! }))
+    expect(sent.filter(r => r.kind === 'pass').map(r => r.text)).toEqual([READY_CODEX])
+    const tells = sent.filter(r => r.kind === 'tell').map(r => r.text)
+    expect(tells.length).toBeGreaterThan(0)
+    expect(tells.every(t => t.startsWith('Practice ••••: the relay passed') && !/rbac/i.test(t))).toBe(true)
   })
 })
