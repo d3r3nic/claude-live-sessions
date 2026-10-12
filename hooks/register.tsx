@@ -41,6 +41,9 @@ import {
   BRANCH_SCRIPT,
   headOf,
   parseWorktrees,
+  typedPath,
+  whereFrom,
+  WHERE_SCRIPT,
   WORKTREES_SCRIPT,
   agentPlacement,
   screensFrom,
@@ -1257,6 +1260,8 @@ async function codexBusy($: EngineInterface, rollout: string): Promise<string | 
 }
 
 async function submitDraft($: EngineInterface) {
+  // a path typed (or pasted) and created at once: placed first, as the form would have shown it
+  if ((await read($, draft)).dir === '' && typedPath((await read($, draft)).query) !== undefined) await placeTyped($, (await read($, draft)).query)
   const d = await read($, draft)
   // (a form open since before the choice was offered has none: both)
   const only = d.only === 'claude' || d.only === 'codex' ? d.only : undefined
@@ -1278,17 +1283,37 @@ async function submitDraft($: EngineInterface) {
 }
 
 /**
- * The worktrees of the repository holding `dir` that the form can offer to
- * go on with (none for a folder in no repository): kept only while the form
- * still names that folder, so a lookup that ends late never shows another
- * project's.
+ * The folder a path names: as typed (absolute, or from `~/`); a relative one (as an editor names a file:
+ * `shop-worktrees/<branch>/docs/README.md`) in the home folder or beside or in a repository the form found, the first
+ * that is there. A file names its folder (WHERE_SCRIPT takes either).
  */
-async function lookWorktrees($: EngineInterface, dir: string) {
-  const found = await $.process.run(['/bin/sh', '-c', WORKTREES_SCRIPT, 'sh', dir], { timeoutMs: 15_000 }).catch(() => ({ exitCode: -1, stdout: '', stderr: '' }))
+async function pathOf($: EngineInterface, typed: string, home: string): Promise<string | undefined> {
+  const named = typedPath(typed)
+  if (named === undefined) return undefined
+  if (!named.isRelative) return absoluteDir(named.path, home)
+  const found = await read($, projects)
+  const bases = [...new Set([home, ...found.map(p => p.slice(0, p.lastIndexOf('/'))), ...found])].filter(b => b.startsWith('/'))
+  for (const base of bases) {
+    const path = `${base}/${named.path}`
+    if (await $.fs.exists(path).catch(() => false)) return path
+  }
+  return undefined
+}
+
+/**
+ * What the form's project field names, placed in git: its repository's main checkout is the project, the branches
+ * there are offered to go on with, and a path inside a branch's own worktree chooses that branch. A path outside git
+ * is left as typed; a search word is not a path. Kept only while the form still holds what was placed.
+ */
+async function placeTyped($: EngineInterface, typed: string) {
   const home = (await $.env.get('HOME')) ?? ''
+  const path = await pathOf($, typed, home)
+  const found = path === undefined ? undefined : await $.process.run(['/bin/sh', '-c', WHERE_SCRIPT, 'sh', path], { timeoutMs: 15_000 }).catch(() => undefined)
+  const where = found?.exitCode === 0 ? whereFrom(found.stdout) : undefined
   const d = await read($, draft)
-  if (!d.isOpen || absoluteDir(d.dir || d.query, home) !== dir) return
-  await update($, worktrees, () => ({ dir, list: found.exitCode === 0 ? parseWorktrees(found.stdout) : [] }))
+  if (!d.isOpen || d.query !== typed || where === undefined) return
+  await update($, worktrees, () => ({ dir: where.checkout, list: where.worktrees }))
+  await update($, draft, now => (now.query !== typed ? now : { ...now, dir: where.checkout, goOn: where.goOn?.path ?? '', error: '' }))
 }
 
 /** A workspace's first-prompt files, gone. */
@@ -1308,7 +1333,7 @@ async function openDraft($: EngineInterface, dir: string, with_?: { member: stri
   await update($, worktrees, () => ({ dir: '', list: [] }))
   // while this pane has the keys (the form opened by its key), what is typed next goes into the name, not to the pane's keys
   await $.ui.focus({ requestId: PANE, key: 'form:name' }).catch(() => undefined)
-  if (dir.startsWith('/')) await lookWorktrees($, dir)
+  if (dir.startsWith('/')) await placeTyped($, shown)
   if ((await read($, projects)).length > 0) return
   const found = await $.process
     .run(['/bin/sh', '-c', PROJECTS_SCRIPT, 'sh', home], { timeoutMs: 30_000 })
@@ -2335,22 +2360,34 @@ export const register: Register = on => {
               <Input key="form:name" label="name" autoFocus value={form.name} placeholder="Practice RBAC" onInput={setForm('name')} onSubmit={() => void submitDraft($)} />
               <Input
                 key="form:project"
-                label="project"
+                label="repository"
                 value={form.query}
-                placeholder="type to search your repositories, or a folder"
-                onInput={value => void update($, draft, d => ({ ...d, query: value, dir: '', bring: [], goOn: '', error: '' }))}
+                placeholder="search by name (a repository or a branch's worktree), or paste a folder or file in one"
+                onInput={value => {
+                  void (async () => {
+                    await update($, draft, d => ({ ...d, query: value, dir: '', bring: [], goOn: '', error: '' }))
+                    // a path: placed in its repository, and in its branch's worktree when it is in one
+                    if (typedPath(value) !== undefined) await placeTyped($, value)
+                  })().catch(() => undefined)
+                }}
                 onSubmit={() => void submitDraft($)}
               />
               {form.dir === '' && matches.length > 0 && (
                 <Select
                   key="form:pick"
-                  label="pick"
+                  label="found"
                   options={matches.map(m => ({ value: m.path, label: m.label }))}
                   onSelect={value => {
-                    void update($, draft, d => ({ ...d, dir: value, query: rankProjects([value], [], '', home)[0]?.label ?? value, bring: [], goOn: '', error: '' }))
-                    void lookWorktrees($, value)
+                    const shown = rankProjects([value], [], '', home)[0]?.label ?? value
+                    void (async () => {
+                      await update($, draft, d => ({ ...d, dir: value, query: shown, bring: [], goOn: '', error: '' }))
+                      await placeTyped($, shown)
+                    })().catch(() => undefined)
                   }}
                 />
+              )}
+              {form.dir !== '' && absoluteDir(form.query, home) !== form.dir && (
+                <Text dimColor wrap="truncate-end">{`  in the repository ${form.dir.startsWith(`${home}/`) ? `~${form.dir.slice(home.length)}` : form.dir}`}</Text>
               )}
               {offered.length > 0 && <Text dimColor wrap="truncate-end">{'bring in (each closes where it runs and goes on here, in its own conversation):'}</Text>}
               {offered.map(b => {
@@ -2378,7 +2415,7 @@ export const register: Register = on => {
                   key="form:branch"
                   label="branch"
                   options={[
-                    { value: 'new', label: 'start a new one for the purpose' },
+                    { value: 'new', label: 'a new branch for the purpose (a clean start, in a worktree of its own)' },
                     ...branches.map(b => ({ value: b.path, label: `go on with ${b.branch} · ${b.path.startsWith(`${home}/`) ? `~${b.path.slice(home.length)}` : b.path}` })),
                   ]}
                   value={form.goOn || 'new'}

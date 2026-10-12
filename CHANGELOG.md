@@ -2,6 +2,9 @@
 
 What each version changed, newest first. Each links its pull request, which holds the details, the checks and the reviews. After updating, run `/reload-plugins` in your sessions.
 
+## 0.26.0 — 2026-10-12
+- **New workspace for work already under way:** the form's **repository** field takes any path in a repository, a branch's worktree or a file in one, typed or pasted (as an editor names a file, too). Its repository becomes the project and its branch is chosen to go on with. Searching finds the branches' worktrees by their folder's name, and `New workspace here` on a branch's row goes on with that branch. A new branch for the purpose (the default) is the clean start.
+
 ## 0.25.0 — 2026-10-12 ([#32](https://github.com/d3r3nic/claude-live-sessions/pull/32))
 - **Background work counts as work.** A Claude session whose turn is over while a command or monitor it started in the background still runs is `background` (◐), never idle or `done`, in /sessions and the Ops screen, in the event log as `BG WORK`, and counted in the header and status line. Each session's background commands, monitors and agents are listed under it (`↳ monitor  Wait for CI on PR 826 · 4m`) until they end, expire or are stopped.
 - **Ops screen:** an agent waiting on you at a permission prompt or dialog shows `◆ waiting` in red, never idle or done.

@@ -575,15 +575,31 @@ except ChildProcessError: pass
   git('-C', repo, 'worktree', 'add', '-q', '-f', `${repo}-worktrees/on-main`, 'main')
   const onDefault = [head(`${repo}-worktrees/on-main`), head(`${repo}-worktrees/feat-a`)]
   check('go on: a linked worktree on the default branch known as such', JSON.stringify(onDefault) === JSON.stringify([{ isMain: false, branch: 'main', isDefault: true }, { isMain: false, branch: 'feat/a', isDefault: false }]), JSON.stringify(onDefault))
+  // where a path is (a folder, or a file in one): its repository's main checkout, and the branch whose own worktree it
+  // is in; none for the main checkout or a detached worktree; nothing outside git
+  mkdirSync(`${repo}-worktrees/feat-a/docs`, { recursive: true })
+  writeFileSync(`${repo}-worktrees/feat-a/docs/README.md`, '# a')
+  const where = path => {
+    const r = spawnSync('/bin/sh', ['-c', w.WHERE_SCRIPT, 'sh', path], { encoding: 'utf8', env })
+    return r.status === 0 ? w.whereFrom(r.stdout) : r.status
+  }
+  const placed = [where(`${repo}-worktrees/feat-a/docs/README.md`), where(join(repo, 'sub')), where(`${repo}-worktrees/probe`), where(scratch)]
+  check('where: a file in a branch\'s worktree is in its repository, going on with that branch; the main checkout and a detached worktree go on with none; nothing outside git',
+    placed[0]?.checkout === repo && JSON.stringify(placed[0]?.goOn) === JSON.stringify({ path: `${repo}-worktrees/feat-a`, branch: 'feat/a' }) &&
+    placed[1]?.checkout === repo && placed[1]?.goOn === undefined && placed[2]?.checkout === repo && placed[2]?.goOn === undefined && placed[3] === 11,
+    JSON.stringify(placed.map(p => (typeof p === 'object' ? { checkout: p.checkout, goOn: p.goOn?.branch } : p))))
   // a folder named with a newline and a field: offered only as the folder it is (the list is read NUL-separated)
   git('-C', repo, 'worktree', 'add', '-q', '--detach', `${repo}-worktrees/x\nbranch refs/heads/evil`)
   const forged = w.parseWorktrees(spawnSync('/bin/sh', ['-c', w.WORKTREES_SCRIPT, 'sh', repo], { encoding: 'utf8', env }).stdout)
   check('go on: a folder whose name forges a branch line is not offered', JSON.stringify(forged.map(x => x.branch)) === '["feat/a","main"]' && !forged.some(x => x.path.includes('\n')), JSON.stringify(forged))
-  // the projects the form offers: main checkouts only; never what is inside a .git, a hidden folder or a worktrees folder
+  // the projects the form offers: main checkouts, and the branches' worktrees in a worktrees folder (a .git file), by
+  // their folder; never what is inside a .git, a hidden folder or a worktree, nor a worktrees folder's other folders
   const fakeHome = join(scratch, 'projects-home')
-  for (const d of ['dev/a/.git/inner/.git', 'dev/b/.git', 'dev/b-worktrees/feat/.git', '.hidden/c/.git', 'Library/d/.git']) mkdirSync(join(fakeHome, d), { recursive: true })
+  for (const d of ['dev/a/.git/inner/.git', 'dev/b/.git', 'dev/b-worktrees/feat/.git', 'dev/b-worktrees/feat-x/sub/.git', 'dev/b-worktrees/plain', '.hidden/c/.git', 'Library/d/.git']) mkdirSync(join(fakeHome, d), { recursive: true })
+  writeFileSync(join(fakeHome, 'dev/b-worktrees/feat-x/.git'), 'gitdir: /x\n')
   const offered = spawnSync('/bin/sh', ['-c', w.PROJECTS_SCRIPT, 'sh', fakeHome], { encoding: 'utf8' }).stdout.trim().split('\n').map(l => l.slice(fakeHome.length)).sort()
-  check('projects: the main checkouts, nothing inside a .git, hidden, Library or worktrees folder', JSON.stringify(offered) === '["/dev/a","/dev/b"]', offered.join(','))
+  check('projects: the main checkouts and the branches\' worktrees beside them; nothing inside a .git, a worktree, hidden or Library folder',
+    JSON.stringify(offered) === '["/dev/a","/dev/b","/dev/b-worktrees/feat-x"]', offered.join(','))
   rmSync(scratch, { recursive: true, force: true })
 }
 

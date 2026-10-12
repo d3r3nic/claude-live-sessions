@@ -97,6 +97,9 @@ import {
   headOf,
   parseWorktrees,
   WORKTREES_SCRIPT,
+  WHERE_SCRIPT,
+  typedPath,
+  whereFrom,
   envsFrom,
   findWorkspace,
   openCommand,
@@ -168,6 +171,8 @@ const world = {
   noTab: new Set<string>(),
   /** More processes with a terminal, as `ps` prints them, beside the fixture's. */
   terminalProcs: [] as string[],
+  /** More of what PROJECTS_SCRIPT prints, one path per line. */
+  moreProjects: '',
   /** What MODE_SCRIPT prints for every transcript. */
   mode: '"permissionMode":"bypassPermissions"\n',
   /** How MOVE_SCRIPT ends: its exit code, or `reject` for a run that times out. */
@@ -245,6 +250,7 @@ const resetWorld = () => {
   world.heads = { '/Users/u/dev/web-app': 'main\nmain\n', '/Users/u/dev/build': 'linked\nfix/build\n' }
   world.slowWorktrees = ''
   world.moreWorktrees = ''
+  world.moreProjects = ''
   world.dirs.clear()
   world.commands = []
   world.stat.clear()
@@ -357,6 +363,16 @@ function machine(argv: readonly string[], env: unknown): Run {
           ? ok(`worktree /Users/u/dev/web-app\0HEAD 1111\0branch refs/heads/main\0\0worktree /Users/u/dev/build\0HEAD 2222\0branch refs/heads/fix/build\0\0worktree /Users/u/dev/web-app-worktrees/probe\0HEAD 3333\0detached\0\0${world.moreWorktrees}`)
           : { exitCode: 128, stdout: '', stderr: 'fatal: not a git repository\n' }
       }
+      if (argv[2] === WHERE_SCRIPT) {
+        // the worktree a path is in (the deepest whose folder holds it), then its repository's worktrees: web-app's as
+        // above, api's main checkout alone; anything else is in no repository
+        const webApp = `worktree /Users/u/dev/web-app\0HEAD 1111\0branch refs/heads/main\0\0worktree /Users/u/dev/build\0HEAD 2222\0branch refs/heads/fix/build\0\0worktree /Users/u/dev/web-app-worktrees/probe\0HEAD 3333\0detached\0\0${world.moreWorktrees}`
+        const lists = [webApp, 'worktree /Users/u/dev/api\0HEAD 4444\0branch refs/heads/main\0\0']
+        const roots = lists.flatMap(list => [...list.matchAll(/(?:^|\0)worktree ([^\0]+)/g)].map(m => ({ root: m[1]!, list })))
+        const path = args[0] ?? ''
+        const at = roots.filter(r => path === r.root || path.startsWith(`${r.root}/`)).sort((a, b) => b.root.length - a.root.length)[0]
+        return at === undefined ? { exitCode: 11, stdout: '', stderr: '' } : ok(`${at.root}\0${at.list}`)
+      }
       if (argv[2] === BRANCH_SCRIPT) return world.heads[args[0] ?? ''] === undefined ? { exitCode: 1, stdout: '', stderr: '' } : ok(world.heads[args[0]!]!)
       // build is a worktree of web-app's
       if (argv[2] === CHECKOUT_SCRIPT && args[0] === '/Users/u/dev/build') return ok('ok /Users/u/dev/web-app\n')
@@ -365,7 +381,7 @@ function machine(argv: readonly string[], env: unknown): Run {
         const main = ['/Users/u/dev/web-app', '/Users/u/dev/api'].find(m => args[0] === m || args[0]?.startsWith(`${m}/`) || args[0]?.startsWith(`${m}-worktrees/`))
         return main === undefined ? { exitCode: 11, stdout: 'error: not-a-repo\n', stderr: '' } : ok(`ok ${main}\n`)
       }
-      if (argv[2] === PROJECTS_SCRIPT) return ok('/Users/u/dev/web-app\n/Users/u/dev/api\n/Users/u/dev/build\n/Users/u/dev/résumé\n')
+      if (argv[2] === PROJECTS_SCRIPT) return ok(`/Users/u/dev/web-app\n/Users/u/dev/api\n/Users/u/dev/build\n/Users/u/dev/résumé\n${world.moreProjects}`)
       if (argv[2] === TURN_SCRIPT) {
         world.whileTurnsRead()
         return ok(args.map(f => `==> ${f}\n${Object.entries(world.turns).filter(([k]) => f.includes(k)).map(([, line]) => `${line}\n`).join('')}`).join(''))
@@ -507,7 +523,7 @@ function engine(
     const isMove = e.argv[0] === '/bin/sh' && e.argv[2] === MOVE_SCRIPT
     if (isMove && moveTakesMs > 0) await clock.sleep(moveTakesMs)
     if (e.argv[2] === CHECKOUT_SCRIPT && checkoutTakesMs > 0) await clock.sleep(checkoutTakesMs)
-    if (e.argv[2] === WORKTREES_SCRIPT && e.argv[4] === world.slowWorktrees) await clock.sleep(5_000)
+    if ((e.argv[2] === WORKTREES_SCRIPT || e.argv[2] === WHERE_SCRIPT) && e.argv[4] === world.slowWorktrees) await clock.sleep(5_000)
     if (isMove && world.move === 'reject') return { deny: 'timed out after 40000 ms' }
     // usage.pl: each file's context; each file's sums from where it was left (its mark), or nothing new
     if (e.argv[0] === '/usr/bin/perl' && e.argv[1]?.endsWith('/hooks/usage.pl') === true) {
@@ -3744,9 +3760,9 @@ describe('going on with a branch', () => {
     // no project yet: no branch to choose
     expect(await ui.find({ key: 'form:branch' })).toBeUndefined()
     await ui.select({ key: 'form:pick', value: '/Users/u/dev/web-app' })
-    expect(runs.filter(r => r[2] === WORKTREES_SCRIPT).map(r => r[4])).toEqual(['/Users/u/dev/web-app'])
+    expect(runs.filter(r => r[2] === WHERE_SCRIPT).map(r => r[4])).toEqual(['/Users/u/dev/web-app'])
     const branch = await ui.find({ key: 'form:branch' })
-    expect([branch?.props.value, (branch?.props.options as { label: string }[]).map(o => o.label)]).toEqual(['new', ['start a new one for the purpose', 'go on with fix/build · ~/dev/build']])
+    expect([branch?.props.value, (branch?.props.options as { label: string }[]).map(o => o.label)]).toEqual(['new', ['a new branch for the purpose (a clean start, in a worktree of its own)', 'go on with fix/build · ~/dev/build']])
     // typing another project's folder lets the choice go: web-app's worktrees are not api's, and api is what is made
     await ui.select({ key: 'form:branch', value: '/Users/u/dev/build' })
     await ui.input({ key: 'form:project', text: '~/dev/api', kind: 'change' })
@@ -3766,23 +3782,118 @@ describe('going on with a branch', () => {
     expect([saved.dir, saved.checkout, saved.branch]).toEqual(['/Users/u/dev/build', '/Users/u/dev/web-app', 'fix/build'])
     expect(files.get(promptPath(HOME, 'build', 'claude'))).toBe(setupPrompt(saved))
     expect((await ui.findAll({ type: 'Text' })).map(t => t.text)).toContain('on fix/build · ~/dev/build')
-    // a new form shows no worktrees the last one found, until its own project is picked
+    // a new form shows no worktrees the last one found, until its own project is named: picked, or its folder typed
     await ui.press({ key: 'workspace:new' })
-    await ui.input({ key: 'form:project', text: '~/dev/web-app', kind: 'change' })
     expect(await ui.find({ key: 'form:branch' })).toBeUndefined()
+    await ui.input({ key: 'form:project', text: '~/dev/web-app', kind: 'change' })
+    expect((await ui.find({ key: 'form:branch' }))?.props.value).toBe('new')
     await ui.unmount()
   })
 
-  test('New workspace here on a branch row offers that repository\'s worktrees at once', async ($, on) => {
+  test('New workspace here on a branch row goes on with that branch, in its repository; on the main checkout\'s row, a new one', async ($, on) => {
     const { runs } = engine(on, machine, { termProgram: 'Apple_Terminal' })
     await $.session.start(START)
     await $.command.run(SESSIONS)
     const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
     await reveal(ui, 'tree:/Users/u/dev/build')
     await ui.press({ key: 'new-from:/Users/u/dev/build' })
-    expect(runs.filter(r => r[2] === WORKTREES_SCRIPT).map(r => r[4])).toEqual(['/Users/u/dev/build'])
-    expect(((await ui.find({ key: 'form:branch' }))?.props.options as { label: string }[]).map(o => o.label)).toEqual(['start a new one for the purpose', 'go on with fix/build · ~/dev/build'])
+    expect(runs.filter(r => r[2] === WHERE_SCRIPT).map(r => r[4])).toEqual(['/Users/u/dev/build'])
+    const branch = await ui.find({ key: 'form:branch' })
+    expect([branch?.props.value, (branch?.props.options as { label: string }[]).map(o => o.label)]).toEqual(['/Users/u/dev/build', ['a new branch for the purpose (a clean start, in a worktree of its own)', 'go on with fix/build · ~/dev/build']])
+    expect((await ui.findAll({ type: 'Text' })).map(t => t.text)).toContain('  in the repository ~/dev/web-app')
+    await ui.press({ key: 'form:cancel' })
+    await reveal(ui, 'tree:/Users/u/dev/web-app')
+    await ui.press({ key: 'new-from:/Users/u/dev/web-app' })
+    expect((await ui.find({ key: 'form:branch' }))?.props.value).toBe('new')
+    expect((await ui.findAll({ type: 'Text' })).map(t => t.text).some(t => t.startsWith('  in the repository'))).toBe(false)
     await ui.unmount()
+  })
+
+  test('the form takes a path in a repository, pasted as an editor shows a file\'s too: its repository, and its branch to go on with', async ($, on) => {
+    const { files, runs } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    world.moreWorktrees = 'worktree /Users/u/dev/web-app-worktrees/feat-rbac\0HEAD 4444\0branch refs/heads/feat/rbac\0\0'
+    world.dirs.add('/Users/u/dev/web-app-worktrees/feat-rbac')
+    world.heads['/Users/u/dev/web-app-worktrees/feat-rbac'] = 'linked\nfeat/rbac\n'
+    files.set('/Users/u/dev/web-app-worktrees/feat-rbac/docs/rbac/README.md', '# RBAC')
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    await ui.press({ key: 'workspace:new' })
+    // a file in a branch's worktree, as an editor names it (from the folder that holds the repositories)
+    await ui.input({ key: 'form:project', text: 'README.md (web-app-worktrees/feat-rbac/docs/rbac/README.md)', kind: 'change' })
+    expect(runs.filter(r => r[2] === WHERE_SCRIPT).map(r => r[4])).toEqual(['/Users/u/dev/web-app-worktrees/feat-rbac/docs/rbac/README.md'])
+    expect((await ui.find({ key: 'form:branch' }))?.props.value).toBe('/Users/u/dev/web-app-worktrees/feat-rbac')
+    expect((await ui.findAll({ type: 'Text' })).map(t => t.text)).toContain('  in the repository ~/dev/web-app')
+    expect(await ui.find({ key: 'form:pick' })).toBeUndefined()
+    await ui.input({ key: 'form:name', text: 'RBAC', kind: 'change' })
+    await ui.input({ key: 'form:purpose', text: 'finish the RBAC docs', kind: 'change' })
+    await ui.press({ key: 'form:create' })
+    const [made] = JSON.parse(files.get(WORKSPACES)!).workspaces
+    expect([made.dir, made.checkout, made.branch]).toEqual(['/Users/u/dev/web-app-worktrees/feat-rbac', '/Users/u/dev/web-app', 'feat/rbac'])
+    // a folder outside any repository: as typed, nothing chosen; a word is a search, never looked up
+    await ui.press({ key: 'workspace:new' })
+    await ui.input({ key: 'form:project', text: '~/notes/plans', kind: 'change' })
+    expect(await ui.find({ key: 'form:branch' })).toBeUndefined()
+    const looked = runs.filter(r => r[2] === WHERE_SCRIPT).length
+    await ui.input({ key: 'form:project', text: 'rbac', kind: 'change' })
+    expect(runs.filter(r => r[2] === WHERE_SCRIPT).length).toBe(looked)
+    await ui.unmount()
+  })
+
+  test('created at once after a path is typed, before it was placed: placed first, so it goes on with that branch', async ($, on) => {
+    const { files, clock } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    world.moreWorktrees = 'worktree /Users/u/dev/web-app-worktrees/feat-rbac\0HEAD 4444\0branch refs/heads/feat/rbac\0\0'
+    world.dirs.add('/Users/u/dev/web-app-worktrees/feat-rbac')
+    world.heads['/Users/u/dev/web-app-worktrees/feat-rbac'] = 'linked\nfeat/rbac\n'
+    // its lookup takes 5 s
+    world.slowWorktrees = '/Users/u/dev/web-app-worktrees/feat-rbac'
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    await ui.press({ key: 'workspace:new' })
+    await ui.input({ key: 'form:name', text: 'RBAC', kind: 'change' })
+    await ui.input({ key: 'form:project', text: '~/dev/web-app-worktrees/feat-rbac', kind: 'change' })
+    await ui.press({ key: 'form:create' })
+    expect(files.has(WORKSPACES)).toBe(false)
+    await clock.advance(6_000)
+    const [made] = JSON.parse(files.get(WORKSPACES)!).workspaces
+    expect([made.dir, made.checkout, made.branch]).toEqual(['/Users/u/dev/web-app-worktrees/feat-rbac', '/Users/u/dev/web-app', 'feat/rbac'])
+    await ui.unmount()
+  })
+
+  test('a search finds a branch\'s worktree by its folder\'s name; picked, the form goes on with that branch', async ($, on) => {
+    const { files } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    world.moreWorktrees = 'worktree /Users/u/dev/web-app-worktrees/feat-rbac\0HEAD 4444\0branch refs/heads/feat/rbac\0\0'
+    world.moreProjects = '/Users/u/dev/web-app-worktrees/feat-rbac\n'
+    world.dirs.add('/Users/u/dev/web-app-worktrees/feat-rbac')
+    world.heads['/Users/u/dev/web-app-worktrees/feat-rbac'] = 'linked\nfeat/rbac\n'
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    await ui.press({ key: 'workspace:new' })
+    await ui.input({ key: 'form:project', text: 'rbac', kind: 'change' })
+    expect(((await ui.find({ key: 'form:pick' }))?.props.options as { label: string }[]).map(o => o.label)).toEqual(['~/dev/web-app-worktrees/feat-rbac'])
+    await ui.select({ key: 'form:pick', value: '/Users/u/dev/web-app-worktrees/feat-rbac' })
+    expect((await ui.find({ key: 'form:branch' }))?.props.value).toBe('/Users/u/dev/web-app-worktrees/feat-rbac')
+    await ui.input({ key: 'form:name', text: 'RBAC', kind: 'change' })
+    await ui.press({ key: 'form:create' })
+    const [made] = JSON.parse(files.get(WORKSPACES)!).workspaces
+    expect([made.dir, made.branch]).toEqual(['/Users/u/dev/web-app-worktrees/feat-rbac', 'feat/rbac'])
+    await ui.unmount()
+  })
+
+  test('a path as the project field holds it; where WHERE_SCRIPT places it', () => {
+    expect(typedPath('README.md (shop-worktrees/design-x/docs/README.md)')).toEqual({ path: 'shop-worktrees/design-x/docs/README.md', isRelative: true })
+    expect(typedPath('~/dev/x/')).toEqual({ path: '~/dev/x', isRelative: false })
+    expect(typedPath('/a/b')).toEqual({ path: '/a/b', isRelative: false })
+    expect(typedPath('./a/b')).toEqual({ path: 'a/b', isRelative: true })
+    expect([typedPath('shop'), typedPath(''), typedPath('README.md (x)')]).toEqual([undefined, undefined, undefined])
+    const list = 'worktree /r\0HEAD 1\0branch refs/heads/main\0\0worktree /r-worktrees/b\0HEAD 2\0branch refs/heads/feat/b\0\0worktree /r-worktrees/d\0HEAD 3\0detached\0\0'
+    expect(whereFrom(`/r-worktrees/b\0${list}`)).toEqual({ checkout: '/r', worktrees: [{ path: '/r-worktrees/b', branch: 'feat/b' }], goOn: { path: '/r-worktrees/b', branch: 'feat/b' } })
+    // the main checkout, or a worktree with no branch: the repository, nothing to go on with
+    expect(whereFrom(`/r\0${list}`)).toEqual({ checkout: '/r', worktrees: [{ path: '/r-worktrees/b', branch: 'feat/b' }] })
+    expect(whereFrom(`/r-worktrees/d\0${list}`)?.goOn).toBeUndefined()
+    expect([whereFrom(''), whereFrom('\0x'), whereFrom('relative\0' + list), whereFrom('/r\0')]).toEqual([undefined, undefined, undefined, undefined])
   })
 
   test('New workspace with it, going on with a worktree of the same repository: the session is brought in', async ($, on) => {
