@@ -7,7 +7,8 @@ import type { Limit, UsageState } from './usage'
 import { AGENT_COMMANDS, afterOwner, afterStep, claudeKeep, COMPACT_FROM, cueOf, cutBytes, eventOf, EVENT_SCRIPT, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, tokensSaid, TURN_SCRIPT } from './relay'
 import type { RelayEvent, Side, Step } from './relay'
 import { branchOf, checkDue, DRIFT_EVERY, driftRequest, isDueAfterCompaction, parseVerdict, recordFolderOf, RECORDS_SCRIPT } from './drift'
-import { hiddenNames, hideInTree, hideNames, hidingFrom, namesPath, NO_HIDING, turned } from './names'
+import { hiddenNames, hideInTree, hideNames, hidingFrom, namesPath, namesProblem, NO_HIDING, turned } from './names'
+import type { Hiding } from './names'
 import { bringable, codexDir, envOfProfile, codexFlags, CODEX_MODE_SCRIPT, CODEX_TASK_SCRIPT, codexTaskState, JOB_COMMANDS, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, toggled, withThreads } from './bring'
 import {
   agentsOf,
@@ -586,61 +587,91 @@ async function toggleAccounts($: EngineInterface) {
   $.ui.status(await summaryShown($, (await $.env.get('HOME')) ?? '', await read($, snapshot)))
 }
 
-/** A toast, the hidden names out of sight in it. */
+/** A toast, the hidden names out of sight in it as the shared file says now. */
 async function toast($: EngineInterface, text: string, options?: { timeoutMs?: number }) {
-  const shown = hideNames(text, hiddenNames(await read($, hiding)))
+  const shown = hideNames(text, hiddenNames(await currentHiding($)))
   if (options === undefined) $.ui.toast(shown)
   else $.ui.toast(shown, options)
 }
 
 /** A notification's text, the hidden names out of sight in it as the shared file says now (any session may send it). */
 async function told($: EngineInterface, text: string) {
-  await readHiding($).catch(() => undefined)
-  return hideNames(text, hiddenNames(await read($, hiding)))
+  return hideNames(text, hiddenNames(await currentHiding($).catch(() => NO_HIDING)))
 }
 
+/** The shared file as last read (its text and what it says), so it is parsed again only when it changed. */
+let namesRead: { text: string; hiding: Hiding } | undefined
+/** What the pane last drew: what a press of ABC-XYZ turns from. */
+let namesDrawn: Hiding | undefined
 /**
  * The names and their switch as the shared file says now (another screen may have turned it). A file gone hides
- * nothing; one that cannot be read or is half written leaves them as they were, never shown by mistake.
+ * nothing; one that cannot be read, is half written or is not a list of names leaves them as they were, never shown by
+ * mistake.
  */
-async function readHiding($: EngineInterface) {
+async function currentHiding($: EngineInterface): Promise<Hiding> {
   const path = namesPath((await $.env.get('HOME')) ?? '')
-  let now = NO_HIDING
-  if (await $.fs.exists(path)) {
-    const raw = await readJson($, path)
-    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return
-    now = hidingFrom(raw)
+  const text = await $.fs.read(path).catch(() => undefined)
+  if (text === undefined) {
+    if (await $.fs.exists(path).catch(() => true)) return namesRead?.hiding ?? NO_HIDING
+    namesRead = undefined
+    return NO_HIDING
   }
+  if (namesRead?.text === text) return namesRead.hiding
+  let raw: unknown
+  try {
+    raw = JSON.parse(text)
+  } catch {
+    return namesRead?.hiding ?? NO_HIDING
+  }
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return namesRead?.hiding ?? NO_HIDING
+  namesRead = { text, hiding: hidingFrom(raw) }
+  return namesRead.hiding
+}
+
+/** The names' switch kept for the pane to draw from, as the shared file says now. */
+async function readHiding($: EngineInterface) {
+  const now = await currentHiding($)
   const before = await read($, hiding)
   if (before.isHidden !== now.isHidden || before.names.join('\n') !== now.names.join('\n')) await update($, hiding, () => now)
 }
 
-/** ABC-XYZ: the listed names hidden on every screen, or shown again; with none listed yet, says where they go. */
+/**
+ * ABC-XYZ: the listed names hidden on every screen, or shown again, the other way from how the pane showed them; with
+ * none listed yet, says where they go. A file that cannot be read or is not a list of names is left as it is, and said.
+ */
 async function toggleHiding($: EngineInterface) {
   const path = namesPath((await $.env.get('HOME')) ?? '')
   const text = await $.fs.read(path).catch(() => undefined)
+  if (text === undefined && (await $.fs.exists(path).catch(() => true))) {
+    await toast($, `Not turned: ${path} cannot be read.`, { timeoutMs: 15_000 })
+    return
+  }
   let raw: unknown
   if (text !== undefined) {
     try {
       raw = JSON.parse(text)
     } catch {
-      raw = undefined
-    }
-    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
-      await toast($, `Not turned: ${path} is not a list of names; fix it (as {"names": ["…"]}) or move it away.`, { timeoutMs: 15_000 })
-      return
+      raw = null
     }
   }
-  const written = turned(raw, !(text !== undefined && hidingFrom(raw).isHidden))
+  const problem = text === undefined ? undefined : namesProblem(raw)
+  if (problem?.isList === false) {
+    await toast($, `Not turned: ${path} ${problem.said}; fix it or move it away.`, { timeoutMs: 15_000 })
+    return
+  }
+  const wasHiding = hiddenNames(namesDrawn ?? (await currentHiding($))).length > 0
+  const written = turned(raw, !wasHiding)
   try {
     await $.fs.write(path, written)
   } catch (error) {
     await toast($, `Not turned: ${path} cannot be written (${message(error)}).`, { timeoutMs: 15_000 })
     return
   }
-  const now = hidingFrom(JSON.parse(written))
-  await update($, hiding, () => now)
-  if (now.isHidden && now.names.length === 0) await toast($, `No names to hide yet: list them in ${path}, as {"names": ["…"]}.`, { timeoutMs: 15_000 })
+  namesRead = { text: written, hiding: hidingFrom(JSON.parse(written)) }
+  await update($, hiding, () => namesRead!.hiding)
+  if (wasHiding) return
+  if (namesRead.hiding.names.length === 0) await toast($, `No names to hide yet: list them in ${path}, as {"names": ["…"]}.`, { timeoutMs: 15_000 })
+  else if (problem !== undefined) await toast($, `${path} ${problem.said}.`, { timeoutMs: 15_000 })
 }
 
 async function setWindow($: EngineInterface, ms: number) {
@@ -1628,8 +1659,6 @@ async function tick($: EngineInterface, hasStatusLine: boolean) {
   // this account's Claude limits, for every account's panes; the usage, while a pane shows it
   void shareLimits($).catch(() => undefined)
   if (isVisible) void refreshUsage($).catch(() => undefined)
-  // the names' switch, as another screen may have turned it
-  if (isVisible) await readHiding($).catch(() => undefined)
   const maxAgeMs = isVisible ? VISIBLE_MAX_AGE_MS : IDLE_MAX_AGE_MS
   if ((await $.clock.now()) - lastAttemptAt < maxAgeMs) return
   await refresh($, maxAgeMs)
@@ -1856,6 +1885,12 @@ export const register: Register = on => {
     $.clock.every(TICK_MS, () => {
       void tick($, hasStatusLine).catch(() => undefined)
     })
+    // the names' switch, as another screen may have turned it: looked at every second while the pane is in view
+    $.clock.every(1_000, () => {
+      void (async () => {
+        if (await isPaneVisible($)) await readHiding($)
+      })().catch(() => undefined)
+    })
     return started
   })
 
@@ -1937,8 +1972,13 @@ export const register: Register = on => {
     const selfId = await $.session.id()
     const paint = (await read($, background)) || undefined
     // the names kept off the screens, while ABC-XYZ hides them: out of every text drawn, a row's title before it is cut
-    const isHiding = (await read($, hiding)).isHidden
-    const names = hiddenNames(await read($, hiding))
+    // (as the file says now: a pane coming back into view never draws them from an older look)
+    await read($, hiding)
+    const hidingNow = await currentHiding($)
+    namesDrawn = hidingNow
+    const names = hiddenNames(hidingNow)
+    // lit while it hides something
+    const isHiding = names.length > 0
     const width = e.props.bodyColumns
     const height = e.props.scroll.bodyRows
     const hasWhere = width >= 64

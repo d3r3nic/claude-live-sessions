@@ -2,8 +2,8 @@
 
 What each version changed, newest first. Each links its pull request, which holds the details, the checks and the reviews. After updating, run `/reload-plugins` in your sessions.
 
-## 0.24.0 — 2026-10-12
-- **`ABC-XYZ`: names kept off the screens**, for a screen others see. List them in `~/Library/Application Support/live-sessions/names.json` (`{"names": ["Acme"]}`). While `ABC-XYZ` is lit, in /sessions or the Ops screen, each shows as dots (`•••• Practice`, `~/dev/••••-2025/app`) in the pane, its toasts, the Ops screen and the relay's notifications. One press turns it on or off on every screen.
+## 0.24.0 — 2026-10-12 ([#31](https://github.com/d3r3nic/claude-live-sessions/pull/31))
+- **`ABC-XYZ`: names kept off the screens**, for a screen others see. List them in `~/Library/Application Support/live-sessions/names.json` (`{"names": ["Acme Corp"]}`). While `ABC-XYZ` is lit, in /sessions or the Ops screen, each shows as dots (`•••• Practice`, `~/dev/••••-2025/app`) in any letter case and spelling (`acme-corp`, `AcmeCorp`), in the pane, its toasts, the Ops screen and the relay's notifications. One press turns it on or off on every screen.
 - **Ops screen toolbar:** `GRID` and `EVENTS` show or hide the grid and the event log (keys `g` and `e`, names `n`); the choice is kept.
 
 ## 0.23.0 — 2026-10-11 ([#30](https://github.com/d3r3nic/claude-live-sessions/pull/30))

@@ -122,6 +122,8 @@ function nextTheme() {
 
 // the names kept off the screens (ABC-XYZ), as every screen reads them: out of every row drawn while hidden
 const NAMES_FILE = nm.namesPath(HOME)
+// as the bottom line says it, short enough to be read there
+const NAMES_SAID = NAMES_FILE.startsWith(`${HOME}/`) ? `~${NAMES_FILE.slice(HOME.length)}` : NAMES_FILE
 /**
  * The names and their switch as the file says now: none when there is no file; as they were when it cannot be read or
  * is half written, so a name never shows by mistake.
@@ -137,27 +139,38 @@ function readHiding(before) {
 }
 let hiding = readHiding(nm.NO_HIDING)
 const hide = s => nm.hideNames(s, nm.hiddenNames(hiding))
-/** The names hidden, or shown again, on every screen; said why not when the file cannot be read or written. */
+/** Whether the names are out of sight now: ABC-XYZ lit. */
+const isHiding = () => nm.hiddenNames(hiding).length > 0
+/**
+ * The names hidden on every screen, or shown again, the other way from how this screen shows them; said why not when
+ * the file cannot be read, is not a list of names (never written over) or cannot be written.
+ */
 function toggleHiding() {
   let raw
+  let problem
   if (existsSync(NAMES_FILE)) {
     try {
       raw = JSON.parse(readFileSync(NAMES_FILE, 'utf8'))
-    } catch {}
-    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return `not turned: ${NAMES_FILE} is not a list of names`
+    } catch {
+      raw = null
+    }
+    problem = nm.namesProblem(raw)
+    if (problem?.isList === false) return `not turned: names.json ${problem.said}`
   }
-  const written = nm.turned(raw, !(raw !== undefined && nm.hidingFrom(raw).isHidden))
+  const wasHiding = isHiding()
+  const written = nm.turned(raw, !wasHiding)
   try {
     mkdirSync(NAMES_FILE.slice(0, NAMES_FILE.lastIndexOf('/')), { recursive: true })
     // whole or not at all: another screen reading it meanwhile never finds half a file
     writeFileSync(`${NAMES_FILE}.${process.pid}`, written)
     renameSync(`${NAMES_FILE}.${process.pid}`, NAMES_FILE)
   } catch (error) {
-    return `not turned: ${NAMES_FILE} cannot be written (${String(error?.code ?? error)})`
+    return `not turned: names.json cannot be written (${String(error?.code ?? error)})`
   }
   hiding = nm.hidingFrom(JSON.parse(written))
-  if (!hiding.isHidden) return 'names shown'
-  return hiding.names.length === 0 ? `no names to hide yet: list them in ${NAMES_FILE}, as {"names": ["…"]}` : 'names hidden'
+  if (wasHiding) return 'names shown'
+  if (hiding.names.length === 0) return `no names to hide yet: list them in ${NAMES_SAID}, as {"names": ["…"]}`
+  return problem === undefined ? 'names hidden' : `names hidden; names.json ${problem.said}`
 }
 /** The grid or the event log shown, or not; kept for the next screen. */
 function toggleShown(what) {
@@ -312,7 +325,7 @@ function frame(snap, now, cols, rows, tick, note = '') {
   // names kept out of sight on every screen
   let toolbar = ''
   const presses = []
-  for (const [what, label, key, isOn] of [['grid', 'GRID', 'g', prefs.grid], ['events', 'EVENTS', 'e', prefs.events], ['names', 'ABC-XYZ', 'n', hiding.isHidden]]) {
+  for (const [what, label, key, isOn] of [['grid', 'GRID', 'g', prefs.grid], ['events', 'EVENTS', 'e', prefs.events], ['names', 'ABC-XYZ', 'n', isHiding()]]) {
     const button = `[${isOn ? '▣' : '□'} ${label}]`
     toolbar += toolbar === '' ? ' ' : '   '
     // its cells on the screen: the row starts after the border, in the second
@@ -528,7 +541,7 @@ if (process.argv.includes('--frame')) {
   let loaded = load()
   if (loaded === undefined) {
     // none of this version yet (an update: sessions not reloaded still write the one before): said, and waited for
-    process.stdout.write(`No snapshot of this version at ${SNAPSHOT} yet: open /sessions in Claude Code once (with this plugin's version). Waiting for it; q closes.\n`)
+    process.stdout.write(hide(`No snapshot of this version at ${SNAPSHOT} yet: open /sessions in Claude Code once (with this plugin's version). Waiting for it; q closes.\n`))
     // keys while it waits: q or Ctrl-C closes, any other is dropped, never left for the screen once it draws; its
     // terminal gone (closed, with or without a hang-up), it ends
     process.stdin.setRawMode?.(true)
@@ -549,7 +562,7 @@ if (process.argv.includes('--frame')) {
       if (next.node === undefined) {
         refusedCode = code
         stale = next.why
-        process.stdout.write(`${next.why}; still waiting.\n`)
+        process.stdout.write(hide(`${next.why}; still waiting.\n`))
         continue
       }
       process.stdin.setRawMode?.(false)
@@ -593,7 +606,7 @@ if (process.argv.includes('--frame')) {
       try {
         restore()
         // written straight to the descriptor: a stream opened now on a terminal that hung up would never return
-        writeSync(2, `The ops screen stopped: ${String(error?.stack ?? error)}\n`)
+        writeSync(2, hide(`The ops screen stopped: ${String(error?.stack ?? error)}\n`))
       } catch {}
       process.exit(1)
     })
@@ -622,8 +635,9 @@ if (process.argv.includes('--frame')) {
       nextTheme()
       process.stdout.write(bgOn() + '\x1b[2J')
     }
+    // a toolbar key typed alone, never one inside pasted text
     for (const [key, what] of [['g', 'grid'], ['e', 'events'], ['n', 'names']]) {
-      if (!keys.includes(key)) continue
+      if (keys !== key) continue
       note = press(what)
       noteUntil = Date.now() + 4_000
     }

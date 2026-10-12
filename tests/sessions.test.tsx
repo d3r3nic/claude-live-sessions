@@ -105,7 +105,7 @@ import {
   words,
   workspacesFrom,
 } from '../hooks/workspaces'
-import { hiddenNames, hideInTree, hideNames, hidingFrom, namesPath, NO_HIDING, turned } from '../hooks/names'
+import { hiddenNames, hideInTree, hideNames, hidingFrom, namesPath, namesProblem, NO_HIDING, turned } from '../hooks/names'
 import {
   ENV_LINES,
   GIT,
@@ -4277,6 +4277,15 @@ describe('names kept off the screens', () => {
     // a terminal's colour codes are not text, even where a name is a letter of one
     expect(hideNames('\x1b[38;2;1;2;3mACME\x1b[39m m', ['acme', 'm'])).toBe('\x1b[38;2;1;2;3m••••\x1b[39m •')
     expect([hideNames('nothing hidden', []), hideNames('', ['acme'])]).toEqual(['nothing hidden', ''])
+    // a name of words in any spelling folders, branches and ids give it: spaces, dashes, dots, underscores, slashes, none
+    expect(hideNames('Acme Corp · acme-corp · ACME_CORP · AcmeCorp · acme.corp · feat/acme-corp-sso · acme--corp', ['Acme Corp']))
+      .toBe('••••••••• · ••••••••• · ••••••••• · •••••••• · ••••••••• · feat/•••••••••-sso · ••••••••••')
+    // what is left of a name a text was cut inside (three characters or more), where it ends or is cut; not elsewhere
+    expect([hideNames('the plan for Acm', ['acme corp']), hideNames('feat/ACME-Co…', ['acme corp']), hideNames('a·Ac', ['acme']), hideNames('Acm is here', ['acme'])])
+      .toEqual(['the plan for •••', 'feat/•••••••…', 'a·Ac', 'Acm is here'])
+    // a name written with its accents apart (as macOS can write a folder's name)
+    expect([hideNames('Cafe\u0301 Noir', ['Café']), hideNames('Café Noir', ['Cafe\u0301'.normalize('NFC')])]).toEqual(['•••• Noir', '•••• Noir'])
+    expect(hideNames('Cafe\u0301 au lait', ['tea'])).toBe('Cafe\u0301 au lait')
     // the file: names as text, trimmed, once; blank, overlong, control characters and others left out; hidden unless it says not
     expect(hidingFrom({ names: [' Acme ', '', 'x'.repeat(65), 'a\nb', 3, 'Acme', 'Beta'] })).toEqual({ names: ['Acme', 'Beta'], isHidden: true })
     expect(hidingFrom({ names: ['Acme'], hidden: false })).toEqual({ names: ['Acme'], isHidden: false })
@@ -4286,6 +4295,11 @@ describe('names kept off the screens', () => {
     // turned: its names, and anything else in it, kept
     expect(JSON.parse(turned({ names: ['Acme'], note: 'mine' }, false))).toEqual({ names: ['Acme'], note: 'mine', hidden: false })
     expect(JSON.parse(turned(undefined, true))).toEqual({ names: [], hidden: true })
+    // what is wrong with a file as a list of names: said on a press; one that is not a list is never written over
+    expect(namesProblem({ names: ['Acme'] })).toBeUndefined()
+    expect(namesProblem({ hidden: true })).toBeUndefined()
+    for (const notList of [{ names: 'Acme' }, { name: ['Acme'], names: {} }, ['Acme'], null, 'Acme']) expect(namesProblem(notList)?.isList).toBe(false)
+    expect(namesProblem({ names: ['Acme', 'x'.repeat(65), 7] })).toEqual({ isList: true, said: 'leaves out 2 of its names (each is text of up to 64 characters, at most 50 of them)' })
   })
 
   test('a drawing: its strings, a button\'s label, an input\'s label and placeholder, a choice\'s text; never a key, a value or what is typed', () => {
@@ -4297,9 +4311,13 @@ describe('names kept off the screens', () => {
         'Acme',
         { type: 'Text', props: { color: 'warning' }, children: ['at ACME', plain] },
         { type: 'Button', props: { key: 'open acme', label: 'Open Acme' } },
-        { type: 'Input', props: { key: 'acme', label: 'Acme', placeholder: 'acme-app', value: 'Acme typed' } },
+        { type: 'Input', props: { key: 'acme', label: 'Acme', placeholder: 'acme-app', value: 'Acme typed', submitLabel: 'Ask Acme' } },
         { type: 'Select', props: { key: 'pick', value: '/x/acme', options: [{ value: '/acme', label: 'Acme' }, { value: '/x/acme' }, { value: '/b', label: 'b' }] } },
         plain,
+        { type: 'Code', props: { source: 'acme()', path: '/x/acme.ts', language: 'acme' } },
+        { type: 'Markdown', props: { text: '**Acme**' } },
+        { type: 'Image', props: { alt: 'Acme logo', source: { png: 'acme' }, columns: 2, rows: 1 } },
+        { type: 'Link', props: { href: 'https://acme.example', label: 'Acme' }, children: ['Acme site'] },
       ],
     }
     const hidden = hideInTree(tree as never, ['acme']) as unknown as typeof tree
@@ -4310,14 +4328,19 @@ describe('names kept off the screens', () => {
         '••••',
         { type: 'Text', props: { color: 'warning' }, children: ['at ••••', plain] },
         { type: 'Button', props: { key: 'open acme', label: 'Open ••••' } },
-        { type: 'Input', props: { key: 'acme', label: '••••', placeholder: '••••-app', value: 'Acme typed' } },
+        { type: 'Input', props: { key: 'acme', label: '••••', placeholder: '••••-app', value: 'Acme typed', submitLabel: 'Ask ••••' } },
         { type: 'Select', props: { key: 'pick', value: '/x/acme', options: [{ value: '/acme', label: '••••' }, { value: '/x/acme', label: '/x/••••' }, { value: '/b', label: 'b' }] } },
         plain,
+        { type: 'Code', props: { source: '••••()', path: '/x/••••.ts', language: 'acme' } },
+        { type: 'Markdown', props: { text: '**••••**' } },
+        { type: 'Image', props: { alt: '•••• logo', source: { png: 'acme' }, columns: 2, rows: 1 } },
+        { type: 'Link', props: { href: 'https://acme.example', label: '••••' }, children: ['•••• site'] },
       ],
     })
     // what shows no name is the element it was; nothing hidden, the drawing as it was
     expect(hidden.children[5]).toBe(plain)
-    expect((hidden.children[4] as typeof tree).props).not.toBe(tree.children[4])
+    expect(hidden.children[4]).not.toBe(tree.children[4])
+    expect((hidden.children[4] as typeof tree).props).not.toBe((tree.children[4] as typeof tree).props)
     expect(((hidden.children[4] as { props: { options: unknown[] } }).props.options[2])).toBe((tree.children[4] as { props: { options: unknown[] } }).props.options[2])
     expect(hideInTree(tree as never, [])).toBe(tree)
     expect(hideInTree({ type: 'Box', children: [plain] } as never, ['acme'])).toEqual({ type: 'Box', children: [plain] })
@@ -4341,6 +4364,9 @@ describe('names kept off the screens', () => {
     expect(await drawn()).toMatch(/WEB CONSOLE/)
     expect((await ui.find({ key: 'names' }))?.props).toMatchObject({ label: 'ABC-XYZ' })
     expect((await ui.find({ key: 'names' }))?.props.variant).toBeUndefined()
+    // turned on by another screen a moment ago, before the pane looked again: a press goes the other way from what the
+    // pane showed (on), never from what the file says
+    files.set(NAMES, JSON.stringify({ names: ['rbac', 'Web'], hidden: true }))
     await ui.press({ key: 'names' })
     // on: kept in the file every screen reads, its names as they were; lit
     expect(JSON.parse(files.get(NAMES)!)).toEqual({ names: ['rbac', 'Web'], hidden: true })
@@ -4360,31 +4386,51 @@ describe('names kept off the screens', () => {
     expect(toasts.at(-1)).toBe('Practice •••• hidden: its agents keep running; Open brings it back.')
     // turned off on another screen (the ops screen): the pane follows at its next look
     files.set(NAMES, JSON.stringify({ names: ['rbac', 'Web'], hidden: false }))
-    await clock.advance(4_000)
+    await clock.advance(1_000)
     expect(await drawn()).toMatch(/Practice RBAC/)
     // half written meanwhile: left as it was, never shown by mistake
     await ui.press({ key: 'names' })
     files.set(NAMES, '{"names": ["rb')
-    await clock.advance(4_000)
+    await clock.advance(1_000)
     expect(await drawn()).not.toMatch(/rbac/i)
     // the file gone: nothing hidden
     files.delete(NAMES)
-    await clock.advance(4_000)
+    await clock.advance(1_000)
     expect(await drawn()).toMatch(/Practice RBAC/)
     // a file that is not a list of names is left as it is, and said
     files.set(NAMES, '["rbac"]')
     await ui.press({ key: 'names' })
     expect(files.get(NAMES)).toBe('["rbac"]')
     expect(toasts.at(-1)).toMatch(/^Not turned: .*names\.json is not a list of names/)
-    // none listed yet: on, and said where they go
+    files.set(NAMES, '{"names": "rbac"}')
+    await ui.press({ key: 'names' })
+    expect(files.get(NAMES)).toBe('{"names": "rbac"}')
+    // there but not readable: left as it is, and said
+    world.unreadable = NAMES
+    await ui.press({ key: 'names' })
+    expect(files.get(NAMES)).toBe('{"names": "rbac"}')
+    expect(toasts.at(-1)).toMatch(/^Not turned: .*names\.json cannot be read\.$/)
+    world.unreadable = ''
+    // names it cannot use: hidden, those left out said
+    files.set(NAMES, JSON.stringify({ names: ['rbac', 'x'.repeat(65)], hidden: false }))
+    await clock.advance(1_000)
+    await ui.press({ key: 'names' })
+    expect(JSON.parse(files.get(NAMES)!)).toEqual({ names: ['rbac', 'x'.repeat(65)], hidden: true })
+    expect(toasts.at(-1)).toMatch(/names\.json leaves out 1 of its names/)
+    expect(await drawn()).not.toMatch(/rbac/i)
+    // none listed yet (as the pane shows, a second later): on, and said where they go
     files.delete(NAMES)
+    await clock.advance(1_000)
+    expect(await drawn()).toMatch(/Practice RBAC/)
     await ui.press({ key: 'names' })
     expect(JSON.parse(files.get(NAMES)!)).toEqual({ names: [], hidden: true })
     expect(toasts.at(-1)).toMatch(/^No names to hide yet: list them in .*names\.json/)
+    // on, with nothing to hide: not lit
+    expect((await ui.find({ key: 'names' }))?.props.variant).toBeUndefined()
     await ui.unmount()
-    // a title cut to a narrow row's width shows no part of a name before its …
+    // a pane coming into view draws as the file says then, never from an older look; a title cut to a narrow row's
+    // width shows no part of a name before its …
     files.set(NAMES, JSON.stringify({ names: ['console'] }))
-    await clock.advance(4_000)
     const narrow = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(45) })
     const titles = (await narrow.findAll({ type: 'Button' })).map(b => (b.props as { label: string }).label).filter(l => l.startsWith('WEB'))
     expect(titles).toContain('WEB •••…')

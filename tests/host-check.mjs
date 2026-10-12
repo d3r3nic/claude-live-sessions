@@ -1275,12 +1275,16 @@ except ChildProcessError: pass
       writeFileSync(join(kept, 'names.json'), JSON.stringify({ names: ['ops x', '確認'] }))
       // the events: theirs, and one cut where a name is (the row has 96 cells for its text)
       const namedEvents = join(namesHome, 'events.jsonl')
-      writeFileSync(namedEvents, `${readFileSync(events, 'utf8')}${JSON.stringify({ at: now - 5_000, kind: 'relay', text: `${'x'.repeat(93)}Ops X and more`, workspace: 'opsx' })}\n`)
+      writeFileSync(namedEvents, `${readFileSync(events, 'utf8')}${[
+        JSON.stringify({ at: now - 6_000, kind: 'relay', text: 'branch feat/ops-x-sso and OpsX', workspace: 'opsx' }),
+        JSON.stringify({ at: now - 5_000, kind: 'relay', text: `${'x'.repeat(93)}Ops X and more`, workspace: 'opsx' }),
+      ].join('\n')}\n`)
       const framed = (...extra) => spawnSync(process.execPath, ['--no-warnings', opsFile, '--frame', ...extra], { encoding: 'utf8', env: { ...env, HOME: namesHome, LIVE_SESSIONS_EVENTS: namedEvents, COLS: '120', ROWS: extra.includes('--tall') ? '60' : '30' } }).stdout
       const everything = framed('--plain', '--tall').split('\n')
       check('ops: listed names are out of sight in every part of the screen, the grid and the event log too; a row cut where one is shows none of it',
         everything.some(l => l.includes('EVENT LOG')) && everything.some(l => /GRID \d/.test(l)) && everything.some(l => l.includes('READY FOR CLAUDE')) &&
-        !everything.some(l => /ops x|確認/i.test(l)) && everything.some(l => l.includes('••••• → Claude') || l.includes('•••••: Codex')) && everything.some(l => /x{93}••…/.test(l)) && !everything.some(l => /x{93}O/.test(l)),
+        !everything.some(l => /ops[\s._/-]*x|確認/i.test(l)) && everything.some(l => l.includes('••••• → Claude') || l.includes('•••••: Codex')) && everything.some(l => /x{93}••…/.test(l)) && !everything.some(l => /x{93}O/.test(l)) &&
+        everything.some(l => l.includes('branch feat/•••••-sso and ••••')),
         JSON.stringify(everything.filter(l => /READY FOR|x{90}/.test(l)).map(l => l.trim().slice(0, 130))))
       writeFileSync(join(kept, 'ops.json'), JSON.stringify({ theme: 'AMBER', grid: false, events: false }))
       const hidden = framed('--plain').split('\n')
@@ -1302,7 +1306,11 @@ except ChildProcessError: pass
         JSON.stringify(toolbar))
       writeFileSync(join(kept, 'names.json'), JSON.stringify({ names: ['ops x', '確認'], hidden: false }))
       const shown = framed('--plain')
-      check('ops: with the names shown, they are as they are', shown.includes('Ops X 要確認') && shown.includes('[□ ABC-XYZ] n'), JSON.stringify(shown.split('\n')[2]?.trim()))
+      writeFileSync(join(kept, 'names.json'), JSON.stringify({ names: [], hidden: true }))
+      const nothing = framed('--plain')
+      check('ops: with the names shown, or none listed, they are as they are and ABC-XYZ is not lit',
+        shown.includes('Ops X 要確認') && shown.includes('[□ ABC-XYZ] n') && nothing.includes('Ops X 要確認') && nothing.includes('[□ ABC-XYZ] n'),
+        `${JSON.stringify(shown.split('\n')[2]?.trim())} ${JSON.stringify(nothing.split('\n')[2]?.trim())}`)
       // live: a click on ABC-XYZ hides them and keeps it for every screen; g and e hide the grid and the event log and
       // keep that; the names turned on another screen are followed within a second, a half-written file changing nothing
       const liveHome = join(scratch, 'names-live')
@@ -1312,7 +1320,7 @@ except ChildProcessError: pass
       writeFileSync(namesFile, JSON.stringify({ names: ['ops x'], hidden: false }))
       const clicked = bare(live([
         'os.write(fd, b"\\x1b[<0;35;3M\\x1b[<0;35;3m")', 'drain(1.5)', 'out += b"<<CLICKED>>"',
-        'os.write(fd, b"ge")', 'drain(1.5)',
+        'os.write(fd, b"g")', 'drain(0.5)', 'os.write(fd, b"e")', 'drain(1.5)',
       ].join('\n'), { HOME: liveHome }))
       // the last whole frame drawn before a point of the output (a frame read in part is left out)
       const frameBefore = (text, end) => {
@@ -1329,6 +1337,19 @@ except ChildProcessError: pass
         JSON.stringify(keptNames) === JSON.stringify({ names: ['ops x'], hidden: true }) &&
         keptPrefs.grid === false && keptPrefs.events === false && keptPrefs.theme === 'MATRIX' && !after.includes('EVENT LOG') && after.includes('[□ GRID] g'),
         `${before.includes('Ops X')} ${after.includes('Ops X')} ${JSON.stringify(keptNames)} ${JSON.stringify(keptPrefs)}`)
+      // a key inside pasted text turns nothing
+      const pasted = bare(live(['os.write(fd, b"see the gen")', 'drain(1.5)'].join('\n'), { HOME: liveHome }))
+      check('ops, live: a toolbar key inside pasted text turns nothing',
+        JSON.stringify(JSON.parse(readFileSync(namesFile, 'utf8'))) === JSON.stringify({ names: ['ops x'], hidden: true }) &&
+        JSON.parse(readFileSync(join(liveKept, 'ops.json'), 'utf8')).grid === false && !pasted.includes('names shown') && !pasted.includes('grid shown'),
+        readFileSync(namesFile, 'utf8').trim())
+      // a file that is not a list of names: never written over, and said
+      writeFileSync(namesFile, '{"names": "ops x"}')
+      const refused = bare(live(['os.write(fd, b"n")', 'drain(1.5)'].join('\n'), { HOME: liveHome }))
+      check('ops, live: a press on a file that is not a list of names leaves it as it is, and says so',
+        readFileSync(namesFile, 'utf8') === '{"names": "ops x"}' && refused.includes('not turned: names.json is not a list of names'),
+        readFileSync(namesFile, 'utf8'))
+      writeFileSync(namesFile, JSON.stringify({ names: ['ops x'], hidden: true }))
       const followed = bare(live([
         `open(${JSON.stringify(namesFile)}, "w").write(${JSON.stringify(JSON.stringify({ names: ['ops x'], hidden: false }))})`, 'drain(2.0)', 'out += b"<<SHOWN>>"',
         `open(${JSON.stringify(namesFile)}, "w").write(${JSON.stringify(JSON.stringify({ names: ['ops x'], hidden: true }))})`, 'drain(2.0)', 'out += b"<<HIDDEN>>"',
