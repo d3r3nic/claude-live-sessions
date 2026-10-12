@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { ClaudeSession, CodexSession, Place, Relay, SessionContext, Snapshot, Thread, UsageView, Workspace } from '../types'
+import type { BackgroundTask, ClaudeSession, CodexSession, Place, Relay, SessionContext, Snapshot, Thread, UsageView, Workspace } from '../types'
 import { accountOfFile, applyScan, claudeLimits, clockOf, currentLimits, EMPTY_USAGE, limitSaid, markKey, mergeLimits, offsetOf, OFFSETS_SCRIPT, parseContexts, rankUsage, scanInput, sharedLimitsFrom, usageFrom, USAGE_FILES_SCRIPT, USAGE_KEEP_MS, WINDOW_MS, wholeFiles } from './usage'
 import type { Limit, UsageState } from './usage'
 import { AGENT_COMMANDS, afterOwner, afterStep, claudeKeep, COMPACT_FROM, cueOf, cutBytes, eventOf, EVENT_SCRIPT, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, tokensSaid, TURN_SCRIPT } from './relay'
@@ -93,6 +93,7 @@ import {
   parseRollouts,
   parsePlaces,
   parseRecent,
+  parseTasks,
   parseThreads,
   profileOf,
   readOnlyArgs,
@@ -101,6 +102,7 @@ import {
   shownIn,
   sortClaude,
   statusSummary,
+  tasksNow,
   threadQuery,
   transcriptPath,
   viewOf,
@@ -162,6 +164,8 @@ const background = atom({ plugin: 'live-sessions', key: 'background' } as const,
 const TOOL_COLOR = { claude: '#c15f3c', codex: '#1f5fd0' } as const
 /** An idle session's row. */
 const IDLE_BACKGROUND = '#ffffff'
+/** A session's background work listed under its row: the oldest this many, then how many more. */
+const TASKS_SHOWN = 3
 
 /** The activity window; kept across sessions in `$.store` as `windowMs`. */
 const activeWindow = atom({ plugin: 'live-sessions', key: 'window' } as const, 0)
@@ -306,6 +310,25 @@ async function contextsOf($: EngineInterface, files: readonly string[], now: num
 let contextRead: { key: string; at: number; contexts: Map<string, SessionContext> } | undefined
 const CONTEXT_MAX_AGE_MS = 10_000
 
+/**
+ * The background work each session started and has not seen end, by its transcript (tasks.pl, from when its process
+ * started): one run for all of them, read again at most every TASKS_MAX_AGE_MS, and at once when a session's state
+ * changes. Only sessions not idle are read: an idle one has none running, as Claude Code's own status says.
+ */
+async function tasksOf($: EngineInterface, sessions: readonly { file: string; since: number; status: string }[], now: number) {
+  if (sessions.length === 0) return new Map<string, BackgroundTask[]>()
+  const key = sessions.map(s => `${s.since} ${s.status} ${s.file}`).sort().join('\n')
+  if (tasksRead?.key === key && now - tasksRead.at < TASKS_MAX_AGE_MS) return tasksRead.tasks
+  const out = await $.process
+    .run(['/usr/bin/perl', `${$.plugin.root}/hooks/tasks.pl`, ...sessions.flatMap(s => [String(s.since), s.file])], { timeoutMs: 20_000 })
+    .catch(() => undefined)
+  const tasks = parseTasks(out?.stdout ?? '')
+  if (out !== undefined) tasksRead = { key, at: now, tasks }
+  return tasks
+}
+let tasksRead: { key: string; at: number; tasks: Map<string, BackgroundTask[]> } | undefined
+const TASKS_MAX_AGE_MS = 10_000
+
 async function codexThreads(
   $: EngineInterface,
   codexHome: string,
@@ -422,7 +445,15 @@ async function collect($: EngineInterface, home: string, now: number): Promise<S
     const context = contexts.get(fileOf.get(key) ?? '')
     return context === undefined ? {} : { context }
   }
-  const claude = claudeRows.map(s => ({ ...s, cwd: workDir(s.cwd, recentOf(`claude-${s.pid}`), known), ...contextOf(`claude-${s.pid}`) }))
+  // and the background work it has going (a session whose process start the registry does not say is not read: every
+  // task its transcript ever started would count)
+  const busyRows = claudeRows.filter(s => s.status !== 'idle' && (s.startedAt ?? 0) > 0)
+  const tasks = await tasksOf($, busyRows.map(s => ({ file: fileOf.get(`claude-${s.pid}`)!, since: s.startedAt!, status: s.status })), now)
+  const tasksFor = (s: ClaudeSession) => {
+    const going = tasksNow(s.status, busyRows.includes(s) ? (tasks.get(fileOf.get(`claude-${s.pid}`)!) ?? []) : [])
+    return going.length === 0 ? {} : { tasks: going }
+  }
+  const claude = claudeRows.map(s => ({ ...s, cwd: workDir(s.cwd, recentOf(`claude-${s.pid}`), known), ...contextOf(`claude-${s.pid}`), ...tasksFor(s) }))
   const codex = started.map(s => ({ ...s, cwd: workDir(s.cwd, recentOf(`codex-${s.key}`), known), ...contextOf(`codex-${s.key}`) }))
   const places = Object.fromEntries(
     [...claude, ...codex].map(s => [s.cwd, known[s.cwd] ?? { repo: '', name: '', tree: s.cwd, branch: '' }] as const),
@@ -1990,7 +2021,7 @@ export const register: Register = on => {
     const canOpen = (await $.env.get('TERM_PROGRAM')) === 'Apple_Terminal'
     const hasMove = hasWhere && canOpen
     // a session row's title, in a row `w` wide
-    const titleWidthAt = (w: number) => Math.max(8, w - (6 + 7 + 10 + (hasWhere ? 9 : 0) + (hasContext ? 10 : 0) + 5 + 10))
+    const titleWidthAt = (w: number) => Math.max(8, w - (6 + 7 + 11 + (hasWhere ? 9 : 0) + (hasContext ? 10 : 0) + 5 + 10))
     const elements = $.ui.resolve(e)
     const Input = 'Input' in elements ? elements.Input : undefined
     const Select = 'Select' in elements ? elements.Select : undefined
@@ -2068,15 +2099,16 @@ export const register: Register = on => {
 
     const itemRow = (i: Item, siblings: readonly string[], scope: string, w = width) => {
       const isWorking = i.state === 'working'
+      const isBackground = i.state === 'background'
       const isIdle = i.state === 'idle'
-      const color = isWorking ? 'warning' : isIdle ? undefined : 'permission'
+      const color = isWorking ? 'warning' : isBackground ? 'suggestion' : isIdle ? undefined : 'permission'
       const tool = TOOL_COLOR[i.tool]
       const title = hideNames(i.tags.length > 0 ? `${i.title} (${i.tags.join(', ')})` : i.title, names)
       const target = canOpen ? i.target : undefined
       return (
         <Box key={i.key} flexDirection="row" width={w} {...(isIdle ? { backgroundColor: IDLE_BACKGROUND } : {})}>
           <Box width={6} flexShrink={0}>
-            <Text color={tool}>{`    ${isWorking ? '●' : isIdle ? '○' : '◆'}`}</Text>
+            <Text color={tool}>{`    ${isWorking ? '●' : isBackground ? '◐' : isIdle ? '○' : '◆'}`}</Text>
           </Box>
           <Box width={7} flexShrink={0}>
             <Text color={tool} bold>{i.tool}</Text>
@@ -2093,7 +2125,7 @@ export const register: Register = on => {
               />
             )}
           </Box>
-          <Box width={9} flexShrink={0} marginLeft={1}>
+          <Box width={10} flexShrink={0} marginLeft={1}>
             <Text color={color} wrap="truncate-end">{i.state}</Text>
           </Box>
           {hasWhere && (
@@ -2112,6 +2144,21 @@ export const register: Register = on => {
           {more(`item:${i.key}`)}
         </Box>
       )
+    }
+    // the background work a session has going, a line each under its row: what it is, what its call said it does, for
+    // how long (the oldest few, then how many more)
+    const taskRows = (i: Item, w: number): Element[] => {
+      const tasks = i.tasks ?? []
+      const shown = tasks.slice(0, TASKS_SHOWN)
+      const row = (key: string, text: string) => (
+        <Box key={key} width={w - 13} marginLeft={13}>
+          <Text dimColor wrap="truncate-end">{text}</Text>
+        </Box>
+      )
+      return [
+        ...shown.map(t => row(`task ${i.key} ${t.id}`, `↳ ${t.kind}${t.what === '' ? '' : `  ${t.what}`} · ${ago(now - t.since)}`)),
+        ...(tasks.length > shown.length ? [row(`tasks ${i.key}`, `↳ ${tasks.length - shown.length} more`)] : []),
+      ]
     }
     // a session's row and, while shown, its actions; while it is being assigned, the workspaces to choose from
     const sessionRow = (i: Item, siblings: readonly string[], scope: string, treeDir = '', w = width) => {
@@ -2147,6 +2194,7 @@ export const register: Register = on => {
       return (
         <Box key={`row ${i.key}`} flexDirection="column" width={w}>
           {itemRow(i, siblings, scope, w)}
+          {taskRows(i, w)}
           {open === id && bar(id, 6, choosing.key === i.key ? choices() : actions(), w)}
         </Box>
       )
@@ -2165,8 +2213,9 @@ export const register: Register = on => {
       )
     }
 
-    const working = [...view.workspaces.flatMap(w => w.items), ...view.repos.flatMap(r => r.trees.flatMap(t => t.items))]
-      .filter(i => i.state === 'working').length
+    const listed = [...view.workspaces.flatMap(w => w.items), ...view.repos.flatMap(r => r.trees.flatMap(t => t.items))]
+    const working = listed.filter(i => i.state === 'working').length
+    const inBackground = listed.filter(i => i.state === 'background').length
 
     // each shown account's limits, as last read; under them, while asked for, its projects' parts of them
     const used = await read($, usage)
@@ -2231,6 +2280,7 @@ export const register: Register = on => {
         <Box flexDirection="row" width={width}>
           <Text bold>{`${snap.claude.length} Claude · ${snap.codex.length} Codex`}</Text>
           {working > 0 && <Text color="warning">{` · ${working} working`}</Text>}
+          {inBackground > 0 && <Text color="suggestion">{` · ${inBackground} background`}</Text>}
         </Box>
         <Box flexDirection="row" width={width} columnGap={1}>
           <Text dimColor>active in</Text>

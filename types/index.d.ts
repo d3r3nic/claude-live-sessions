@@ -9,7 +9,10 @@ export type ClaudeSession = {
   cwd: string
   /** Where it started: its transcript is kept under this directory, so a resume runs from it. */
   startCwd: string
-  /** As the registry spells it: `busy`, `idle`, or another word for a state that wants the person. */
+  /**
+   * As the registry spells it: `busy`, `idle`, `shell` (its turn over, a command or monitor it started in the
+   * background still running), or another word for a state that wants the person.
+   */
   status: string
   /** `interactive`, `bg`, ... */
   kind: string
@@ -21,9 +24,19 @@ export type ClaudeSession = {
   isForeground: boolean
   /** When the status last changed (its last turn began or ended), ms since the epoch. */
   since: number
+  /** When its process started, as the registry says (`startedAt`), ms since the epoch; 0 or unset when it does not. */
+  startedAt?: number
   /** Its context at its last request, in tokens, as its transcript records it (none read yet: unset). */
   context?: SessionContext
+  /** The background work it has going, oldest first, as its transcript and its registry's state say; unset for none. */
+  tasks?: BackgroundTask[]
 }
+
+/**
+ * Background work a Claude session started and has not seen end: a command run in the background (or moved there when
+ * it ran past its time), a monitor, an agent. `what` is the call's description, cut short ('' without one).
+ */
+export type BackgroundTask = { kind: 'shell' | 'monitor' | 'agent'; id: string; since: number; what: string }
 
 /**
  * A session's context at its last request: its size in tokens, and its window when the records say; or, compacted

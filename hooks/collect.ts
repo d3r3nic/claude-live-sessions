@@ -1,5 +1,5 @@
 // Pure parsing and matching: no `$`, so the tests drive it directly.
-import type { ClaudeSession, CodexSession, Place, SessionContext, Snapshot, Workspace } from '../types'
+import type { BackgroundTask, ClaudeSession, CodexSession, Place, SessionContext, Snapshot, Workspace } from '../types'
 import { COMPACT_FROM, RELAY_CAP, tokensSaid } from './relay'
 import { DRIFT_EVERY } from './drift'
 import { tmuxName } from './workspaces'
@@ -17,8 +17,13 @@ export const WORKING_MS = 60_000
  */
 export const STALE_BUSY_MS = 12 * 3_600_000
 
-/** `working`, `stalled`, `idle`, or the registry's word for a state that wants the person. */
+/**
+ * `working`, `stalled`, `background`, `idle`, or the registry's word for a state that wants the person. `background`:
+ * its turn is over and a command or monitor it started in the background still runs (Claude Code's own `shell`; an
+ * agent it started still running keeps it `busy`), so it is not done.
+ */
 export function claudeState(s: ClaudeSession, now: number): string {
+  if (s.status === 'shell') return 'background'
   if (s.status !== 'busy') return s.status
   return now - s.since < STALE_BUSY_MS ? 'working' : 'stalled'
 }
@@ -50,11 +55,12 @@ export function forAccount(snap: Snapshot, account: string): Snapshot {
   }
 }
 
-/** The status line: how many of each are live, how many working. */
+/** The status line: how many of each are live, how many working, and how many Claude sessions wait on background work. */
 export function statusSummary(snap: Snapshot): string {
   const busyClaude = snap.claude.filter(s => claudeState(s, snap.checkedAt) === 'working').length
+  const backgroundClaude = snap.claude.filter(s => claudeState(s, snap.checkedAt) === 'background').length
   const busyCodex = snap.codex.filter(s => s.updatedAt > 0 && snap.checkedAt - s.updatedAt < WORKING_MS).length
-  return `Claude ${snap.claude.length} (${busyClaude} working) · Codex ${snap.codex.length} (${busyCodex} working) · /sessions`
+  return `Claude ${snap.claude.length} (${busyClaude} working${backgroundClaude > 0 ? `, ${backgroundClaude} background` : ''}) · Codex ${snap.codex.length} (${busyCodex} working) · /sessions`
 }
 
 const UUID_RE = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
@@ -404,6 +410,7 @@ export function claudeFromRegistry(
     tty: proc.tty,
     isForeground: isForeground(proc.stat),
     since: num(o.statusUpdatedAt) || num(o.updatedAt) || num(o.startedAt),
+    startedAt: num(o.startedAt),
   }
 }
 
@@ -763,6 +770,35 @@ export function parseRecent(stdout: string): Map<string, string[]> {
 export const transcriptPath = (configDir: string, startCwd: string, sessionId: string) =>
   `${configDir}/projects/${startCwd.replace(/[^A-Za-z0-9]/g, '-')}/${sessionId}.jsonl`
 
+const TASK_KINDS = new Set(['shell', 'monitor', 'agent'])
+
+/** tasks.pl's output: file → the background work its session started and has not seen end, oldest first. */
+export function parseTasks(stdout: string): Map<string, BackgroundTask[]> {
+  const tasks = new Map<string, BackgroundTask[]>()
+  let list: BackgroundTask[] | undefined
+  for (const line of stdout.split('\n')) {
+    if (line.startsWith('==> ')) {
+      list = []
+      tasks.set(line.slice(4), list)
+      continue
+    }
+    const [mark, kind = '', id = '', since = '', what = ''] = line.split('\t')
+    if (list === undefined || mark !== 'T' || !TASK_KINDS.has(kind) || id === '' || !/^\d+$/.test(since)) continue
+    list.push({ kind: kind as BackgroundTask['kind'], id, since: Number(since), what })
+  }
+  return tasks
+}
+
+/**
+ * The background work a session has going, as its registry's state allows (Claude Code's own word on it, so a task whose
+ * end no record tells is never shown for long): none while it is idle, no agent while it is `shell` (a running agent
+ * keeps it `busy`); all of them while it works or waits on the person.
+ */
+export function tasksNow(status: string, tasks: readonly BackgroundTask[]): BackgroundTask[] {
+  if (status === 'idle') return []
+  return status === 'shell' ? tasks.filter(t => t.kind !== 'agent') : [...tasks]
+}
+
 /**
  * For each directory in "$@", prints `==> <dir>`, git's worktree root,
  * shared .git and branch, `--`, then its remotes' URLs with any user or
@@ -962,7 +998,7 @@ export type Item = {
   tool: 'claude' | 'codex'
   title: string
   tags: string[]
-  /** `working`, `idle`, `stalled`, or the registry's word for a state that wants the person. */
+  /** `working`, `background` (Claude: its turn over, background work it started still running), `idle`, `stalled`, or the registry's word for a state that wants the person. */
   state: string
   /** The terminal, `detached`, or where a Codex thread runs: `app`, `cli`, `exec`. */
   where: string
@@ -978,6 +1014,8 @@ export type Item = {
   move?: { pid: number; tty: string; profile: string; sessionId: string; startCwd: string }
   /** Its context at its last request, said short: `437k`, `117k/258k` (with the window when its records say). */
   context?: string
+  /** A Claude session's background work, oldest first; unset for none. */
+  tasks?: BackgroundTask[]
 }
 export type TreeView = { key: string; label: string; path: string; items: Item[] }
 export type WorkspaceView = {
@@ -1048,6 +1086,7 @@ export function viewOf(
         where: s.tty === '??' ? 'detached' : s.tty,
         lastActive: s.since,
         ...(s.context === undefined ? {} : { context: contextSaid(s.context) }),
+        ...(s.tasks === undefined || s.tasks.length === 0 ? {} : { tasks: s.tasks }),
         ...(!isSelf && s.kind !== 'bg' && s.isForeground && claudeState(s, o.now) === 'idle' && /^ttys\d+$/.test(s.tty) &&
         paneOf(s.tty) === undefined &&
         backgroundCommand(s, o.home, []) !== undefined
@@ -1088,10 +1127,11 @@ export function viewOf(
           : { target: { tty: s.tty } }),
     })),
   ]
-  const shown = items.filter(i => o.windowMs === 0 || i.state === 'working' || o.now - i.lastActive <= o.windowMs)
+  // at work (its own turn, or background work it started) always shown
+  const shown = items.filter(i => o.windowMs === 0 || i.state === 'working' || i.state === 'background' || o.now - i.lastActive <= o.windowMs)
 
-  // working first, then a state that wants the person, then idle; most recent first within each
-  const rank = (i: Item) => (i.state === 'working' ? 2 : i.state === 'idle' ? 0 : 1)
+  // working first, then waiting on background work, then a state that wants the person, then idle; most recent first within each
+  const rank = (i: Item) => (i.state === 'working' ? 3 : i.state === 'background' ? 2 : i.state === 'idle' ? 0 : 1)
   const byActivity = (a: Item, b: Item) => rank(b) - rank(a) || b.lastActive - a.lastActive
   const lead = (list: readonly Item[]) => [...list].sort(byActivity)[0]
 

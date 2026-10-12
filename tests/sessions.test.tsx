@@ -28,6 +28,8 @@ import {
   orderFrom,
   parsePlaces,
   parseRecent,
+  parseTasks,
+  tasksNow,
   remoteName,
   workDir,
   claudeState,
@@ -233,6 +235,11 @@ const world = {
   scanned: [] as string[],
   /** usage.pl scan's output is cut (more than a run may print), in its last line. */
   scanCut: false,
+  /** What tasks.pl prints for a transcript (its `T` lines), and what each run was given (since, file pairs). */
+  tasks: {} as Record<string, string>,
+  tasksRuns: [] as string[][],
+  /** A listed file's modified time, when it changed since the fixture's (a registry file rewritten). */
+  mtimes: new Map<string, number>(),
 }
 const resetWorld = () => {
   world.heads = { '/Users/u/dev/web-app': 'main\nmain\n', '/Users/u/dev/build': 'linked\nfix/build\n' }
@@ -279,6 +286,9 @@ const resetWorld = () => {
   world.scan = {}
   world.scanned = []
   world.scanCut = false
+  world.tasks = {}
+  world.tasksRuns = []
+  world.mtimes.clear()
 }
 const changed = (pid: number, line: string) => {
   const stat = world.stat.get(pid)
@@ -511,6 +521,13 @@ function engine(
       // cut short: its last line not whole
       return { value: { ...ok(world.scanCut ? out.slice(0, -3) : out), isStdoutTruncated: world.scanCut, isStderrTruncated: false } }
     }
+    // tasks.pl: each transcript's background work still going
+    if (e.argv[0] === '/usr/bin/perl' && e.argv[1]?.endsWith('/hooks/tasks.pl') === true) {
+      const pairs = e.argv.slice(2)
+      world.tasksRuns.push(pairs)
+      const out = pairs.filter((_, k) => k % 2 === 1).map(f => `==> ${f}\n${world.tasks[f] ?? ''}`).join('')
+      return { value: { ...ok(out), isStdoutTruncated: false, isStderrTruncated: false } }
+    }
     // the Mac's clock: 7 hours behind UTC until 1 Nov 2026 09:00 UTC, 8 after (daylight saving ends)
     if (e.argv[2] === OFFSETS_SCRIPT) return { value: { ...ok(e.argv.slice(4).map(t => (Number(t) < Date.UTC(2026, 10, 1, 9) / 1000 ? '-0700' : '-0800')).join('\n') + '\n'), isStdoutTruncated: false, isStderrTruncated: false } }
     if (e.argv[2] === USAGE_FILES_SCRIPT) return { value: { ...ok(world.usageFiles), isStdoutTruncated: false, isStderrTruncated: false } }
@@ -519,7 +536,10 @@ function engine(
   const files = new Map<string, string>(Object.entries(REGISTRY))
   world.files = files
   on('fs.list', async ($, e) => {
-    const entries = LISTINGS[e.path]
+    const entries = LISTINGS[e.path]?.map(entry => {
+      const mtimeMs = world.mtimes.get(`${e.path}/${entry.name}`)
+      return mtimeMs === undefined ? entry : { ...entry, mtimeMs }
+    })
     return entries === undefined ? { deny: `ENOENT ${e.path}` } : { value: entries }
   })
   on('fs.exists', async ($, e) => {
@@ -1772,8 +1792,8 @@ describe('workspaces, from the pane', () => {
     const width = async (key: string) => (await props(key))?.width
     expect([await width('ws-head practice-rbac'), await width('ws-dir practice-rbac'), await width('ws-relay practice-rbac'), await width('ws-check practice-rbac'), await width('claude-101')])
       .toEqual([106, 104, 104, 104, 106])
-    // (10 columns of it are each session's context)
-    expect(((await props('open claude-101'))?.label as string).length).toBe(49)
+    // (10 columns of it are each session's context, 11 its state: `background` the longest)
+    expect(((await props('open claude-101'))?.label as string).length).toBe(48)
     await reveal(ui, 'item:claude-101')
     expect(await width('bar item:claude-101')).toBe(100)
     await reveal(ui, 'ws:practice-rbac')
@@ -4457,5 +4477,124 @@ describe('names kept off the screens', () => {
     const tells = sent.filter(r => r.kind === 'tell').map(r => r.text)
     expect(tells.length).toBeGreaterThan(0)
     expect(tells.every(t => t.startsWith('Practice ••••: the relay passed') && !/rbac/i.test(t))).toBe(true)
+  })
+})
+
+describe('background work', () => {
+  const session = (pid: number, status: string, fields: Partial<ClaudeSession> = {}): ClaudeSession => ({
+    pid,
+    sessionId: `s-${pid}`,
+    jobId: '',
+    name: `S${pid}`,
+    cwd: '/w',
+    startCwd: '/w',
+    status,
+    kind: 'interactive',
+    profile: 'claude',
+    tty: 'ttys001',
+    isForeground: true,
+    since: NOW - 3 * 3_600_000,
+    ...fields,
+  })
+
+  test('read from its transcript, as its registry\'s state allows; a session at background work is at work, never done', () => {
+    const read = parseTasks([
+      '==> /a.jsonl',
+      `T\tmonitor\tb1\t${NOW - 600_000}\tWait for CI`,
+      `T\tagent\ta2\t${NOW - 500_000}\tReview it`,
+      `T\tshell\tb3\t${NOW - 120_000}\t`,
+      // not one: a kind it does not know, no id, no time
+      `T\tworkflow\tw4\t${NOW}\tx`,
+      `T\tshell\t\t${NOW}\tx`,
+      'T\tshell\tb6\tsoon\tx',
+      '==> /b.jsonl',
+      '',
+    ].join('\n'))
+    const all = [
+      { kind: 'monitor', id: 'b1', since: NOW - 600_000, what: 'Wait for CI' },
+      { kind: 'agent', id: 'a2', since: NOW - 500_000, what: 'Review it' },
+      { kind: 'shell', id: 'b3', since: NOW - 120_000, what: '' },
+    ]
+    expect(read).toEqual(new Map<string, unknown>([['/a.jsonl', all], ['/b.jsonl', []]]))
+    // idle: none running (Claude Code's own word); `shell`: commands and monitors only (a running agent keeps it busy)
+    expect(tasksNow('idle', read.get('/a.jsonl')!)).toEqual([])
+    expect(tasksNow('shell', read.get('/a.jsonl')!).map(t => t.id)).toEqual(['b1', 'b3'])
+    expect(tasksNow('busy', read.get('/a.jsonl')!)).toEqual(all)
+    expect(tasksNow('waiting', read.get('/a.jsonl')!)).toEqual(all)
+    expect(claudeState(session(1, 'shell'), NOW)).toBe('background')
+    const snap: Snapshot = {
+      claude: [session(1, 'shell', { tasks: read.get('/a.jsonl')!.slice(0, 1) }), session(2, 'busy', { since: NOW - 5_000 }), session(3, 'idle')],
+      codex: [],
+      places: {},
+      workspaces: [],
+      envs: [''],
+      tmux: { panes: {}, clients: {} },
+      checkedAt: NOW,
+      problems: [],
+    }
+    expect(statusSummary(snap)).toBe('Claude 3 (1 working, 1 background) · Codex 0 (0 working) · /sessions')
+    expect(statusSummary({ ...snap, claude: [session(3, 'idle')] })).toBe('Claude 1 (0 working) · Codex 0 (0 working) · /sessions')
+    // active in the last hour only: the one at background work listed though its turn ended 3 hours ago, after the
+    // working one, its work with it; the idle one of 3 hours ago left out
+    const items = viewOf(snap, { home: HOME, now: NOW, windowMs: 3_600_000, selfId: '' }).repos.flatMap(r => r.trees.flatMap(t => t.items))
+    expect(items.map(i => [i.key, i.state])).toEqual([['claude-2', 'working'], ['claude-1', 'background']])
+    expect(items[1]!.tasks).toEqual(all.slice(0, 1))
+    expect(items[0]!.tasks).toBeUndefined()
+  })
+
+  test('the pane: a session at background work says so, its work listed under it; only sessions not idle read, from when each started', async ($, on) => {
+    const { files, clock } = engine(on, machine)
+    const registry = (path: string, fields: Record<string, unknown>) => files.set(path, JSON.stringify({ ...JSON.parse(REGISTRY[path]!), ...fields }))
+    // WORKER: its turn over, a monitor and commands it started still running; WEB CONSOLE at work, an agent of its own
+    // going; NIGHTLY at work too, but its registry does not say when its process started
+    registry('/Users/u/.claude-work/sessions/104.json', { status: 'shell', startedAt: NOW - 7_200_000 })
+    registry('/Users/u/.claude/sessions/101.json', { startedAt: NOW - 3_600_000 })
+    registry('/Users/u/.claude/sessions/102.json', { status: 'busy', statusUpdatedAt: NOW - 5_000 })
+    const worker = '/Users/u/.claude-work/projects/-Users-u/session-104.jsonl'
+    const web = '/Users/u/.claude/projects/-Users-u-dev-web-app/session-101.jsonl'
+    world.tasks[worker] = [
+      `T\tmonitor\tbmon\t${NOW - 600_000}\tWait for CI on PR 7`,
+      // an agent its registry says is over (it would be busy)
+      `T\tagent\tagone\t${NOW - 500_000}\tAn agent long over`,
+      `T\tshell\tbsh1\t${NOW - 120_000}\t`,
+      `T\tshell\tbsh2\t${NOW - 60_000}\tBuild it`,
+      `T\tshell\tbsh3\t${NOW - 30_000}\tTest it`,
+      '',
+    ].join('\n')
+    world.tasks[web] = `T\tagent\taweb\t${NOW - 180_000}\tReview the change\n`
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    const texts = async () => (await ui.findAll({ type: 'Text' })).map(t => t.text)
+    const shown = await texts()
+    // WORKER: background, never idle or done; the oldest three of its work, then how many more; the agent over not shown
+    expect(shown).toContain('background')
+    expect(shown).toContain('    ◐')
+    expect(shown).toContain('↳ monitor  Wait for CI on PR 7 · 10m')
+    expect(shown).toContain('↳ shell · 2m')
+    expect(shown).toContain('↳ shell  Build it · 1m')
+    expect(shown).not.toContain('↳ shell  Test it · 30s')
+    expect(shown).toContain('↳ 1 more')
+    expect(shown.some(t => t.includes('An agent long over'))).toBe(false)
+    // WEB CONSOLE: working, its agent under it
+    expect(shown).toContain('↳ agent  Review the change · 3m')
+    expect(shown).toContain(' · 1 background')
+    // read once for the two not idle whose start the registry says, each from then
+    const pairs = (run: readonly string[]) => [0, 2].map(k => `${run[k]} ${run[k + 1]}`).sort()
+    expect(world.tasksRuns.length).toBe(1)
+    expect(world.tasksRuns[0]!.length).toBe(4)
+    expect(pairs(world.tasksRuns[0]!)).toEqual([`${NOW - 3_600_000} ${web}`, `${NOW - 7_200_000} ${worker}`].sort())
+    // not again within 10 s while nothing changed; at once when a session's state does: WORKER idle, nothing of it read or shown
+    await clock.advance(4_000)
+    expect(world.tasksRuns.length).toBe(1)
+    registry('/Users/u/.claude-work/sessions/104.json', { status: 'idle', startedAt: NOW - 7_200_000 })
+    world.mtimes.set('/Users/u/.claude-work/sessions/104.json', 2)
+    await clock.advance(4_000)
+    expect(world.tasksRuns.length).toBe(2)
+    expect(world.tasksRuns[1]).toEqual([String(NOW - 3_600_000), web])
+    const after = await texts()
+    expect(after).not.toContain('background')
+    expect(after.some(t => t.startsWith('↳ monitor') || t.startsWith('↳ shell'))).toBe(false)
+    expect(after).toContain('↳ agent  Review the change · 3m')
   })
 })
