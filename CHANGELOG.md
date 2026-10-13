@@ -2,7 +2,7 @@
 
 What each version changed, newest first. Each links its pull request, which holds the details, the checks and the reviews. After updating, run `/reload-plugins` in your sessions.
 
-## 0.28.2 — 2026-10-13
+## 0.28.2 — 2026-10-13 ([#37](https://github.com/d3r3nic/claude-live-sessions/pull/37))
 - **/sessions:** an idle session's row is no longer highlighted white; its state and mark say what it does, as for every other row.
 
 ## 0.28.1 — 2026-10-13 ([#36](https://github.com/d3r3nic/claude-live-sessions/pull/36))
