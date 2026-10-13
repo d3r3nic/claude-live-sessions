@@ -197,6 +197,8 @@ const world = {
   tmuxPanes: '',
   /** What tmux.conf puts at the bar's right end (`tmux show-options -gv status-right`). */
   globalRight: '',
+  /** What each pane shows (`tmux capture-pane -p -t <pane>`). */
+  screens: {} as Record<string, string>,
   /** What `tmux list-panes -s -t =<session> -F PANE_STATE_FORMAT` prints, and `ps -ax -o ppid=` (a pid a line). */
   leftover: '',
   parents: '1\n',
@@ -283,6 +285,7 @@ const resetWorld = () => {
   world.tmuxPanes = ''
   world.globalRight = ''
   world.leftover = ''
+  world.screens = {}
   world.parents = '1\n'
   world.killed = []
   world.tmuxClients = ''
@@ -445,6 +448,7 @@ function machine(argv: readonly string[], env: unknown): Run {
     }
     case 'tmux':
       if (argv[1] === 'list-panes' && argv[2] === '-s') return ok(world.leftover)
+      if (argv[1] === 'capture-pane') return ok(world.screens[argv[argv.length - 1] ?? ''] ?? '')
       if (argv[1] === 'list-panes') return world.tmuxPanes === '' ? { exitCode: 1, stdout: '', stderr: 'no server running\n' } : ok(world.tmuxPanes)
       if (argv[1] === 'kill-session') {
         // ended: its panes gone, and the session a window made
@@ -2445,11 +2449,21 @@ describe('relay', () => {
     expect(relaySteps(ws, { claude: claude(), codex: codex(done('x1', READY_CLAUDE)) }, NOW)).toEqual([{ kind: 'pass', key: 'pass-x1', from: 'codex', to: 'claude', pane: '%1', line: READY_CLAUDE, at: done('x1', READY_CLAUDE).at }])
     // the other is at work: it waits; the sender still at work, or its turn under way: nothing yet
     expect(relaySteps(ws, { claude: claude(done('c1', READY_CODEX)), codex: codex(done('x0', 'Ready.'), true) }, NOW)).toEqual([])
-    // the other has not finished a turn: it may be at a question of its own (trust, an update) that Enter
-    // would answer, so nothing is typed; the owner is told once
+    // the other has not finished a turn and is not known to be at its prompt: it may be at a question of its own that
+    // Enter would answer, so nothing is typed; the owner is told once
     expect(relaySteps(ws, { claude: claude(done('c1', READY_CODEX)), codex: codex(null) }, NOW)).toEqual([
-      { kind: 'tell', key: 'wait-c1', text: 'RBAC: Claude handed over; the relay passes it once Codex has finished a turn. If Codex is waiting at a question in its pane, answer it.', isForOwner: false },
+      { kind: 'tell', key: 'wait-c1', text: 'RBAC: Claude handed over; the relay passes it once Codex is at its prompt. If Codex is waiting at a question in its pane, answer it.', isForOwner: false },
     ])
+    // at its prompt (resumed after a restart, no turn of its own yet): passed, no turn needed first
+    expect(relaySteps(ws, { claude: claude(done('c1', READY_CODEX)), codex: { ...codex(null), isReady: true } }, NOW)).toEqual([
+      { kind: 'pass', key: 'pass-c1', from: 'claude', to: 'codex', pane: '%2', line: READY_CODEX, at: done('c1', READY_CODEX).at },
+    ])
+    // resumed in the workspace (its last turn from before), at its prompt: passed; not known to be: held
+    const resumed = { ...ws, threads: { codex: { id: 'x', dir: '/a', since: NOW - 1_000 } } }
+    expect(relaySteps(resumed, { claude: claude(done('c1', READY_CODEX)), codex: { ...codex(done('x0', 'from before', NOW - 60_000)), isReady: true } }, NOW).map(s => s.key)).toEqual(['pass-c1'])
+    expect(relaySteps(resumed, { claude: claude(done('c1', READY_CODEX)), codex: codex(done('x0', 'from before', NOW - 60_000)) }, NOW).map(s => s.key)).toEqual(['wait-c1'])
+    // ready but at work: it waits, as any agent at work
+    expect(relaySteps(ws, { claude: claude(done('c1', READY_CODEX)), codex: { ...codex(null, true), isReady: true } }, NOW)).toEqual([])
     expect(relaySteps(ws, { claude: claude(done('c1', READY_CODEX), true), codex: codex() }, NOW)).toEqual([])
     // a turn that ended before the relay was turned on, no cue, or a cue for itself: nothing
     expect(relaySteps({ ...ws, relay: relayOn({ since: NOW }) }, { claude: claude(done('c1', READY_CODEX)), codex: codex() }, NOW)).toEqual([])
@@ -2556,6 +2570,45 @@ describe('relay', () => {
     await collect()
     expect(kept()).toMatchObject({ streak: 1, typedAt: NOW - 5_000 })
     await ui.unmount()
+  })
+
+  test('after a restart, a resumed agent at its prompt takes the hand-off without a turn of its own first', async ($, on) => {
+    const { files, runs } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    // both resumed a moment ago (the workspace opened again after a restart): Codex's last turn is from before
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, checkout: '/Users/u/dev/web-app', purpose: 'RBAC', relay: relayOn(),
+      threads: { claude: { id: 'session-104', dir: '/Users/u/dev/web-app', since: NOW - 30_000 }, codex: { id: RESUMED_A, dir: '/Users/u/dev/web-app', since: NOW - 30_000 } } }] }))
+    world.tmuxPanes = 'ws-practice-rbac\tpeers\t/dev/ttys022\t%1\tclaude\nws-practice-rbac\tpeers\t/dev/ttys045\t%2\tcodex\n'
+    world.tmuxOwner = String(NOW)
+    world.paneCommands = { '%1': 'claude', '%2': 'codex' }
+    world.turns = { 'session-104': `done\tturn-c1\t${new Date(NOW - 10_000).toISOString()}\t${READY_CODEX}`, '/rollouts/a.jsonl': `done\tturn-x0\t${new Date(NOW - 3_600_000).toISOString()}\t` }
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    // Codex has run long past its start (its process, started hours ago, is at its prompt): passed, no wait for a turn
+    expect(runs.filter(r => r[2] === RELAY_SCRIPT).map(r => r.slice(4, 7))).toEqual([['pass', '/Users/u/Library/Application Support/live-sessions/relayed', 'pass-turn-c1']])
+  })
+
+  test('after a restart, a hand-off to a resumed Claude waits while its pane shows its resume question, then passes', async ($, on) => {
+    const { files, runs, clock } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, checkout: '/Users/u/dev/web-app', purpose: 'RBAC', relay: relayOn(),
+      threads: { claude: { id: 'session-104', dir: '/Users/u/dev/web-app', since: NOW - 30_000 }, codex: { id: RESUMED_A, dir: '/Users/u/dev/web-app', since: NOW - 30_000 } } }] }))
+    world.tmuxPanes = 'ws-practice-rbac\tpeers\t/dev/ttys022\t%1\tclaude\nws-practice-rbac\tpeers\t/dev/ttys045\t%2\tcodex\n'
+    world.tmuxOwner = String(NOW)
+    world.paneCommands = { '%1': 'claude', '%2': 'codex' }
+    // Codex handed over just now; Claude's last turn is from before it resumed, and its pane asks how to resume
+    world.turns = { 'session-104': `done\tturn-c0\t${new Date(NOW - 3_600_000).toISOString()}\t`, '/rollouts/a.jsonl': `done\tturn-x1\t${new Date(NOW - 10_000).toISOString()}\t${READY_CLAUDE}` }
+    world.screens = { '%1': 'This session is 2h old and 412k tokens.\n❯ 1. Resume from summary (recommended)\n  2. Resume full session as-is\n' }
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const steps = () => runs.filter(r => r[2] === RELAY_SCRIPT).map(r => `${r[4]} ${r[6]}`)
+    expect(steps()).toEqual(['tell wait-turn-x1'])
+    expect(runs.some(r => r[0] === 'tmux' && r[1] === 'capture-pane' && r[4] === '%1')).toBe(true)
+    // answered: at its prompt, the hand-off passes
+    world.screens = { '%1': '> \n' }
+    await clock.advance(30_000)
+    await $.command.run(SESSIONS)
+    // (each collection may try it again: the ledger takes it once, so it is typed once)
+    expect([...new Set(steps())]).toEqual(['tell wait-turn-x1', 'pass pass-turn-x1'])
+    expect(world.ledger.has('pass-turn-x1')).toBe(true)
   })
 
   test('the collecting session passes Claude\'s hand-off into Codex\'s pane, once, and shows it', async ($, on) => {

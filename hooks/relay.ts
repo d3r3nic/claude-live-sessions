@@ -138,7 +138,20 @@ export function parseTurns(stdout: string): Map<string, Turn> {
 }
 
 /** One agent of a workspace: its tmux pane, its last turn as its own records say, and whether it is at work. */
-export type Side = { tool: Tool; pane: string; turn?: Turn; isBusy: boolean }
+/**
+ * An agent's side of the relay: its pane, its last turn, whether it is at work, and whether it is at its prompt with
+ * no question of its own open (`isReady`: Claude by its registry, which says `waiting` while a dialog or question is
+ * open, and its pane not showing RESUME_QUESTION; Codex once it has run a while, its start-up questions off as every
+ * workspace agent starts).
+ */
+export type Side = { tool: Tool; pane: string; turn?: Turn; isBusy: boolean; isReady?: boolean }
+/** How long a Codex has run before the relay takes it to be at its prompt (it starts with its update offer off and bypassed: no question). */
+export const CODEX_READY_MS = 15_000
+/**
+ * Claude's question when it resumes a large conversation (from a summary or in full), as its pane shows it: Enter
+ * would choose for the owner, so the relay never types while it is there.
+ */
+export const RESUME_QUESTION = /Resume from summary|Resume full session as-is/
 
 /**
  * What the relay does now. `key` is the step's own: done once, whichever
@@ -153,8 +166,8 @@ export type Step =
 /**
  * The relay's steps for one workspace. An agent whose turn ended (since the
  * relay was turned on) with a cue for the other agent has it passed on once
- * that agent has finished a turn of its own (so it is past any question it
- * asks at its start) and is not at work; in `notify` mode, or after
+ * that agent is at its prompt (it has finished a turn of its own, or it is
+ * ready: past any question it asks at its start) and is not at work; in `notify` mode, or after
  * RELAY_CAP passes in a row with no prompt from the owner, the owner is told instead. A NEEDS USER or SCOPE CLOSED cue is the
  * owner's: they are told.
  */
@@ -178,10 +191,10 @@ export function relaySteps(ws: Pick<Workspace, 'name' | 'relay'> & Partial<Pick<
       steps.push({ kind: 'tell', key: `tell-${turn.id}`, from: tool, text: `${ws.name}: ${NAME[tool]} handed over to ${NAME[cue.to]}. Paste: ${cue.line}`, isForOwner: false })
     } else if (other === undefined) {
       steps.push({ kind: 'tell', key: `tell-${turn.id}`, from: tool, text: `${ws.name}: ${NAME[tool]} handed over, but ${NAME[cue.to]} is not running in the workspace. Paste: ${cue.line}`, isForOwner: true })
-    } else if (other.turn === undefined || other.turn.at < (ws.threads?.[cue.to]?.since ?? -Infinity)) {
-      // an agent that has not finished a turn (one resuming its conversation: a turn in this workspace) may be at a
-      // question of its own (trust, an update), which Enter would answer
-      steps.push({ kind: 'tell', key: `wait-${turn.id}`, text: `${ws.name}: ${NAME[tool]} handed over; the relay passes it once ${NAME[cue.to]} has finished a turn. If ${NAME[cue.to]} is waiting at a question in its pane, answer it.`, isForOwner: false })
+    } else if ((other.turn === undefined || other.turn.at < (ws.threads?.[cue.to]?.since ?? -Infinity)) && other.isReady !== true) {
+      // an agent that has not finished a turn (one resuming its conversation: a turn in this workspace) and is not yet
+      // known to be at its prompt may be at a question of its own, which Enter would answer
+      steps.push({ kind: 'tell', key: `wait-${turn.id}`, text: `${ws.name}: ${NAME[tool]} handed over; the relay passes it once ${NAME[cue.to]} is at its prompt. If ${NAME[cue.to]} is waiting at a question in its pane, answer it.`, isForOwner: false })
     } else if (other.isBusy) {
       continue
     } else if (relay.streak >= cap) {

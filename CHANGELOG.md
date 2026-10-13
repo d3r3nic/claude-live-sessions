@@ -2,6 +2,9 @@
 
 What each version changed, newest first. Each links its pull request, which holds the details, the checks and the reviews. After updating, run `/reload-plugins` in your sessions.
 
+## 0.29.1 — 2026-10-13
+- **After a restart, hand-offs pass again without you:** a resumed agent takes the next hand-off once it is at its prompt, without first finishing a turn of its own. Claude: its status says idle and its screen does not show its resume question (from a summary or in full), which you answer; Codex: it has run 15 s (it starts with no question). Before, every reopened workspace held its first hand-off each way until you typed to the other agent.
+
 ## 0.29.0 — 2026-10-13 ([#38](https://github.com/d3r3nic/claude-live-sessions/pull/38))
 - **Ops screen:** while one agent of a workspace works, the other, idle, says nothing (no `idle`); both working both say `working`. The workspace's name is yellow (amber) while it works, as its border.
 - **Workspace bar:** `HIDE WINDOW` at its right end (it said `Hide window · agents keep running` after the name); the name alone at its left. Your tmux.conf's right-end commands (tmux-continuum's save) are carried after it and keep running; the rest of that right end (pane title, clock) is not shown there.

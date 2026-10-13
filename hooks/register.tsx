@@ -4,7 +4,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { BackgroundTask, ClaudeSession, CodexSession, Place, Relay, SessionContext, Snapshot, Thread, UsageView, Workspace } from '../types'
 import { accountOfFile, applyScan, claudeLimits, clockOf, currentLimits, EMPTY_USAGE, limitSaid, markKey, mergeLimits, offsetOf, OFFSETS_SCRIPT, parseContexts, rankUsage, scanInput, sharedLimitsFrom, usageFrom, USAGE_FILES_SCRIPT, USAGE_KEEP_MS, WINDOW_MS, wholeFiles } from './usage'
 import type { Limit, UsageState } from './usage'
-import { AGENT_COMMANDS, afterOwner, afterStep, claudeKeep, COMPACT_FROM, cueOf, cutBytes, eventOf, EVENT_SCRIPT, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, tokensSaid, TURN_SCRIPT } from './relay'
+import { AGENT_COMMANDS, CODEX_READY_MS, RESUME_QUESTION, afterOwner, afterStep, claudeKeep, COMPACT_FROM, cueOf, cutBytes, eventOf, EVENT_SCRIPT, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, tokensSaid, TURN_SCRIPT } from './relay'
 import type { RelayEvent, Side, Step } from './relay'
 import { branchOf, checkDue, DRIFT_EVERY, driftRequest, isDueAfterCompaction, parseVerdict, recordFolderOf, RECORDS_SCRIPT } from './drift'
 import { hiddenNames, hideInTree, hideNames, hidingFrom, namesPath, namesProblem, NO_HIDING, turned } from './names'
@@ -1712,10 +1712,11 @@ async function passCues(
   const fileFor = (tool: string, tty: string) => {
     if (tool === 'claude') {
       const s = o.claude.find(c => c.tty === tty)
-      return s === undefined ? undefined : { file: o.fileOf.get(`claude-${s.pid}`), isBusy: claudeState(s, now) !== 'idle' }
+      // at its prompt by its registry: `waiting` while a dialog or question is open
+      return s === undefined ? undefined : { file: o.fileOf.get(`claude-${s.pid}`), isBusy: claudeState(s, now) !== 'idle', isReady: s.status === 'idle' }
     }
     const s = o.codex.find(c => c.tty === tty)
-    return s === undefined ? undefined : { file: o.fileOf.get(`codex-${s.key}`), isBusy: false }
+    return s === undefined ? undefined : { file: o.fileOf.get(`codex-${s.key}`), isBusy: false, isReady: (s.startedAt ?? 0) > 0 && now - s.startedAt! >= CODEX_READY_MS }
   }
   const files = [...new Set(live.flatMap(ws => panesOf(ws).flatMap(([tty, p]) => fileFor(p.window, tty)?.file ?? [])))]
   const read = files.length === 0 ? { stdout: '' } : await $.process.run(['/bin/sh', '-c', TURN_SCRIPT, 'sh', ...files], { timeoutMs: 20_000 })
@@ -1726,7 +1727,15 @@ async function passCues(
       const tool = p.window as 'claude' | 'codex'
       const known = fileFor(tool, tty)
       const turn = known?.file === undefined ? undefined : turns.get(known.file)
-      sides[tool] = { tool, pane: p.pane!, isBusy: (known?.isBusy ?? false) || turn?.state === 'busy', ...(turn === undefined ? {} : { turn }) }
+      const isBusy = (known?.isBusy ?? false) || turn?.state === 'busy'
+      let isReady = known?.isReady === true && !isBusy
+      // a Claude with no turn of its own since it resumed: its pane looked at, for the question it may ask then
+      const since = ws.threads?.[tool]?.since
+      if (isReady && tool === 'claude' && (turn === undefined || (since !== undefined && turn.at < since))) {
+        const screen = await $.process.run(['tmux', 'capture-pane', '-p', '-t', p.pane!], { timeoutMs: 10_000 }).catch(() => ({ exitCode: -1, stdout: '' }))
+        isReady = screen.exitCode === 0 && !RESUME_QUESTION.test(screen.stdout)
+      }
+      sides[tool] = { tool, pane: p.pane!, isBusy, isReady, ...(turn === undefined ? {} : { turn }) }
     }
     // Claude's context compacted since the last one kept (of any kind: this plugin's at a hand-off, Claude Code's own,
     // the owner's /compact): kept, so a drift check follows its next hand-off
