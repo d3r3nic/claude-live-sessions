@@ -2,8 +2,8 @@
 
 What each version changed, newest first. Each links its pull request, which holds the details, the checks and the reviews. After updating, run `/reload-plugins` in your sessions.
 
-## 0.30.0 — 2026-10-13
-- **Ops screen, FOCUS and HISTORY:** running workspaces under `FOCUS`; stopped ones under `HISTORY`, a line kept at the bottom of the screen, folded until a click on it or `h` opens it (kept), where each is started again.
+## 0.30.0 — 2026-10-13 ([#40](https://github.com/d3r3nic/claude-live-sessions/pull/40))
+- **Ops screen, FOCUS and HISTORY:** running workspaces under `FOCUS`; stopped ones under `HISTORY`, a line kept at the bottom of the screen, folded until a click on it or `h` opens it (kept), where each is started again. FOCUS comes first: an open HISTORY takes only the rows below it, and says what of it does not fit.
 - **/sessions on a dark tab:** Claude's and Codex's names in lighter colors (`#e8875f`, `#6aa5ff`), readable on black; on a light tab as before. (The pane's frame and the theme's own accent colors are Claude Code's theme: on a dark terminal choose a dark one in `/theme`.)
 - **Ops tiles drawn with square corners** (`┌┐└┘`): fonts such as Andale Mono (the Homebrew profile's) have no rounded corners, which another font then drew out of line, the top and bottom borders seeming moved up. Play is `►`, HISTORY's arrows `▼ ▲`, for the same reason.
 - **Ops tiles:** their buttons on the bottom border at the right: `[>_]` brings up the terminal, `[■]` in red stops (pressed twice), `[►]` starts a stopped one. No `[»]` (a click on the tile shows its details) and no relay line (`⇄ auto → Claude 1m`; the details still show the relay). The details say `[>_ open window]`, `[■ stop]`, `[► start]`.

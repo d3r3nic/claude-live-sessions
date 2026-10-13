@@ -2,8 +2,8 @@
 // drawn from the snapshot every Claude Code session with this plugin keeps, and the relay's event log. A click on
 // a workspace's OPEN button, or on an event, opens what it is about: the workspace's window, or a session's tab.
 //   node ops/ops.mjs [--account <env>]     live, full screen, one account's or every one's (a accounts, t theme, g grid,
-//                                          e events, n names hidden or shown, v compact or detailed view, esc closes a
-//                                          workspace's details, q quit)
+//                                          e events, n names hidden or shown, v compact or detailed view, h HISTORY
+//                                          opened or folded, esc closes a workspace's details, q quit)
 //   node ops/ops.mjs --frame [--plain]     one frame, printed (COLS, ROWS, TICK; MODAL: a workspace's details open);
 //                                          --targets prints what each row opens
 import { accessSync, constants, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from 'node:fs'
@@ -504,11 +504,11 @@ function frame(snap, now, cols, rows, tick, note = '', modal = undefined) {
     return rows
   }
   /**
-   * A workspace as a tile `w` cells wide, five rows: its name in its border, coloured by what it does (red, blinking:
-   * the relay needs the owner; amber: working; red: an agent waits on the owner; cyan: background work; dim: stopped)
-   * and marked at its right (⚠ ● ◆ ◐ ■, or since when it is idle); a row for each agent, what it does and its context;
-   * the relay's mode and last hand-off, and its buttons: 📁 opens its window (starts it again when it is not running,
-   * going on with its agents' conversations), ■ closes it for now (while it runs), » its details.
+   * A workspace as a tile `w` cells wide, four rows (TILE_ROWS): its name in its top border, coloured by what it does
+   * (red, blinking: the relay needs the owner; amber: working; red: an agent waits on the owner; cyan: background
+   * work; dim: stopped) and marked at its right (⚠ ● ◆ ◐ ■, or since when it is idle); a row for each agent, what it
+   * does and its context; its buttons on its bottom border (tileButtons). Square corners: every monospace font has
+   * them (Andale Mono has no rounded ones).
    */
   const tileOf = (n, w) => {
     const blink = tick % 6 < 3
@@ -592,7 +592,9 @@ function frame(snap, now, cols, rows, tick, note = '', modal = undefined) {
   const focus = nodes.filter(n => n.ws.isRunning)
   const history = nodes.filter(n => !n.ws.isRunning)
   drawNodes(focus)
-  if (focus.length === 0 && history.length > 0) line(rgb(G.lo, `  nothing running: open HISTORY below (h) and ► one`))
+  if (focus.length === 0 && history.length > 0) line(rgb(G.lo, prefs.history ? '  nothing running: ► one in HISTORY below' : '  nothing running: open HISTORY below (h) and ► one'))
+  // what FOCUS takes, header included: never given up to HISTORY
+  const focusEnd = out.length
   const historyAt = out.length
   // (with no workspace at all, nothing of it)
   if (nodes.length > 0) {
@@ -683,7 +685,15 @@ function frame(snap, now, cols, rows, tick, note = '', modal = undefined) {
   }
   // HISTORY at the bottom, above the keys: what of it the screen holds below the header (its line at least); above it,
   // never more than the screen holds: the rest is cut, never scrolled
-  const historyRoom = Math.min(historyLines.length, Math.max(historyLines.length === 0 ? 0 : 1, rows - 1 - 5))
+  // FOCUS first: HISTORY gets what is left below it (its line at least); what of it does not fit, said in one line
+  const historyRoom = Math.min(historyLines.length, Math.max(historyLines.length === 0 ? 0 : 1, rows - 1 - focusEnd))
+  if (historyRoom < historyLines.length && historyRoom >= 2) {
+    const cut = history.length
+    historyLines.length = historyRoom - 1
+    historyTargets.length = historyRoom - 1
+    historyLines.push(rgb(G.lo, '║') + pad(clip(rgb(G.lo, `  … more of HISTORY (${cut}) than the window holds below FOCUS`), inner), inner) + rgb(G.lo, '║'))
+    historyTargets.push(undefined)
+  }
   historyLines.length = historyRoom
   historyTargets.length = historyRoom
   out.length = Math.min(out.length, rows - 1 - historyRoom)

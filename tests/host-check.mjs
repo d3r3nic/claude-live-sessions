@@ -1611,6 +1611,21 @@ except ChildProcessError: pass
         JSON.stringify(tileTargets[hist - 1]) === JSON.stringify({ kind: 'toggle', what: 'history' }) &&
         !JSON.stringify(tileTargets).includes('../..'),
         `${folderAt} ${shutAt} ${tileAt} ${JSON.stringify(tileTargets[first + 3])} ${JSON.stringify(stoppedRow.trim())} ${JSON.stringify(tileTargets[hist + 3])}`)
+      // FOCUS first: many stopped with HISTORY open never push a running workspace off the screen; what of HISTORY does
+      // not fit is said
+      {
+        const manyFile = join(scratch, 'compact-many.json')
+        const running = [1, 2, 3, 4, 5, 6].map(k => ({ id: `run${k}`, name: `Run ${k}`, env: '', dir: scratch, createdAt: 100 + k }))
+        const stopped = [...Array(16)].map((_, k) => ({ id: `stop${k}`, name: `Stop ${k}`, env: '', dir: scratch, createdAt: 200 + k }))
+        const panes = Object.fromEntries(running.map((ws, k) => [`ttys9${k}0`, { session: `ws-${ws.id}`, window: 'claude', pane: `%9${k}` }]))
+        writeFileSync(manyFile, snapshot({ workspaces: [...running, ...stopped], tmux: { panes, clients: {} } }))
+        const many = show({ LIVE_SESSIONS_SNAPSHOT: manyFile }).split('\n').filter(l => l !== '')
+        const shownRunning = running.filter(ws => many.some(l => l.includes(`┌─ ${ws.name} `)))
+        const bottoms = many.filter(l => /└─+\[>_\]─\[■\]─┘/.test(l)).length
+        check('ops, compact: an open HISTORY never takes FOCUS\'s rows: every running tile whole, what of HISTORY does not fit said',
+          many.length === 30 && shownRunning.length === 6 && bottoms === 2 && many.some(l => l.includes('HISTORY 16 ▼ h')) && many.some(l => l.includes('… more of HISTORY (16)')),
+          JSON.stringify([many.length, shownRunning.length, bottoms, many.filter(l => /HISTORY|more of/.test(l)).map(l => l.trim().slice(0, 60))]))
+      }
       // HISTORY folded (the default): its line alone at the bottom, the stopped ones not drawn
       writeFileSync(join(prefsDir(compactHome), 'ops.json'), JSON.stringify({}))
       const folded = show().split('\n').filter(l => l !== '')
@@ -1706,6 +1721,14 @@ except ChildProcessError: pass
         shutClick, 'drain(1.0)',
       ].join('\n'), { HOME: compactHome, LIVE_SESSIONS_SNAPSHOT: compactFile, LIVE_SESSIONS_OSASCRIPT: stubHere, NOW: '', REQ_DIR: shutReq, REQ_ONCE: join(scratch, 'req-once') }))
       const shutAsked = existsSync(shutReq) ? readdirSync(shutReq).filter(f => f.endsWith('.json')).map(f => JSON.parse(readFileSync(join(shutReq, f), 'utf8'))) : []
+      // h typed alone folds HISTORY (it was open), kept; typed inside pasted text, nothing
+      const pastedH = bare(live(['os.write(fd, b"oh h")', 'drain(1.0)'].join('\n'), { HOME: compactHome, LIVE_SESSIONS_SNAPSHOT: compactFile, LIVE_SESSIONS_OSASCRIPT: stubHere, NOW: '' }))
+      const afterPaste = JSON.parse(readFileSync(join(prefsDir(compactHome), 'ops.json'), 'utf8')).history
+      const pressedH = bare(live(['os.write(fd, b"h")', 'drain(1.0)'].join('\n'), { HOME: compactHome, LIVE_SESSIONS_SNAPSHOT: compactFile, LIVE_SESSIONS_OSASCRIPT: stubHere, NOW: '' }))
+      const afterH = JSON.parse(readFileSync(join(prefsDir(compactHome), 'ops.json'), 'utf8')).history
+      check('ops, compact, live: h typed alone folds and opens HISTORY, kept; inside pasted text it does nothing',
+        afterPaste === true && afterH === false && pressedH.includes('HISTORY 3 ▲ h') && !pastedH.includes('history hidden'),
+        `${afterPaste} ${afterH} ${pressedH.includes('HISTORY 3 ▲ h')}`)
       check('ops, compact, live: a tile\'s ■ asks for a second press, then asks a Claude session to stop the workspace',
         readFileSync(join(scratch, 'req-once'), 'utf8') === '0' && shutOut.slice(0, shutOut.indexOf('<<ONCE>>')).includes('■ again stops Ops X') &&
         shutAsked.length === 1 && shutAsked[0].action === 'close' && shutAsked[0].id === 'opsx' && shutOut.slice(shutOut.indexOf('<<ONCE>>')).includes('stopping Ops X'),
