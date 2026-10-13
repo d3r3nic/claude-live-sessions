@@ -1280,7 +1280,8 @@ except ChildProcessError: pass
     // the workspaces each in full (the detailed view), as these checks read them; the compact view's own follow
     const prefsDir = home => join(home, 'Library', 'Application Support', 'live-sessions')
     mkdirSync(prefsDir(scratch), { recursive: true })
-    writeFileSync(join(prefsDir(scratch), 'ops.json'), JSON.stringify({ view: 'detailed' }))
+    // (HISTORY open: the stopped workspaces drawn, under its line at the bottom)
+    writeFileSync(join(prefsDir(scratch), 'ops.json'), JSON.stringify({ view: 'detailed', history: true }))
     const draw = (cols, rows, extra = []) => spawnSync(process.execPath, ['--no-warnings', opsFile, '--frame', ...extra], { encoding: 'utf8', env: { ...env, COLS: String(cols), ROWS: String(rows) } }).stdout
     // widths as Python's own Unicode data gives them: wide (W, F) two, combining marks and format characters none
     const widths = spawnSync('python3', ['-c', [
@@ -1292,11 +1293,12 @@ except ChildProcessError: pass
     ].join('\n')], { input: draw(120, 30), encoding: 'utf8' }).stdout
     const measured = JSON.parse(widths || '[]')
     check('ops: a frame is the window\'s size exactly, wide and combining characters too, by Unicode\'s own widths', measured.length === 30 && measured.every(n => n === 120), JSON.stringify([...new Set(measured)]))
-    const plain = draw(120, 30, ['--plain'])
+    // (tall enough for the event log above HISTORY, open at the bottom)
+    const plain = draw(120, 60, ['--plain'])
     check('ops: control characters (C1, direction overrides) from what agents wrote never reach the terminal', !/[\u0080-\u009f‪-‮]/.test(plain))
     const small = draw(30, 6).replace(/\n$/, '').split('\n').length
     check('ops: a window too small still gets a frame its size', small === 6, String(small))
-    const targets = JSON.parse(draw(120, 30, ['--targets']))
+    const targets = JSON.parse(draw(120, 60, ['--targets']))
     const rows = plain.split('\n')
     const at = text => rows.findIndex(l => l.includes(text))
     check('ops: rows open what they are about; a forged workspace id and an event naming none open nothing; bad lines left out',
@@ -1408,7 +1410,9 @@ except ChildProcessError: pass
       '    status = 0',
       'sys.stdout.write(json.dumps({"out": out.decode("utf8", "replace"), "status": status}) if False else out.decode("utf8", "replace"))',
     ].join('\n'), process.execPath, '--no-warnings', opsFile, ...args], { encoding: 'utf8', timeout: 30_000, env: { ...env, ...extraEnv } }).stdout
-    const rowOf = text => at(text) + 1
+    // (a row's place on the live screen, 30 rows: HISTORY, open at its bottom, as there)
+    const liveRows = draw(120, 30, ['--plain']).split('\n')
+    const rowOf = text => liveRows.findIndex(l => l.includes(text)) + 1
     // live, opened for one account: its own; `a` shows every account's (the two-account snapshot written above)
     const twoAccounts = { LIVE_SESSIONS_SNAPSHOT: join(scratch, 'two-accounts.json'), LIVE_SESSIONS_EVENTS: join(scratch, 'two-events.jsonl') }
     const bare = out => out.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')
@@ -1453,7 +1457,7 @@ except ChildProcessError: pass
         !everything.some(l => /ops[\s._/-]*x|確認/i.test(l)) && everything.some(l => l.includes('••••• → Claude') || l.includes('•••••: Codex')) && everything.some(l => /x{93}••…/.test(l)) && !everything.some(l => /x{93}O/.test(l)) &&
         everything.some(l => l.includes('branch feat/•••••-sso and ••••')),
         JSON.stringify(everything.filter(l => /READY FOR|x{90}/.test(l)).map(l => l.trim().slice(0, 130))))
-      writeFileSync(join(kept, 'ops.json'), JSON.stringify({ theme: 'AMBER', grid: false, events: false, view: 'detailed' }))
+      writeFileSync(join(kept, 'ops.json'), JSON.stringify({ theme: 'AMBER', grid: false, events: false, view: 'detailed', history: true }))
       const hidden = framed('--plain').split('\n')
       const cellsOf = spawnSync('python3', ['-c', [
         'import sys, unicodedata, re, json',
@@ -1535,6 +1539,8 @@ except ChildProcessError: pass
     {
       const compactHome = join(scratch, 'compact-home')
       mkdirSync(prefsDir(compactHome), { recursive: true })
+      // (HISTORY open: the stopped workspaces drawn as tiles too, under its line at the bottom)
+      writeFileSync(join(prefsDir(compactHome), 'ops.json'), JSON.stringify({ history: true }))
       const compactFile = join(scratch, 'compact.json')
       const claudeIn = { pid: 990, sessionId: 's-990', jobId: '', name: 'C', cwd: scratch, startCwd: scratch, status: 'shell', kind: 'interactive', profile: 'claude', tty: 'ttys990', isForeground: true, since: now - 3 * 3_600_000, context: { tokens: 208000 },
         tasks: [{ kind: 'monitor', id: 'b1', since: now - 240_000, what: 'Wait for CI on PR 8' }, { kind: 'shell', id: 'b2', since: now - 60_000, what: '' }] }
@@ -1554,14 +1560,16 @@ except ChildProcessError: pass
       const columnOf = (row, text) => cellsOfLines(row.slice(0, row.indexOf(text)))[0] + 1
       const first = tiles.findIndex(l => l.includes('╭─ Ops X'))
       const relayRow = tiles[first + 3] ?? ''
-      check('ops, compact: each workspace a tile, three a row at 120 columns, each 38 cells, the frame its size, wide names too',
-        tiles[2].includes('[▣ COMPACT] v') && first > 0 && (tiles[first].match(/╭─/g) ?? []).length === 3 && (tiles[first + 5].match(/╭─/g) ?? []).length === 1 &&
+      const hist = tiles.findIndex(l => l.includes('╭─ Stopped one'))
+      check('ops, compact: running workspaces under FOCUS, stopped ones under HISTORY at the bottom; tiles three a row at 120 columns, each 38 cells, the frame its size, wide names too',
+        tiles[2].includes('[▣ COMPACT] v') && tiles[3].includes('FOCUS 1') && first > 0 && (tiles[first].match(/╭─/g) ?? []).length === 1 &&
+        hist > first && tiles[hist - 1].includes('HISTORY 3 ▾ h') && (tiles[hist].match(/╭─/g) ?? []).length === 3 && tiles[hist + 4]?.startsWith('╚') &&
         cellsOfLines(tiles[first].slice(tiles[first].indexOf('╭'), tiles[first].indexOf('╮') + 1))[0] === 38 &&
         cellsOfLines(show({}, [])).every(n => n === 120) && cellsOfLines(show({ MODAL: 'opsx' }, [])).every(n => n === 120) && !tiles.some(l => /\|O\|/.test(l)),
-        JSON.stringify(tiles.slice(first, first + 5).map(l => l.trim().slice(0, 60))))
+        JSON.stringify(tiles.map(l => l.trim().slice(0, 60))))
       check('ops, compact: an agent at background work is at work in its tile (never idle or done), its context beside it',
         /╭─ Ops X 要確認 ✅ é ─+ ◐ ─╮/.test(tiles[first]) && /│ ◐ CLAUDE background +208k │/.test(tiles[first + 1]) && /│ · CODEX +offline +│/.test(tiles[first + 2]) &&
-        /│ ⇄ off +\[📁\] \[■\] \[»\] │/.test(relayRow) && tiles[1].includes('BACKGROUND 1') && !tiles.some(l => /done \d/.test(l)),
+        /╰─+\[>_\]─\[■\]─╯/.test(relayRow) && tiles[1].includes('BACKGROUND 1') && !tiles.some(l => /done \d/.test(l)) && !tiles.some(l => /⇄|\[»\]|📁/.test(l)),
         JSON.stringify(tiles.slice(first, first + 4).map(l => l.slice(0, 44))))
       // one agent working: the other, idle, says nothing (its mark dim), and the workspace's name is amber, as its
       // border; both working, both say so; neither, each says idle and the name is not amber
@@ -1585,35 +1593,44 @@ except ChildProcessError: pass
           /│ ○ CLAUDE idle/.test(neither.rows[1]) && /│ ○ CODEX +idle/.test(neither.rows[2]) && !neither.isAmber,
           JSON.stringify([oneWorking, bothWorking, neither].map(x => [...x.rows.slice(1).map(r => r.trim().slice(0, 40)), x.isAmber])))
       }
-      // a click on the tile's 📁 opens it, on its ■ closes it (while it runs); anywhere else on it shows its details; a
-      // stopped one has no ■; a forged id is no tile to press
-      const folderAt = columnOf(relayRow, '[📁]')
+      // on its bottom border: a click on >_ brings up its terminal, on ■ stops it (while it runs); anywhere else on it
+      // shows its details; a stopped one has ▶ alone; a forged id is no tile to press
+      const folderAt = columnOf(relayRow, '[>_]')
       const shutAt = columnOf(relayRow, '[■]')
       const tileAt = columnOf(tiles[first], '╭─ Ops X')
-      const stoppedRow = tiles[tiles.findIndex(l => l.includes('╭─ Stopped one')) + 3] ?? ''
-      check('ops, compact: a click on a tile\'s 📁 opens its window, on its ■ closes it, anywhere else on it its details; a stopped one has no ■; a forged workspace\'s tile presses nothing',
+      const stoppedRow = tiles[hist + 3] ?? ''
+      const playAt = columnOf(stoppedRow, '[▶]')
+      check('ops, compact: a click on a tile\'s >_ brings up its window, on its ■ stops it, anywhere else on it its details; a stopped one has ▶ alone, which starts it; a forged workspace\'s tile presses nothing',
         JSON.stringify(tileTargets[first + 3]?.slice(0, 3)) === JSON.stringify([{ kind: 'workspace', id: 'opsx', cols: [folderAt, folderAt + 3] }, { kind: 'shut', id: 'opsx', cols: [shutAt, shutAt + 2] }, { kind: 'details', id: 'opsx', cols: [tileAt, tileAt + 37] }]) &&
-        /│ ■ stopped +\[📁\] \[»\] │/.test(stoppedRow) &&
-        [0, 1, 2, 4].every(k => JSON.stringify(tileTargets[first + k]?.[0]) === JSON.stringify({ kind: 'details', id: 'opsx', cols: [tileAt, tileAt + 37] })) &&
+        /╰─+\[▶\]─╯/.test(stoppedRow) && JSON.stringify(tileTargets[hist + 3]?.[0]) === JSON.stringify({ kind: 'workspace', id: 'stopped', cols: [playAt, playAt + 2] }) &&
+        [0, 1, 2].every(k => JSON.stringify(tileTargets[first + k]?.[0]) === JSON.stringify({ kind: 'details', id: 'opsx', cols: [tileAt, tileAt + 37] })) &&
+        JSON.stringify(tileTargets[hist - 1]) === JSON.stringify({ kind: 'toggle', what: 'history' }) &&
         !JSON.stringify(tileTargets).includes('../..'),
-        `${folderAt} ${shutAt} ${tileAt} ${JSON.stringify(tileTargets[first + 3])} ${JSON.stringify(stoppedRow.trim())}`)
+        `${folderAt} ${shutAt} ${tileAt} ${JSON.stringify(tileTargets[first + 3])} ${JSON.stringify(stoppedRow.trim())} ${JSON.stringify(tileTargets[hist + 3])}`)
+      // HISTORY folded (the default): its line alone at the bottom, the stopped ones not drawn
+      writeFileSync(join(prefsDir(compactHome), 'ops.json'), JSON.stringify({}))
+      const folded = show().split('\n').filter(l => l !== '')
+      check('ops, compact: HISTORY folded by default, its line at the bottom above the keys, the stopped ones not drawn',
+        folded.at(-2)?.includes('HISTORY 3 ▴ h') && !folded.some(l => l.includes('Stopped one')) && folded.some(l => l.includes('╭─ Ops X')),
+        JSON.stringify(folded.slice(-3).map(l => l.trim().slice(0, 40))))
+      writeFileSync(join(prefsDir(compactHome), 'ops.json'), JSON.stringify({ history: true }))
       // its details: over the screen, the rest dimmed, all the detailed view says of it, its background work listed;
       // its buttons open its window and close them, a click anywhere else closes them
       const modalLines = show({ MODAL: 'opsx' }).split('\n')
       const modalColored = show({ MODAL: 'opsx' }, []).split('\n')
       const modalTargets = JSON.parse(show({ MODAL: 'opsx' }, ['--targets']))
-      const buttonsRow = modalLines.findIndex(l => l.includes('[📁 open window]'))
-      const openAt = columnOf(modalLines[buttonsRow] ?? '', '[📁 open window]')
-      const shutInAt = columnOf(modalLines[buttonsRow] ?? '', '[■ close workspace]')
+      const buttonsRow = modalLines.findIndex(l => l.includes('[>_ open window]'))
+      const openAt = columnOf(modalLines[buttonsRow] ?? '', '[>_ open window]')
+      const shutInAt = columnOf(modalLines[buttonsRow] ?? '', '[■ stop]')
       const closeAt = columnOf(modalLines[buttonsRow] ?? '', '[✕ back]')
       const dim = `\x1b[38;2;${[1, 3, 5].map(k => parseInt('#0a4a22'.slice(k, k + 2), 16)).join(';')}m`
       check('ops, compact: a workspace\'s details over the screen: what the detailed view says, its background work listed, the rest dimmed',
         modalLines.some(l => l.includes('◐ BACKGROUND  ▓▒░ Ops X 要確認 ✅ é ░▒▓')) && modalLines.some(l => /\[CLAUDE\] ◐ background +context 208k/.test(l)) &&
         modalLines.some(l => l.includes('↳ monitor  Wait for CI on PR 8 · 4m')) && modalLines.some(l => l.includes('↳ shell · 1m')) &&
-        modalLines.some(l => l.includes('[■ close workspace]') && l.includes('[✕ back]')) && modalLines.filter(l => l !== '').at(-1).includes('esc closes') && modalColored[first].startsWith(`\x1b[48;2;2;10;5m${dim}`),
+        modalLines.some(l => l.includes('[■ stop]') && l.includes('[✕ back]')) && modalLines.filter(l => l !== '').at(-1).includes('esc closes') && modalColored[first].startsWith(`\x1b[48;2;2;10;5m${dim}`),
         JSON.stringify(modalLines.filter(l => l.includes('║ ') && /BACKGROUND|↳|open window/.test(l)).map(l => l.trim().slice(0, 100))))
       check('ops, compact: its details\' buttons open its window, close the workspace and close them; a click anywhere else closes them',
-        buttonsRow > 0 && JSON.stringify(modalTargets[buttonsRow].slice(0, 3)) === JSON.stringify([{ kind: 'workspace', id: 'opsx', cols: [openAt, openAt + 15] }, { kind: 'shut', id: 'opsx', cols: [shutInAt, shutInAt + 18] }, { kind: 'close', cols: [closeAt, closeAt + 7] }]) &&
+        buttonsRow > 0 && JSON.stringify(modalTargets[buttonsRow].slice(0, 3)) === JSON.stringify([{ kind: 'workspace', id: 'opsx', cols: [openAt, openAt + 15] }, { kind: 'shut', id: 'opsx', cols: [shutInAt, shutInAt + 7] }, { kind: 'close', cols: [closeAt, closeAt + 7] }]) &&
         JSON.stringify(modalTargets[buttonsRow].at(-1)) === JSON.stringify({ kind: 'close' }) && JSON.stringify(modalTargets[2]) === JSON.stringify({ kind: 'close' }) &&
         modalTargets.filter(t => Array.isArray(t)).every(t => t.some(x => x.kind === 'none')),
         JSON.stringify(modalTargets[buttonsRow]))
@@ -1671,12 +1688,12 @@ except ChildProcessError: pass
       const opensAfter = existsSync(askedHere) ? readFileSync(askedHere, 'utf8').trim().split('\n').filter(Boolean) : []
       const keptView = JSON.parse(readFileSync(join(prefsDir(compactHome), 'ops.json'), 'utf8')).view
       check('ops, compact, live: a click on a tile shows its details and esc closes them; its 📁 opens its window; v shows each in full, kept',
-        lastFrame(pressed, pressed.indexOf('<<DETAILS>>')).includes('[📁 open window]') && !lastFrame(pressed, pressed.indexOf('<<CLOSED>>')).includes('[📁 open window]') &&
+        lastFrame(pressed, pressed.indexOf('<<DETAILS>>')).includes('[>_ open window]') && !lastFrame(pressed, pressed.indexOf('<<CLOSED>>')).includes('[>_ open window]') &&
         opensAfter.length === 1 && opensAfter[0].startsWith(`OPEN tmux -L '${socket}' -f /dev/null attach -t '=ws-opsx'`) &&
         lastFrame(pressed, pressed.length).includes('|O|') && lastFrame(pressed, pressed.length).includes('[□ COMPACT] v') && keptView === 'detailed',
-        `${lastFrame(pressed, pressed.indexOf('<<DETAILS>>')).includes('[📁 open window]')} ${lastFrame(pressed, pressed.indexOf('<<CLOSED>>')).includes('[📁 open window]')} ${JSON.stringify(opensAfter)} ${keptView}`)
+        `${lastFrame(pressed, pressed.indexOf('<<DETAILS>>')).includes('[>_ open window]')} ${lastFrame(pressed, pressed.indexOf('<<CLOSED>>')).includes('[>_ open window]')} ${JSON.stringify(opensAfter)} ${keptView}`)
       // a tile's ■: a second press asks a Claude session to close the workspace
-      writeFileSync(join(prefsDir(compactHome), 'ops.json'), JSON.stringify({ view: 'compact' }))
+      writeFileSync(join(prefsDir(compactHome), 'ops.json'), JSON.stringify({ view: 'compact', history: true }))
       const shutReq = join(compactHome, 'Library', 'Application Support', 'live-sessions', 'requests')
       const shutClick = `os.write(fd, b"\\x1b[<0;${shutAt};${tileRow(first + 3)}M\\x1b[<0;${shutAt};${tileRow(first + 3)}m")`
       const shutOut = bare(live([
@@ -1685,9 +1702,9 @@ except ChildProcessError: pass
         shutClick, 'drain(1.0)',
       ].join('\n'), { HOME: compactHome, LIVE_SESSIONS_SNAPSHOT: compactFile, LIVE_SESSIONS_OSASCRIPT: stubHere, NOW: '', REQ_DIR: shutReq, REQ_ONCE: join(scratch, 'req-once') }))
       const shutAsked = existsSync(shutReq) ? readdirSync(shutReq).filter(f => f.endsWith('.json')).map(f => JSON.parse(readFileSync(join(shutReq, f), 'utf8'))) : []
-      check('ops, compact, live: a tile\'s ■ asks for a second press, then asks a Claude session to close the workspace',
-        readFileSync(join(scratch, 'req-once'), 'utf8') === '0' && shutOut.slice(0, shutOut.indexOf('<<ONCE>>')).includes('■ again closes Ops X') &&
-        shutAsked.length === 1 && shutAsked[0].action === 'close' && shutAsked[0].id === 'opsx' && shutOut.slice(shutOut.indexOf('<<ONCE>>')).includes('closing Ops X'),
+      check('ops, compact, live: a tile\'s ■ asks for a second press, then asks a Claude session to stop the workspace',
+        readFileSync(join(scratch, 'req-once'), 'utf8') === '0' && shutOut.slice(0, shutOut.indexOf('<<ONCE>>')).includes('■ again stops Ops X') &&
+        shutAsked.length === 1 && shutAsked[0].action === 'close' && shutAsked[0].id === 'opsx' && shutOut.slice(shutOut.indexOf('<<ONCE>>')).includes('stopping Ops X'),
         `${readFileSync(join(scratch, 'req-once'), 'utf8')} ${JSON.stringify(shutAsked)}`)
       check('ops, live: an agent whose turn ends with background work still running is logged BG WORK, never IDLE',
         /BG WORK CLAUDE/.test(lastFrame(pressed, pressed.length)) && !/IDLE +CLAUDE/.test(lastFrame(pressed, pressed.length)),
@@ -1716,14 +1733,14 @@ except ChildProcessError: pass
     const seenAsked = existsSync(join(scratch, 'req-seen.json')) ? JSON.parse(readFileSync(join(scratch, 'req-seen.json'), 'utf8')) : []
     check('ops: a stopped workspace\'s button asks a Claude session to open it (as /sessions does), and says what it answers',
       seenAsked.length === 1 && seenAsked[0].action === 'open' && seenAsked[0].id === 'stopped' && Math.abs(seenAsked[0].at - Date.now()) < 60_000 &&
-      outC.slice(0, outC.indexOf('<<ASKED>>')).includes('opening Stopped one: asked a Claude session') && outC.slice(outC.indexOf('<<ASKED>>')).includes('Opened ws-stopped in a new Terminal window.') &&
-      readdirSync(reqDir).every(f => !f.endsWith('.done')),
-      `${JSON.stringify(seenAsked)} ${readdirSync(reqDir).join(',')}`)
+      outC.slice(0, outC.indexOf('<<ASKED>>')).includes('starting Stopped one: asked a Claude session') && outC.slice(outC.indexOf('<<ASKED>>')).includes('Opened ws-stopped in a new Terminal window.') &&
+      existsSync(reqDir) && readdirSync(reqDir).every(f => !f.endsWith('.done')),
+      `${JSON.stringify(seenAsked)} ${existsSync(reqDir) ? readdirSync(reqDir).join(',') : '-'}`)
     // one nobody takes (no session runs this plugin in a Terminal tab) is taken back after a while, and said
     rmSync(reqDir, { recursive: true, force: true })
     const outU = bare(live([`os.write(fd, b"\\x1b[<0;4;${rowOf('Stopped one')}M\\x1b[<0;4;${rowOf('Stopped one')}m")`, 'drain(14.0)'].join('\n')))
     check('ops: what no Claude session takes is taken back after a while, and said',
-      outU.includes('no Claude session running this plugin in a Terminal tab took it') && readdirSync(reqDir).length === 0,
+      outU.includes('no Claude session running this plugin in a Terminal tab took it') && existsSync(reqDir) && readdirSync(reqDir).length === 0,
       `${outU.includes('took it')} ${existsSync(reqDir) ? readdirSync(reqDir).join(',') : '-'}`)
     check('ops: only a workspace\'s OPEN button opens its window (60% of the screen, a little smaller than its font); its agent rows open nothing',
       openedByRow === 0 && activeB === right &&

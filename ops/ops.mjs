@@ -104,9 +104,9 @@ const PREFS = `${HOME}/Library/Application Support/live-sessions/ops.json`
 const prefs = (() => {
   try {
     const kept = JSON.parse(readFileSync(PREFS, 'utf8'))
-    return { theme: NAMES.includes(kept.theme) ? kept.theme : 'MATRIX', grid: kept.grid !== false, events: kept.events !== false, view: kept.view === 'detailed' ? 'detailed' : 'compact' }
+    return { theme: NAMES.includes(kept.theme) ? kept.theme : 'MATRIX', grid: kept.grid !== false, events: kept.events !== false, view: kept.view === 'detailed' ? 'detailed' : 'compact', history: kept.history === true }
   } catch {
-    return { theme: 'MATRIX', grid: true, events: true, view: 'compact' }
+    return { theme: 'MATRIX', grid: true, events: true, view: 'compact', history: false }
   }
 })()
 let themeName = prefs.theme
@@ -180,7 +180,7 @@ function toggleHiding() {
 function toggleShown(what) {
   prefs[what] = !prefs[what]
   savePrefs()
-  return `${what === 'grid' ? 'grid' : 'event log'} ${prefs[what] ? 'shown' : 'hidden'}`
+  return `${what === 'grid' ? 'grid' : what === 'history' ? 'history' : 'event log'} ${prefs[what] ? 'shown' : 'hidden'}`
 }
 /** The workspaces as tiles or in full; kept for the next screen. */
 function toggleView() {
@@ -243,9 +243,15 @@ const RAIN = 'ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄ012345
 /** The compact view's tiles: at least this many cells wide, and at most this many. */
 const TILE_MIN = 32
 const TILE_MAX = 44
-/** A tile's buttons, left to right: 📁 opens it (or starts it again), ■ closes it for now (while it runs), » its details. */
+/**
+ * A tile's buttons, on its bottom border at the right: while it runs, >_ brings up its terminal and ■ (red) stops it;
+ * stopped, ▶ starts it again (its agents going on with their conversations). A click anywhere else on it shows its
+ * details.
+ */
 const tileButtons = n =>
-  !n.isOpenable ? [] : [{ label: '[📁]', kind: 'workspace' }, ...(n.ws.isRunning ? [{ label: '[■]', kind: 'shut' }] : []), { label: '[»]', kind: 'details' }]
+  !n.isOpenable ? [] : n.ws.isRunning ? [{ label: '[>_]', kind: 'workspace', color: 'hi' }, { label: '[■]', kind: 'shut', color: 'red' }] : [{ label: '[▶]', kind: 'workspace', color: 'hi' }]
+/** A tile's rows: its top border (its name), a row for each agent, its bottom border (its buttons). */
+const TILE_ROWS = 4
 /** An agent's background work listed under it: the oldest this many, then how many more. */
 const TASKS_SHOWN = 3
 
@@ -374,7 +380,7 @@ function frame(snap, now, cols, rows, tick, note = '', modal = undefined) {
   line(toolbar, presses)
   // workspaces: nodes, each its agents and the link the relay passes hand-offs over; as tiles, several a row (the
   // compact view), or each in full (the detailed view)
-  rule(`NODES ${view.workspaces.length}`)
+  rule(`FOCUS ${view.workspaces.filter(ws => ws.isRunning).length}`)
   // a session's context as its records say it: its size, against the line where it should compact (Claude: the
   // workspace's line; Codex: its window); amber from two thirds of it, red from it
   const contextOf = item => (item.tool === 'claude' ? snap.claude.find(s => `claude-${s.pid}` === item.key) : snap.codex.find(s => `codex-${s.key}` === item.key))?.context
@@ -533,59 +539,72 @@ function frame(snap, now, cols, rows, tick, note = '', modal = undefined) {
       const [icon, word, color] = stateLook(n, item.state)
       return inside(`${rgb(color, icon)} ${rgb(n.isBright ? G.hi : G.mid, pad(tool, 6))} ${rgb(color, word)}`, contextShown(n, item) ?? '')
     }
-    const relayRow = () => {
-      const buttons = tileButtons(n).map(b => rgb(G.hi, b.label)).join(' ')
-      if (!n.ws.isRunning) return inside(rgb(G.dim, '■ stopped'), buttons)
-      if (n.only !== undefined) return inside(rgb(G.lo, 'one agent'), buttons)
-      const mode = clean(n.relay?.mode ?? 'off')
-      const status = clean(n.relay?.status)
-      const passed = /^passed to (Codex|Claude)/.exec(status)
-      const since = n.relay?.at === undefined ? '' : ` ${c.ago(now - n.relay.at)}`
-      const what = n.needs
-        ? rgb(blink ? G.red : G.amber, '⚠ needs you')
-        : passed !== null ? rgb(now - (n.relay?.at ?? 0) < 20_000 ? G.cyan : G.lo, `→ ${passed[1]}${since}`) : ''
-      return inside(`${rgb(mode === 'auto' && n.isBright ? G.hi : G.lo, `⇄ ${mode}`)}${what === '' ? '' : `  ${what}`}`, buttons)
-    }
     const first = n.only === 'codex' ? agent('CODEX', n.codex) : agent('CLAUDE', n.claude)
     const second = n.only !== undefined ? inside('') : agent('CODEX', n.codex)
-    return [top, first, second, relayRow(), rgb(edge, `╰${'─'.repeat(w - 2)}╯`)]
+    // its buttons on its bottom border, at the right: ╰────[>_]─[■]─╯ (stopped: [▶])
+    const buttons = tileButtons(n)
+    const shown = buttons.map(b => rgb(b.color === 'red' ? G.red : G.hi, b.label)).join(rgb(edge, '─'))
+    const fill = Math.max(1, w - 3 - buttons.reduce((sum, b) => sum + width(b.label), Math.max(0, buttons.length - 1)))
+    const bottom = `${rgb(edge, `╰${'─'.repeat(fill)}`)}${shown}${rgb(edge, buttons.length === 0 ? '─'.repeat(w - 2 - fill) + '╯' : '─╯')}`
+    return [top, first, second, bottom]
   }
-  if (prefs.view === 'compact') {
-    // as many tiles a row as the window holds, at least TILE_MIN cells each, sharing the row's width
-    const across = Math.max(1, Math.floor(inner / (TILE_MIN + 1)))
-    const w = Math.min(TILE_MAX, Math.floor((inner - 1 - (across - 1)) / across))
-    for (let k = 0; k < nodes.length; k += across) {
-      const row = nodes.slice(k, k + across)
-      const drawn = row.map(n => tileOf(n, w))
-      for (let y = 0; y < 5; y++) {
-        // a click on a tile shows its details; on its 📁, opens its window (the row starts after the border, in the
-        // second cell, then a space)
-        const presses = row.flatMap((n, j) => {
-          if (!n.isOpenable) return []
-          const left = 3 + j * (w + 1)
-          // its buttons end where its row's text does, two cells in from its right edge
-          const buttons = tileButtons(n)
-          let at = left + w - 2 - buttons.reduce((sum, b) => sum + width(b.label) + 1, -1)
-          const pressed = buttons.map(b => {
-            const cols = [at, at + width(b.label) - 1]
-            at += width(b.label) + 1
-            return { kind: b.kind, id: n.ws.key, cols }
+  /** Workspaces drawn under a rule: as tiles, several a row (the compact view), or each in full (the detailed view). */
+  const drawNodes = list => {
+    if (prefs.view === 'compact') {
+      // as many tiles a row as the window holds, at least TILE_MIN cells each, sharing the row's width
+      const across = Math.max(1, Math.floor(inner / (TILE_MIN + 1)))
+      const w = Math.min(TILE_MAX, Math.floor((inner - 1 - (across - 1)) / across))
+      for (let k = 0; k < list.length; k += across) {
+        const row = list.slice(k, k + across)
+        const drawn = row.map(n => tileOf(n, w))
+        for (let y = 0; y < TILE_ROWS; y++) {
+          // a click on a tile shows its details; on a button on its bottom border, does what it says (the row starts
+          // after the border, in the second cell, then a space)
+          const presses = row.flatMap((n, j) => {
+            if (!n.isOpenable) return []
+            const left = 3 + j * (w + 1)
+            // its buttons end two cells in from its right edge (`─╯`), one `─` between them
+            const buttons = tileButtons(n)
+            let at = left + w - 2 - buttons.reduce((sum, b) => sum + width(b.label), Math.max(0, buttons.length - 1))
+            const pressed = buttons.map(b => {
+              const cols = [at, at + width(b.label) - 1]
+              at += width(b.label) + 1
+              return { kind: b.kind, id: n.ws.key, cols }
+            })
+            return [...(y === TILE_ROWS - 1 ? pressed : []), { kind: 'details', id: n.ws.key, cols: [left, left + w - 1] }]
           })
-          return [...(y === 3 ? pressed.filter(b => b.kind !== 'details') : []), { kind: 'details', id: n.ws.key, cols: [left, left + w - 1] }]
-        })
-        line(` ${drawn.map(t => t[y]).join(' ')}`, presses.length === 0 ? undefined : presses)
+          line(` ${drawn.map(t => t[y]).join(' ')}`, presses.length === 0 ? undefined : presses)
+        }
+      }
+    } else {
+      for (const n of list) {
+        const rows = nodeRows(n)
+        // the one thing a click opens here: the button down its left side (its window, as /sessions opens one)
+        while (rows.length < 4) rows.push('')
+        const node = n.isOpenable ? { kind: 'workspace', id: n.ws.key, cols: [3, 5] } : undefined
+        rows.forEach((row, k) => line(` ${rgb(n.needs ? G.red : n.isBright ? G.cyan : G.lo, `|${'OPEN'[k] ?? ' '}|`)} ${row}`, node))
+        line()
       }
     }
-  } else {
-    for (const n of nodes) {
-      const rows = nodeRows(n)
-      // the one thing a click opens here: the button down its left side (its window, as /sessions opens one)
-      while (rows.length < 4) rows.push('')
-      const node = n.isOpenable ? { kind: 'workspace', id: n.ws.key, cols: [3, 5] } : undefined
-      rows.forEach((row, k) => line(` ${rgb(n.needs ? G.red : n.isBright ? G.cyan : G.lo, `|${'OPEN'[k] ?? ' '}|`)} ${row}`, node))
-      line()
-    }
   }
+  // FOCUS: the workspaces running; HISTORY: the stopped ones, its line kept at the bottom of the screen, folded away
+  // until it is opened (a click on it, or h), where each can be started again
+  const focus = nodes.filter(n => n.ws.isRunning)
+  const history = nodes.filter(n => !n.ws.isRunning)
+  drawNodes(focus)
+  if (focus.length === 0 && history.length > 0) line(rgb(G.lo, `  nothing running: open HISTORY below (h) and ▶ one`))
+  const historyAt = out.length
+  // (with no workspace at all, nothing of it)
+  if (nodes.length > 0) {
+    const label = `HISTORY ${history.length} ${prefs.history ? '▾' : '▴'} h`
+    const shown = hide(label)
+    out.push(rgb(G.lo, '╠══ ') + rgb(G.hi, bold(shown)) + rgb(G.lo, ' ' + '═'.repeat(Math.max(0, inner - width(shown) - 4)) + '╣'))
+    targets.push({ kind: 'toggle', what: 'history' })
+    if (prefs.history && history.length === 0) line(rgb(G.lo, '  nothing stopped: ■ on a tile stops it for now, its agents going on with their conversations when ▶ starts it'))
+    else if (prefs.history) drawNodes(history)
+  }
+  const historyLines = out.splice(historyAt)
+  const historyTargets = targets.splice(historyAt)
   // one workspace's details over the screen, the rest dimmed behind it: all the detailed view says of it, its folder,
   // and its buttons; a click anywhere else, or esc, closes it
   const details = modal === undefined ? undefined : nodes.find(n => n.isOpenable && n.ws.key === modal)
@@ -593,11 +612,11 @@ function frame(snap, now, cols, rows, tick, note = '', modal = undefined) {
     const dir = clean(n.ws.dir)
     // what it does first: on a small window what is cut is its folder
     const content = [...nodeRows(n), '', rgb(G.lo, HOME !== '' && dir.startsWith(`${HOME}/`) ? `~${dir.slice(HOME.length)}` : dir)]
-    const open = '[📁 open window]'
-    // (closing the workspace, while it runs; the details themselves go back)
-    const shut = n.ws.isRunning ? '[■ close workspace]' : ''
+    // its window brought up (stopped: started again), and stopped while it runs; the details themselves go back
+    const open = n.ws.isRunning ? '[>_ open window]' : '[▶ start]'
+    const shut = n.ws.isRunning ? '[■ stop]' : ''
     const close = '[✕ back]'
-    const buttons = `${rgb(G.hi, bold(open))}   ${shut === '' ? '' : `${rgb(G.hi, shut)}   `}${rgb(G.hi, close)}`
+    const buttons = `${rgb(G.hi, bold(open))}   ${shut === '' ? '' : `${rgb(G.red, shut)}   `}${rgb(G.hi, close)}`
     const bw = Math.min(inner - 2, Math.max(64, ...content.map(l => width(l) + 4)))
     // its rows: as many as the screen holds below the header (below the first row, on a small window), the rest cut
     const below = rows >= 24 ? 3 : 1
@@ -662,11 +681,15 @@ function frame(snap, now, cols, rows, tick, note = '', modal = undefined) {
       line(` ${rgb(G.lo, new Date(e.at).toTimeString().slice(0, 8))}  ${rgb(color, pad(e.kind, 7))} ${rgb(G.mid, cut(e.text, inner - 22))}${e.target !== undefined ? rgb(G.lo, ' ›') : ''}`, e.target)
     }
   }
+  // HISTORY at the bottom, above the keys: what of it the screen holds below the header (its line at least); above it,
   // never more than the screen holds: the rest is cut, never scrolled
-  out.length = Math.min(out.length, rows - 1)
+  const historyRoom = Math.min(historyLines.length, Math.max(historyLines.length === 0 ? 0 : 1, rows - 1 - 5))
+  historyLines.length = historyRoom
+  historyTargets.length = historyRoom
+  out.length = Math.min(out.length, rows - 1 - historyRoom)
   targets.length = out.length
   // the rest of the screen: rain
-  while (out.length < rows - 1) {
+  while (out.length < rows - 1 - historyRoom) {
     const r = out.length
     const rain = [...Array(inner)].map((_, x) => {
       const head = (tick + x * 7) % (rows + 9)
@@ -676,6 +699,8 @@ function frame(snap, now, cols, rows, tick, note = '', modal = undefined) {
     out.push(rgb(G.lo, '║') + rain + rgb(G.lo, '║'))
     targets.push(undefined)
   }
+  out.push(...historyLines)
+  targets.push(...historyTargets)
   const keys = hide(` ${note === '' ? '' : `${clean(note)} · `}${details === undefined ? '' : 'esc closes · '}click opens · ${OWN === c.ALL_ACCOUNTS ? '' : `a ${account === c.ALL_ACCOUNTS ? 'this account' : 'all accounts'} · `}t theme: ${themeName} · q quit `)
   out.push(rgb(G.lo, '╚' + '═'.repeat(Math.max(0, inner - width(keys) - 2))) + rgb(note === '' ? G.mid : G.amber, keys) + rgb(G.lo, '══╝'))
   targets.push(undefined)
@@ -704,7 +729,7 @@ const UNTAKEN_MS = 12_000
 const ANSWER_MAX_MS = 120_000
 let pending
 function ask(action, ws) {
-  const said = `${action === 'open' ? 'opening' : 'closing'} ${clean(ws.name)}`
+  const said = `${action === 'open' ? 'starting' : 'stopping'} ${clean(ws.name)}`
   if (pending !== undefined) return `still ${pending.said}: one at a time`
   const nonce = randomBytes(8).toString('hex')
   try {
@@ -766,7 +791,7 @@ function shut(id, snap) {
     return ask('close', ws)
   }
   armed = { id, at: Date.now() }
-  return `■ again closes ${clean(ws.name)}: its agents end between turns; 📁 opens it again, going on with their conversations`
+  return `■ again stops ${clean(ws.name)}: its agents end between turns; ▶ starts it again, going on with their conversations`
 }
 
 /**
@@ -974,7 +999,7 @@ if (process.argv.includes('--frame')) {
       process.stdout.write(bgOn() + '\x1b[2J')
     }
     // a toolbar key typed alone, never one inside pasted text
-    for (const [key, what] of [['g', 'grid'], ['e', 'events'], ['n', 'names'], ['v', 'view']]) {
+    for (const [key, what] of [['g', 'grid'], ['e', 'events'], ['n', 'names'], ['v', 'view'], ['h', 'history']]) {
       if (keys !== key) continue
       note = press(what)
       noteUntil = Date.now() + 4_000
