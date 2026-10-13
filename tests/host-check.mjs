@@ -933,7 +933,7 @@ except ChildProcessError: pass
     const found = spawnSync('/bin/sh', ['-c', b.ROLLOUT_SCRIPT, 'sh', join(scratch, 'codex-home'), id], { encoding: 'utf8' }).stdout.trim()
     const none = spawnSync('/bin/sh', ['-c', b.ROLLOUT_SCRIPT, 'sh', join(scratch, 'codex-home'), 'not-there'], { encoding: 'utf8' }).stdout.trim()
     check('bring: Codex\'s rollout found by its conversation\'s id; none for another', found === rollout && none === '', found)
-    const mode = spawnSync('/bin/sh', ['-c', b.CODEX_MODE_SCRIPT, 'sh', rollout], { encoding: 'utf8' }).stdout
+    const mode = spawnSync('/bin/sh', ['-c', b.CODEX_FOLDER_SCRIPT, 'sh', rollout], { encoding: 'utf8' }).stdout
     check('bring: where Codex last ran, from its own last turn_context', b.codexDir(mode) === '/Users/u/dev/web-app', JSON.stringify(mode))
   } finally {
     // a check that throws still ends the private server

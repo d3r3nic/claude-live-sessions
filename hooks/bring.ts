@@ -119,18 +119,17 @@ export function codexTaskState(stdout: string): 'busy' | 'done' | undefined {
 }
 
 /**
- * The sandbox, approval policy and folder a Codex conversation last ran
- * with, from its rollout ("$1"): `<sandbox> <tab> <approval> <tab> <cwd>`,
- * or nothing. Only its own `turn_context` records are read.
+ * The folder a Codex conversation last ran in, from its rollout ("$1"), or
+ * nothing. Only its own `turn_context` records are read.
  */
-export const CODEX_MODE_SCRIPT = [
+export const CODEX_FOLDER_SCRIPT = [
   `/usr/bin/tail -c 4194304 "$1" 2>/dev/null | /usr/bin/grep '"type":"turn_context"' | /usr/bin/tail -n 1`,
-  `/usr/bin/jq -R -r 'fromjson? | [.payload.sandbox_policy.type // "", .payload.approval_policy // "", .payload.cwd // ""] | join("\\t")' 2>/dev/null`,
+  `/usr/bin/jq -R -r 'fromjson? | .payload.cwd // ""' 2>/dev/null`,
 ].join(' | ')
 
-/** The folder from CODEX_MODE_SCRIPT's answer, when it is one a command can take. */
+/** The folder from CODEX_FOLDER_SCRIPT's answer, when it is one a command can take. */
 export function codexDir(stdout: string): string | undefined {
-  const dir = stdout.trim().split('\t')[2] ?? ''
+  const dir = stdout.replace(/\n+$/, '')
   return dir.startsWith('/') && !/[\u0000-\u001f\u007f]/.test(dir) ? dir : undefined
 }
 
@@ -138,8 +137,7 @@ export function codexDir(stdout: string): string | undefined {
  * A thread as saved, if it is one: a hand-edited or later one is dropped, never run. The permission flags versions
  * before 0.27 kept with it are let go: every workspace agent now resumes bypassed (workspaces.ts BYPASS).
  */
-export function threadFrom(tool: Tool, raw: unknown): Thread | undefined {
-  void tool
+export function threadFrom(raw: unknown): Thread | undefined {
   const o = raw as Partial<Thread> | null
   if (typeof o !== 'object' || o === null || typeof o.id !== 'string' || !SAFE_ID.test(o.id) || typeof o.dir !== 'string' || !o.dir.startsWith('/')) return undefined
   if (/[\u0000-\u001f\u007f]/.test(o.dir)) return undefined

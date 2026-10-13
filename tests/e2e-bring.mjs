@@ -1,8 +1,9 @@
 // End to end with the real `claude` and `codex`, on a private tmux server (never the person's own, and
 // reading no tmux.conf): a Claude session and a Codex terminal each run a turn where they are, as the
 // person's own would; then they are brought into a workspace as the plugin does it: each closed where it
-// runs (STOP_SCRIPT), read for how it ran, and resumed in the workspace's panes by the plugin's own command
-// line, each given its first prompt there. Each must go on in the same conversation, its first turn kept.
+// runs (STOP_SCRIPT), read for where it ran, and resumed in the workspace's panes by the plugin's own command
+// line, bypassed (as every workspace agent), each given its first prompt there. Each must go on in the same
+// conversation, its first turn kept, its process started with the bypass flag.
 // The prompts ask only for one fixed line back. Run from, or point E2E_TRUSTED_DIR at, a folder Claude and
 // Codex already trust:
 //   E2E_TRUSTED_DIR=~/some/trusted/dir node --experimental-strip-types tests/e2e-bring.mjs
@@ -118,14 +119,14 @@ try {
   check('where it ran: Codex took its prompt and finished a turn', codexFirst !== undefined, codexFirst?.cue?.line)
   check('Codex: its rollout found by its conversation\'s id, as the plugin looks for it', sh(b.ROLLOUT_SCRIPT, join(HOME, '.codex'), codexId ?? 'none').trim() === rollout)
 
-  // brought in: how each ran, read as the plugin reads it; then each closed where it ran
-  const claudeFlags = c.modeFlags(sh(c.MODE_SCRIPT, transcript ?? '/none'))
-  const codexMode = sh(b.CODEX_MODE_SCRIPT, rollout ?? '/none')
+  // brought in: where each ran, read as the plugin reads it (no permission mode: each resumes bypassed); then each
+  // closed where it ran
+  const codexMode = sh(b.CODEX_FOLDER_SCRIPT, rollout ?? '/none')
   const threads = {
-    claude: { id: registry?.sessionId, dir: registry?.cwd, ...(claudeFlags?.length ? { flags: claudeFlags } : {}) },
-    codex: { id: codexId, dir: b.codexDir(codexMode) ?? TRUSTED, flags: b.codexFlags(codexMode) },
+    claude: { id: registry?.sessionId, dir: registry?.cwd },
+    codex: { id: codexId, dir: b.codexDir(codexMode) ?? TRUSTED },
   }
-  check('read: Claude\'s permission flags and Codex\'s sandbox, approvals and folder', claudeFlags !== undefined && b.codexDir(codexMode) === TRUSTED && threads.codex.flags[0] === '--sandbox', JSON.stringify(threads))
+  check('read: Codex\'s folder', b.codexDir(codexMode) === TRUSTED, JSON.stringify(threads))
   const front = tty => spawnSync('/bin/ps', ['-t', tty, '-o', 'stat=,comm='], { encoding: 'utf8' }).stdout
   // the plugin's own match: the terminal's row, its conversation and process, known for certain (else never brought in)
   const rows = codexRows()
@@ -161,6 +162,17 @@ try {
   const panes = Object.values(w.parsePanes(tmux('list-panes', '-a', '-F', w.PANES_FORMAT).stdout)).filter(p => p.session === w.tmuxName(ws)).map(p => p.window).sort()
   check('workspace: Claude and Codex side by side in its tmux session, marked', JSON.stringify(panes) === '["claude","codex"]', JSON.stringify(panes))
   check('workspace: each first prompt taken once', !existsSync(w.promptPath(HOME, ws.id, 'claude')) && !existsSync(w.promptPath(HOME, ws.id, 'codex')))
+  // each resumed bypassed: its own process's command line, in its pane, holds the flag (Codex's: its node wrapper or itself)
+  const argsIn = window => {
+    const pane = Object.entries(w.parsePanes(tmux('list-panes', '-a', '-F', w.PANES_FORMAT).stdout)).find(([, p]) => p.session === w.tmuxName(ws) && p.window === window)
+    // (the agent's own process, never the shell line that started it)
+    return pane === undefined ? '' : spawnSync('/bin/ps', ['-t', pane[0], '-o', 'args='], { encoding: 'utf8' }).stdout.split('\n').filter(l => !l.startsWith('/bin/sh ')).join('\n')
+  }
+  const claudeArgs = argsIn('claude')
+  const codexArgs = argsIn('codex')
+  check('workspace: each agent resumed bypassed, whatever mode it ran in before',
+    claudeArgs.split('\n').some(l => /claude .*--resume \S+ --dangerously-skip-permissions/.test(l)) && codexArgs.split('\n').some(l => /codex .*resume .*--dangerously-bypass-approvals-and-sandbox/.test(l)) && !/--sandbox workspace-write/.test(codexArgs),
+    JSON.stringify([claudeArgs.split('\n').find(l => l.includes('--resume'))?.slice(0, 140), codexArgs.split('\n').find(l => l.includes('resume'))?.slice(0, 160)]))
 } finally {
   // the agents end with their panes: a hang-up first (as closing them would), then a kill for one that stays
   const ttys = tmux('list-panes', '-a', '-F', '#{pane_tty}').stdout.trim().split('\n').filter(t => t.startsWith('/dev/'))
@@ -173,6 +185,7 @@ try {
   rmSync(join(process.env.TMUX_TMPDIR ?? '/tmp', `tmux-${process.getuid()}`, socket), { force: true })
   for (const tool of ['claude', 'codex']) rmSync(w.promptPath(HOME, ws.id, tool), { force: true })
   rmSync(scratch, { recursive: true, force: true })
+  rmSync(`${scratch}-worktrees`, { recursive: true, force: true })
   rmSync(`${scratch}-worktrees`, { recursive: true, force: true })
   await sleep(2_000)
   const left = spawnSync('/bin/ps', ['-ax', '-o', 'pid=,args='], { encoding: 'utf8' }).stdout.split('\n').filter(l => l.includes(socket) || l.includes(scratch))

@@ -9,7 +9,7 @@ import type { RelayEvent, Side, Step } from './relay'
 import { branchOf, checkDue, DRIFT_EVERY, driftRequest, isDueAfterCompaction, parseVerdict, recordFolderOf, RECORDS_SCRIPT } from './drift'
 import { hiddenNames, hideInTree, hideNames, hidingFrom, namesPath, namesProblem, NO_HIDING, turned } from './names'
 import type { Hiding } from './names'
-import { bringable, codexDir, envOfProfile, CODEX_MODE_SCRIPT, CODEX_TASK_SCRIPT, codexTaskState, JOB_COMMANDS, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, toggled, withThreads } from './bring'
+import { bringable, codexDir, envOfProfile, CODEX_FOLDER_SCRIPT, CODEX_TASK_SCRIPT, codexTaskState, JOB_COMMANDS, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, toggled, withThreads } from './bring'
 import {
   agentsOf,
   CHECKOUT_SCRIPT,
@@ -1217,7 +1217,7 @@ async function checkBring($: EngineInterface, home: string, snap: Snapshot, memb
       }
       const busy = await codexBusy($, rollout)
       if (busy !== undefined || (s.updatedAt > 0 && now - s.updatedAt < WORKING_MS)) return { error: `${offer.label} ${busy ?? 'is working: bring it in once its turn is done'}` }
-      const mode = (await $.process.run(['/bin/sh', '-c', CODEX_MODE_SCRIPT, 'sh', rollout], { timeoutMs: 10_000 })).stdout
+      const mode = (await $.process.run(['/bin/sh', '-c', CODEX_FOLDER_SCRIPT, 'sh', rollout], { timeoutMs: 10_000 })).stdout
       const folder = codexDir(mode) ?? s.cwd
       if (!folder.startsWith('/')) return { error: `${offer.label}'s folder is not known` }
       bring.push({ tool, label: offer.label, ...(offer.isClosed === true ? {} : { runs: { tty: s.tty, pid: s.pid! } }), profile: s.profile, rollout, thread: { id, dir: folder } })

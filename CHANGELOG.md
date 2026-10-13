@@ -2,7 +2,7 @@
 
 What each version changed, newest first. Each links its pull request, which holds the details, the checks and the reviews. After updating, run `/reload-plugins` in your sessions.
 
-## 0.27.0 — 2026-10-13 ([#34](https://github.com/d3r3nic/claude-live-sessions/pull/34))
+## 0.27.0 — 2026-10-12 ([#34](https://github.com/d3r3nic/claude-live-sessions/pull/34))
 - **Every workspace agent runs bypassed**, new or resumed: Claude with `--dangerously-skip-permissions`, Codex with `--dangerously-bypass-approvals-and-sandbox` (no `--add-dir` needed). A conversation brought in, or resumed when a workspace opens again, no longer keeps the mode it ran in; the permission flags earlier versions kept with it are let go. Sessions outside workspaces, and `To background`, are as before.
 
 ## 0.26.0 — 2026-10-12 ([#33](https://github.com/d3r3nic/claude-live-sessions/pull/33))

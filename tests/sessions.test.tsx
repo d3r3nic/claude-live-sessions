@@ -61,7 +61,7 @@ import { afterOwner, afterStep, claudeKeep, COMPACT_FROM, cueOf, cutBytes, event
 import type { Side } from '../hooks/relay'
 import { branchOf, checkDue, checkFrom, driftRequest, isDueAfterCompaction, parseVerdict, recordFolderOf, RECORDS_SCRIPT } from '../hooks/drift'
 import { accountOfFile, applyScan, claudeCost, claudeLimits, clockSaid, codexUnits, currentLimits, EMPTY_USAGE, limitSaid, markKey, mergeLimits, offsetOf, OFFSETS_SCRIPT, parseContexts, priceOf, rankUsage, scanInput, sharedLimitsFrom, usageFrom, USAGE_FILES_SCRIPT, USAGE_KEEP_MS, wholeFiles } from '../hooks/usage'
-import { bringable, codexDir, CODEX_MODE_SCRIPT, CODEX_TASK_SCRIPT, codexTaskState, envOfProfile, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, threadFrom, toggled, withThreads } from '../hooks/bring'
+import { bringable, codexDir, CODEX_FOLDER_SCRIPT, CODEX_TASK_SCRIPT, codexTaskState, envOfProfile, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, threadFrom, toggled, withThreads } from '../hooks/bring'
 import { BYPASS } from '../hooks/workspaces'
 import {
   absoluteDir,
@@ -225,8 +225,8 @@ const world = {
   hiddenThreads: new Set<string>(),
   /** Processes that have exited (a terminal STOP_SCRIPT closed). */
   exited: new Set<number>(),
-  /** What CODEX_MODE_SCRIPT prints for a rollout. */
-  codexMode: 'workspace-write\ton-request\t/Users/u/dev/web-app\n',
+  /** What CODEX_FOLDER_SCRIPT prints for a rollout. */
+  codexMode: '/Users/u/dev/web-app\n',
   /** What CODEX_TASK_SCRIPT prints (the last task event), or a function answering each run. */
   codexTask: '"type":"task_complete"\n',
   codexTaskAnswer: undefined as (() => string) | undefined,
@@ -281,7 +281,7 @@ const resetWorld = () => {
   world.exited.clear()
   world.hiddenThreads.clear()
   world.lsof = undefined
-  world.codexMode = 'workspace-write\ton-request\t/Users/u/dev/web-app\n'
+  world.codexMode = '/Users/u/dev/web-app\n'
   world.codexTask = '"type":"task_complete"\n'
   world.codexTaskAnswer = undefined
   world.sessionId = undefined
@@ -357,7 +357,7 @@ function machine(argv: readonly string[], env: unknown): Run {
       }
       if (argv[2] === ROLLOUT_SCRIPT) return ok(args[0] === '/Users/u/.codex' && (args[1] === RESUMED_A || args[1] === HELD) ? `/rollouts/${args[1]}.jsonl\n` : '')
       if (argv[2] === CODEX_TASK_SCRIPT) return ok(world.codexTaskAnswer?.() ?? world.codexTask)
-      if (argv[2] === CODEX_MODE_SCRIPT) return ok(world.codexMode)
+      if (argv[2] === CODEX_FOLDER_SCRIPT) return ok(world.codexMode)
       if (argv[2] === WORKTREES_SCRIPT) {
         // web-app's main checkout, its worktree for fix/build, and one with no branch checked out
         return ['/Users/u/dev/web-app', '/Users/u/dev/build'].some(d => args[0] === d || args[0]?.startsWith(`${d}/`))
@@ -2443,16 +2443,16 @@ describe('bringing running sessions into a workspace', () => {
     expect(toggled([], 'claude:a')).toEqual(['claude:a'])
     expect(toggled(['claude:a', 'codex:x'], 'claude:b')).toEqual(['codex:x', 'claude:b'])
     expect(toggled(['claude:a', 'codex:x'], 'codex:x')).toEqual(['claude:a'])
-    expect([codexDir('a\tb\t/Users/u/dev/web-app\n'), codexDir('a\tb\trelative'), codexDir('a\tb\t/x\u0007y'), codexDir('')]).toEqual(['/Users/u/dev/web-app', undefined, undefined, undefined])
+    expect([codexDir('/Users/u/dev/web-app\n'), codexDir('relative'), codexDir('/x\u0007y'), codexDir('/x\ny'), codexDir('')]).toEqual(['/Users/u/dev/web-app', undefined, undefined, undefined, undefined])
     // a Codex turn by its whole rollout: under way, between turns, or unknown
     expect(['"type":"task_started"\n', '"type":"task_complete"\n', '"type":"turn_aborted"', ''].map(codexTaskState)).toEqual(['busy', 'done', 'done', undefined])
     // saved threads: ids that cannot pass for an option; the permission flags versions before 0.27 kept, any of them,
     // let go (every agent resumes bypassed), the thread kept
-    expect(threadFrom('claude', { id: 'session-1', dir: '/a', flags: ['--permission-mode', 'plan'], since: 5 })).toEqual({ id: 'session-1', dir: '/a', since: 5 })
-    expect(threadFrom('codex', { id: 'x', dir: '/a', flags: ['--sandbox', 'danger-full-access', '--ask-for-approval', 'never'] })).toEqual({ id: 'x', dir: '/a' })
-    expect(threadFrom('claude', { id: 'x', dir: '/a', flags: 'rm -rf' })).toEqual({ id: 'x', dir: '/a' })
+    expect(threadFrom({ id: 'session-1', dir: '/a', flags: ['--permission-mode', 'plan'], since: 5 })).toEqual({ id: 'session-1', dir: '/a', since: 5 })
+    expect(threadFrom({ id: 'x', dir: '/a', flags: ['--sandbox', 'danger-full-access', '--ask-for-approval', 'never'] })).toEqual({ id: 'x', dir: '/a' })
+    expect(threadFrom({ id: 'x', dir: '/a', flags: 'rm -rf' })).toEqual({ id: 'x', dir: '/a' })
     for (const bad of [{ id: 'x;rm', dir: '/a' }, { id: '--dangerously-skip-permissions', dir: '/a' }, { id: 'x', dir: 'a' }, { id: 'x', dir: '/a\nb' }, null, 'x']) {
-      expect(threadFrom('claude', bad)).toBeUndefined()
+      expect(threadFrom(bad)).toBeUndefined()
     }
     // a workspace keeps its readable threads; one it cannot read is dropped, never the workspace
     const listed = workspacesFrom({ workspaces: [{ ...practice, threads: { claude: { id: 'session-1', dir: '/a' }, codex: { id: 'x;y', dir: '/b' } } }, { ...practice, id: 'b', threads: { codex: 'nope' } }] })
@@ -2626,7 +2626,7 @@ describe('bringing running sessions into a workspace', () => {
     expect(files.get(openScriptPath(HOME, 'console'))).toBe(`${openCommand(saved, HOME)}\n`)
     // every check ran before anything was closed, and each was checked again just before its own close; Claude's
     // permission mode is no longer read (it resumes bypassed), Codex's folder is
-    const order = runs.filter(r => r[2] === MODE_SCRIPT || r[2] === CODEX_MODE_SCRIPT || r[2] === CODEX_TASK_SCRIPT || r[2] === STOP_SCRIPT)
+    const order = runs.filter(r => r[2] === MODE_SCRIPT || r[2] === CODEX_FOLDER_SCRIPT || r[2] === CODEX_TASK_SCRIPT || r[2] === STOP_SCRIPT)
       .map(r => (r[2] === STOP_SCRIPT ? 'stop' : r[2] === CODEX_TASK_SCRIPT ? 'turn' : r[2] === MODE_SCRIPT ? 'mode' : 'folder'))
     expect(order).toEqual(['turn', 'folder', 'stop', 'turn', 'stop'])
     await ui.unmount()

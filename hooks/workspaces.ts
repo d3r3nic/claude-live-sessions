@@ -490,8 +490,8 @@ export function workspacesFrom(raw: unknown): Workspace[] {
     // a member this does not read (a hand edit, a later format) is kept as it is and never costs the workspace
     const members: unknown[] | undefined = Array.isArray(ws.members) ? ws.members : undefined
     // a conversation to resume is run: one this does not read is dropped, and that agent starts new
-    const claude = threadFrom('claude', (ws.threads as Record<string, unknown> | undefined)?.claude)
-    const codex = threadFrom('codex', (ws.threads as Record<string, unknown> | undefined)?.codex)
+    const claude = threadFrom((ws.threads as Record<string, unknown> | undefined)?.claude)
+    const codex = threadFrom((ws.threads as Record<string, unknown> | undefined)?.codex)
     // a compaction setting this does not read is left out: the default stands; one of the earlier percent lines
     // (`compactAt`) only as off
     const legacy = (ws as { compactAt?: unknown }).compactAt
