@@ -173,10 +173,8 @@ const snapshot = atom({ plugin: 'live-sessions', key: 'snapshot' } as const, EMP
  * the terminal's palette makes of it, and gray text on it may not read.
  */
 const background = atom({ plugin: 'live-sessions', key: 'background' } as const, '')
-/** Each tool's own color, dark enough to read on white and on the terminal's background. */
+/** Each tool's own color, readable on the terminal's background. */
 const TOOL_COLOR = { claude: '#c15f3c', codex: '#1f5fd0' } as const
-/** An idle session's row. */
-const IDLE_BACKGROUND = '#ffffff'
 /** A session's background work listed under its row: the oldest this many, then how many more. */
 const TASKS_SHOWN = 3
 
@@ -2396,7 +2394,7 @@ export const register: Register = on => {
       const title = hideNames(i.tags.length > 0 ? `${i.title} (${i.tags.join(', ')})` : i.title, names)
       const target = canOpen ? i.target : undefined
       return (
-        <Box key={i.key} flexDirection="row" width={w} {...(isIdle ? { backgroundColor: IDLE_BACKGROUND } : {})}>
+        <Box key={i.key} flexDirection="row" width={w}>
           <Box width={6} flexShrink={0}>
             <Text color={tool}>{`    ${isWorking ? '●' : isBackground ? '◐' : isIdle ? '○' : '◆'}`}</Text>
           </Box>

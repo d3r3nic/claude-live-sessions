@@ -999,7 +999,7 @@ describe('pane', () => {
     }
   })
 
-  test('Claude is orange, Codex blue; an idle row is white', async ($, on) => {
+  test('Claude is orange, Codex blue; no row is highlighted, its state said in words', async ($, on) => {
     engine(on)
     await $.session.start(START)
     await $.command.run(SESSIONS)
@@ -1012,8 +1012,8 @@ describe('pane', () => {
     const idle = rows.filter(b => b.text.includes('idle'))
     const working = rows.filter(b => b.text.includes('working'))
     expect(idle.length).toBeGreaterThan(0)
-    expect(idle.every(b => b.props.backgroundColor === '#ffffff')).toBe(true)
-    expect(working.every(b => b.props.backgroundColor === undefined)).toBe(true)
+    expect(working.length).toBeGreaterThan(0)
+    expect([...idle, ...working].every(b => b.props.backgroundColor === undefined)).toBe(true)
     await ui.unmount()
   })
 
