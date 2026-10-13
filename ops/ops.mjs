@@ -245,11 +245,11 @@ const TILE_MIN = 32
 const TILE_MAX = 44
 /**
  * A tile's buttons, on its bottom border at the right: while it runs, >_ brings up its terminal and ■ (red) stops it;
- * stopped, ▶ starts it again (its agents going on with their conversations). A click anywhere else on it shows its
+ * stopped, ► starts it again (its agents going on with their conversations). A click anywhere else on it shows its
  * details.
  */
 const tileButtons = n =>
-  !n.isOpenable ? [] : n.ws.isRunning ? [{ label: '[>_]', kind: 'workspace', color: 'hi' }, { label: '[■]', kind: 'shut', color: 'red' }] : [{ label: '[▶]', kind: 'workspace', color: 'hi' }]
+  !n.isOpenable ? [] : n.ws.isRunning ? [{ label: '[>_]', kind: 'workspace', color: 'hi' }, { label: '[■]', kind: 'shut', color: 'red' }] : [{ label: '[►]', kind: 'workspace', color: 'hi' }]
 /** A tile's rows: its top border (its name), a row for each agent, its bottom border (its buttons). */
 const TILE_ROWS = 4
 /** An agent's background work listed under it: the oldest this many, then how many more. */
@@ -525,7 +525,7 @@ function frame(snap, now, cols, rows, tick, note = '', modal = undefined) {
     const markCells = mark === '' ? 0 : width(mark) + 2
     const name = cut(clean(n.ws.name), Math.max(1, w - 7 - markCells))
     // its name in amber while an agent works, as its border
-    const top = `${rgb(edge, '╭─ ')}${rgb(n.needs ? edge : n.isWorking ? G.amber : n.isBright ? G.hi : G.mid, bold(name))}${rgb(edge, ` ${'─'.repeat(Math.max(1, w - 6 - width(name) - markCells))}`)}${mark === '' ? '' : ` ${mark} `}${rgb(edge, '─╮')}`
+    const top = `${rgb(edge, '┌─ ')}${rgb(n.needs ? edge : n.isWorking ? G.amber : n.isBright ? G.hi : G.mid, bold(name))}${rgb(edge, ` ${'─'.repeat(Math.max(1, w - 6 - width(name) - markCells))}`)}${mark === '' ? '' : ` ${mark} `}${rgb(edge, '─┐')}`
     // a row inside the border: what it says at its left, and at its right
     const room = w - 4
     const inside = (left, right = '') => {
@@ -541,11 +541,11 @@ function frame(snap, now, cols, rows, tick, note = '', modal = undefined) {
     }
     const first = n.only === 'codex' ? agent('CODEX', n.codex) : agent('CLAUDE', n.claude)
     const second = n.only !== undefined ? inside('') : agent('CODEX', n.codex)
-    // its buttons on its bottom border, at the right: ╰────[>_]─[■]─╯ (stopped: [▶])
+    // its buttons on its bottom border, at the right: └────[>_]─[■]─┘ (stopped: [►])
     const buttons = tileButtons(n)
     const shown = buttons.map(b => rgb(b.color === 'red' ? G.red : G.hi, b.label)).join(rgb(edge, '─'))
     const fill = Math.max(1, w - 3 - buttons.reduce((sum, b) => sum + width(b.label), Math.max(0, buttons.length - 1)))
-    const bottom = `${rgb(edge, `╰${'─'.repeat(fill)}`)}${shown}${rgb(edge, buttons.length === 0 ? '─'.repeat(w - 2 - fill) + '╯' : '─╯')}`
+    const bottom = `${rgb(edge, `└${'─'.repeat(fill)}`)}${shown}${rgb(edge, buttons.length === 0 ? '─'.repeat(w - 2 - fill) + '┘' : '─┘')}`
     return [top, first, second, bottom]
   }
   /** Workspaces drawn under a rule: as tiles, several a row (the compact view), or each in full (the detailed view). */
@@ -563,7 +563,7 @@ function frame(snap, now, cols, rows, tick, note = '', modal = undefined) {
           const presses = row.flatMap((n, j) => {
             if (!n.isOpenable) return []
             const left = 3 + j * (w + 1)
-            // its buttons end two cells in from its right edge (`─╯`), one `─` between them
+            // its buttons end two cells in from its right edge (`─┘`), one `─` between them
             const buttons = tileButtons(n)
             let at = left + w - 2 - buttons.reduce((sum, b) => sum + width(b.label), Math.max(0, buttons.length - 1))
             const pressed = buttons.map(b => {
@@ -592,15 +592,15 @@ function frame(snap, now, cols, rows, tick, note = '', modal = undefined) {
   const focus = nodes.filter(n => n.ws.isRunning)
   const history = nodes.filter(n => !n.ws.isRunning)
   drawNodes(focus)
-  if (focus.length === 0 && history.length > 0) line(rgb(G.lo, `  nothing running: open HISTORY below (h) and ▶ one`))
+  if (focus.length === 0 && history.length > 0) line(rgb(G.lo, `  nothing running: open HISTORY below (h) and ► one`))
   const historyAt = out.length
   // (with no workspace at all, nothing of it)
   if (nodes.length > 0) {
-    const label = `HISTORY ${history.length} ${prefs.history ? '▾' : '▴'} h`
+    const label = `HISTORY ${history.length} ${prefs.history ? '▼' : '▲'} h`
     const shown = hide(label)
     out.push(rgb(G.lo, '╠══ ') + rgb(G.hi, bold(shown)) + rgb(G.lo, ' ' + '═'.repeat(Math.max(0, inner - width(shown) - 4)) + '╣'))
     targets.push({ kind: 'toggle', what: 'history' })
-    if (prefs.history && history.length === 0) line(rgb(G.lo, '  nothing stopped: ■ on a tile stops it for now, its agents going on with their conversations when ▶ starts it'))
+    if (prefs.history && history.length === 0) line(rgb(G.lo, '  nothing stopped: ■ on a tile stops it for now, its agents going on with their conversations when ► starts it'))
     else if (prefs.history) drawNodes(history)
   }
   const historyLines = out.splice(historyAt)
@@ -613,7 +613,7 @@ function frame(snap, now, cols, rows, tick, note = '', modal = undefined) {
     // what it does first: on a small window what is cut is its folder
     const content = [...nodeRows(n), '', rgb(G.lo, HOME !== '' && dir.startsWith(`${HOME}/`) ? `~${dir.slice(HOME.length)}` : dir)]
     // its window brought up (stopped: started again), and stopped while it runs; the details themselves go back
-    const open = n.ws.isRunning ? '[>_ open window]' : '[▶ start]'
+    const open = n.ws.isRunning ? '[>_ open window]' : '[► start]'
     const shut = n.ws.isRunning ? '[■ stop]' : ''
     const close = '[✕ back]'
     const buttons = `${rgb(G.hi, bold(open))}   ${shut === '' ? '' : `${rgb(G.red, shut)}   `}${rgb(G.hi, close)}`
@@ -791,7 +791,7 @@ function shut(id, snap) {
     return ask('close', ws)
   }
   armed = { id, at: Date.now() }
-  return `■ again stops ${clean(ws.name)}: its agents end between turns; ▶ starts it again, going on with their conversations`
+  return `■ again stops ${clean(ws.name)}: its agents end between turns; ► starts it again, going on with their conversations`
 }
 
 /**
