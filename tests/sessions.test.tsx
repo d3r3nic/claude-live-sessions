@@ -57,7 +57,7 @@ import {
 } from '../hooks/collect'
 import type { CodexProc, ThreadRow } from '../hooks/collect'
 import type { ClaudeSession, CodexSession, Snapshot, Workspace } from '../types'
-import { afterOwner, afterStep, claudeKeep, COMPACT_FROM, cueOf, cutBytes, eventOf, EVENT_SCRIPT, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_MAX_AGE_MS, TURN_SCRIPT, tokensSaid } from '../hooks/relay'
+import { afterOwner, afterStep, claudeKeep, screenReady, COMPACT_FROM, cueOf, cutBytes, eventOf, EVENT_SCRIPT, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_MAX_AGE_MS, TURN_SCRIPT, tokensSaid } from '../hooks/relay'
 import type { Side } from '../hooks/relay'
 import { branchOf, checkDue, checkFrom, driftRequest, isDueAfterCompaction, parseVerdict, recordFolderOf, RECORDS_SCRIPT } from '../hooks/drift'
 import { accountOfFile, applyScan, claudeCost, claudeLimits, clockSaid, codexUnits, currentLimits, EMPTY_USAGE, limitSaid, markKey, mergeLimits, offsetOf, OFFSETS_SCRIPT, parseContexts, priceOf, rankUsage, scanInput, sharedLimitsFrom, usageFrom, USAGE_FILES_SCRIPT, USAGE_KEEP_MS, wholeFiles } from '../hooks/usage'
@@ -2504,7 +2504,7 @@ describe('relay', () => {
     // a cue held at the cap stays held, said so, while the other agent starts again
     const wait = { kind: 'tell' as const, key: 'wait-c3', text: '', isForOwner: false }
     expect(afterStep(relayOn({ streak: RELAY_CAP, status: 'waits for you' }), wait, 'told', NOW)).toEqual(relayOn({ streak: RELAY_CAP, status: 'waits for you', at: NOW }))
-    expect(afterStep(relayOn({ streak: 2, status: 'passed to Codex' }), wait, 'told', NOW).status).toBe('waits for the other agent\'s first turn')
+    expect(afterStep(relayOn({ streak: 2, status: 'passed to Codex' }), wait, 'told', NOW).status).toBe('waits for the other agent to be at its prompt')
   })
 
   test('the owner typing to either agent starts the count over', async () => {
@@ -2573,7 +2573,7 @@ describe('relay', () => {
   })
 
   test('after a restart, a resumed agent at its prompt takes the hand-off without a turn of its own first', async ($, on) => {
-    const { files, runs } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    const { files, runs, clock } = engine(on, machine, { termProgram: 'Apple_Terminal' })
     // both resumed a moment ago (the workspace opened again after a restart): Codex's last turn is from before
     files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, checkout: '/Users/u/dev/web-app', purpose: 'RBAC', relay: relayOn(),
       threads: { claude: { id: 'session-104', dir: '/Users/u/dev/web-app', since: NOW - 30_000 }, codex: { id: RESUMED_A, dir: '/Users/u/dev/web-app', since: NOW - 30_000 } } }] }))
@@ -2581,10 +2581,19 @@ describe('relay', () => {
     world.tmuxOwner = String(NOW)
     world.paneCommands = { '%1': 'claude', '%2': 'codex' }
     world.turns = { 'session-104': `done\tturn-c1\t${new Date(NOW - 10_000).toISOString()}\t${READY_CODEX}`, '/rollouts/a.jsonl': `done\tturn-x0\t${new Date(NOW - 3_600_000).toISOString()}\t` }
+    // Codex at a question of its own at its start (trust): nothing typed, the owner told once
+    world.screens = { '%2': '  Trust this folder?\n› 1. Trust and continue\n  2. Open restricted\n' }
     await $.session.start(START)
     await $.command.run(SESSIONS)
-    // Codex has run long past its start (its process, started hours ago, is at its prompt): passed, no wait for a turn
-    expect(runs.filter(r => r[2] === RELAY_SCRIPT).map(r => r.slice(4, 7))).toEqual([['pass', '/Users/u/Library/Application Support/live-sessions/relayed', 'pass-turn-c1']])
+    const steps = () => [...new Set(runs.filter(r => r[2] === RELAY_SCRIPT).map(r => `${r[4]} ${r[6]}`))]
+    expect(steps()).toEqual(['tell wait-turn-c1'])
+    // at its prompt (its input line, its footer): passed, no turn of its own needed first
+    world.screens = { '%2': '› Ask Codex to do anything\n  GPT-6 xhigh · ~/dev/web-app\n  ? for shortcuts\n' }
+    await clock.advance(30_000)
+    await $.command.run(SESSIONS)
+    expect(steps()).toEqual(['tell wait-turn-c1', 'pass pass-turn-c1'])
+    // only its pane, the one a hand-off waits for, was looked at
+    expect([...new Set(runs.filter(r => r[0] === 'tmux' && r[1] === 'capture-pane').map(r => r[4]))]).toEqual(['%2'])
   })
 
   test('after a restart, a hand-off to a resumed Claude waits while its pane shows its resume question, then passes', async ($, on) => {
@@ -2602,13 +2611,36 @@ describe('relay', () => {
     const steps = () => runs.filter(r => r[2] === RELAY_SCRIPT).map(r => `${r[4]} ${r[6]}`)
     expect(steps()).toEqual(['tell wait-turn-x1'])
     expect(runs.some(r => r[0] === 'tmux' && r[1] === 'capture-pane' && r[4] === '%1')).toBe(true)
-    // answered: at its prompt, the hand-off passes
+    // answered, but its status says idle only a second ago (it may be about to ask): still held
     world.screens = { '%1': '> \n' }
+    const reg = '/Users/u/.claude-work/sessions/104.json'
+    files.set(reg, JSON.stringify({ ...JSON.parse(files.get(reg)!), status: 'idle', statusUpdatedAt: NOW + 29_000 }))
+    // (its file written then: read again)
+    world.mtimes.set(reg, NOW + 29_000)
+    await clock.advance(30_000)
+    await $.command.run(SESSIONS)
+    expect([...new Set(steps())]).toEqual(['tell wait-turn-x1'])
+    // idle a while, at its prompt: the hand-off passes
     await clock.advance(30_000)
     await $.command.run(SESSIONS)
     // (each collection may try it again: the ledger takes it once, so it is typed once)
     expect([...new Set(steps())]).toEqual(['tell wait-turn-x1', 'pass pass-turn-x1'])
     expect(world.ledger.has('pass-turn-x1')).toBe(true)
+  })
+
+  test('after a restart, no pane is looked at while no hand-off waits for its agent', async ($, on) => {
+    const { files, runs } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, checkout: '/Users/u/dev/web-app', purpose: 'RBAC', relay: relayOn(),
+      threads: { claude: { id: 'session-104', dir: '/Users/u/dev/web-app', since: NOW - 30_000 }, codex: { id: RESUMED_A, dir: '/Users/u/dev/web-app', since: NOW - 30_000 } } }] }))
+    world.tmuxPanes = 'ws-practice-rbac\tpeers\t/dev/ttys022\t%1\tclaude\nws-practice-rbac\tpeers\t/dev/ttys045\t%2\tcodex\n'
+    world.tmuxOwner = String(NOW)
+    world.paneCommands = { '%1': 'claude', '%2': 'codex' }
+    // both resumed, neither's last turn handed over
+    world.turns = { 'session-104': `done\tturn-c0\t${new Date(NOW - 3_600_000).toISOString()}\tAll done.`, '/rollouts/a.jsonl': `done\tturn-x0\t${new Date(NOW - 3_600_000).toISOString()}\t` }
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    expect(runs.some(r => r[0] === 'tmux' && r[1] === 'capture-pane')).toBe(false)
+    expect(runs.some(r => r[2] === RELAY_SCRIPT)).toBe(false)
   })
 
   test('the collecting session passes Claude\'s hand-off into Codex\'s pane, once, and shows it', async ($, on) => {
@@ -2624,6 +2656,8 @@ describe('relay', () => {
     const relayed = () => runs.filter(r => r[2] === RELAY_SCRIPT).map(r => r.slice(4, 10))
     const ledger = '/Users/u/Library/Application Support/live-sessions/relayed'
     expect(relayed()).toEqual([['pass', ledger, 'pass-turn-c1', '%2', 'codex', READY_CODEX]])
+    // (no agent resumed here: no pane looked at)
+    expect(runs.some(r => r[0] === 'tmux' && r[1] === 'capture-pane')).toBe(false)
     // only the two agents' own records are read
     const read = runs.find(r => r[2] === TURN_SCRIPT)!.slice(4)
     expect(read).toHaveLength(2)
@@ -2912,6 +2946,17 @@ describe('bringing running sessions into a workspace', () => {
     expect(members(undefined, '', inWs)).not.toContain('claude:session-101')
   })
 
+  test('an agent at its prompt, as its pane shows it: Claude not at its resume question, Codex at its footer with no start-up question', () => {
+    expect(screenReady('claude', '> \n')).toBe(true)
+    expect(screenReady('claude', 'This session is 2h old and 412k tokens.\n❯ 1. Resume from summary (recommended)\n')).toBe(false)
+    // a narrow pane wraps the question: read as one
+    expect(screenReady('claude', '  2. Resume full\n     session as-is\n')).toBe(false)
+    expect(screenReady('codex', '› Ask Codex to do anything\n  GPT-6 · ~/x\n  ? for shortcuts      ⚠ 1 warning\n\n\n')).toBe(true)
+    for (const asked of ['  Trust this folder?\n  ? for shortcuts', '  Try new model\n  Use existing model\n  ? for shortcuts', '  Import settings from claude-code?\n  ? for shortcuts', '  Sign in with ChatGPT\n', '• Working (5s • esc to interrupt)\n› \n  ? for shortcuts', '› \n  ? for shortcuts\n  more\n  lines\n  below']) {
+      expect(screenReady('codex', asked)).toBe(false)
+    }
+  })
+
   test('the relay types into a brought-in agent only once it has finished a turn in the workspace', async () => {
     const ws = { name: 'RBAC', relay: relayOn(), threads: { codex: { id: 'x', dir: '/a', since: NOW - 30_000 } } }
     const sides = (codexAt: number): Partial<Record<'claude' | 'codex', Side>> => ({
@@ -3080,7 +3125,7 @@ describe('bringing running sessions into a workspace', () => {
     // one written 5 minutes ago, open in no terminal: opened
     files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, threads: { codex: { id: 'b', dir: '/Users/u/projects', since: 1 } } }] }))
     expect(await open()).toBe('Opened ws-practice-rbac in a new Terminal window.')
-    // resumed anew: the relay types into it only after a turn from now
+    // resumed anew: the relay types into it only once it is at its prompt
     expect(JSON.parse(files.get(WORKSPACES)!).workspaces[0].threads.codex.since).toBeGreaterThan(NOW)
     expect(runs.filter(r => r[0] === '/usr/bin/osascript' && r[4] === OPEN_SCRIPT)).toHaveLength(1)
   })

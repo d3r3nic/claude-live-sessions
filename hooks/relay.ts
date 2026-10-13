@@ -140,18 +140,33 @@ export function parseTurns(stdout: string): Map<string, Turn> {
 /** One agent of a workspace: its tmux pane, its last turn as its own records say, and whether it is at work. */
 /**
  * An agent's side of the relay: its pane, its last turn, whether it is at work, and whether it is at its prompt with
- * no question of its own open (`isReady`: Claude by its registry, which says `waiting` while a dialog or question is
- * open, and its pane not showing RESUME_QUESTION; Codex once it has run a while, its start-up questions off as every
- * workspace agent starts).
+ * no question of its own open (`isReady`), as its pane and (Claude) its registry show it when a hand-off waits for it
+ * (screenReady).
  */
 export type Side = { tool: Tool; pane: string; turn?: Turn; isBusy: boolean; isReady?: boolean }
-/** How long a Codex has run before the relay takes it to be at its prompt (it starts with its update offer off and bypassed: no question). */
-export const CODEX_READY_MS = 15_000
+/** How long Claude's registry has said idle before it is taken to be at its prompt (it may write idle a moment before a question opens). */
+export const CLAUDE_IDLE_MS = 3_000
 /**
  * Claude's question when it resumes a large conversation (from a summary or in full), as its pane shows it: Enter
  * would choose for the owner, so the relay never types while it is there.
  */
 export const RESUME_QUESTION = /Resume from summary|Resume full session as-is/
+/** Codex at its prompt, as its pane shows it: the footer under its input line. */
+export const CODEX_AT_PROMPT = /\? for shortcuts/
+/** What Codex may show at its start instead of its prompt (trust, a model to switch to, another agent's settings to import, sign-in), or while it works. */
+export const CODEX_QUESTION = /Trust this folder|Open restricted|Try new model|Use existing model|Import|Sign in|esc to interrupt/i
+
+/**
+ * Whether an agent's pane (`tmux capture-pane -p`) shows it at its prompt with no question of its own: Claude not at its
+ * resume question; Codex with its prompt's footer in its last lines and none of what it may ask at its start (nor at
+ * work). A narrow pane's wrapped lines are read as one.
+ */
+export function screenReady(tool: Tool, screen: string): boolean {
+  const lines = screen.split('\n').map(l => l.trimEnd()).filter(l => l.trim() !== '')
+  const all = lines.join(' ').replace(/\s+/g, ' ')
+  if (tool === 'claude') return !RESUME_QUESTION.test(all)
+  return CODEX_AT_PROMPT.test(lines.slice(-3).join(' ')) && !CODEX_QUESTION.test(all)
+}
 
 /**
  * What the relay does now. `key` is the step's own: done once, whichever
@@ -380,6 +395,6 @@ export function afterStep(relay: Relay, step: Step, outcome: string, now: number
   if (step.kind === 'pass') return { ...relay, status: `could not pass to ${NAME[step.to]}`, at: now }
   if (step.key.startsWith('cap-')) return { ...relay, status: 'waits for you', at: now }
   // a cue held at the cap stays held while the other agent starts again: what the row says, and its continue, stay
-  if (step.key.startsWith('wait-')) return { ...relay, status: relay.status === 'waits for you' ? relay.status : 'waits for the other agent\'s first turn', at: now }
+  if (step.key.startsWith('wait-')) return { ...relay, status: relay.status === 'waits for you' ? relay.status : 'waits for the other agent to be at its prompt', at: now }
   return step.isForOwner ? { ...relay, streak: 0, status: 'needs you', at: now } : { ...relay, status: 'told you', at: now }
 }
