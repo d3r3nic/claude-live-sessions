@@ -1676,6 +1676,9 @@ describe('workspaces', () => {
     world.tmuxClients = 'ws-practice-rbac\t/dev/ttys001\n'
     world.tmuxOwner = String(NOW)
     await $.session.start(START)
+    // (a session starting sets up the workspace sessions running: done before the open, whose own setup is read below)
+    for (let i = 0; i < 20 && !runs.some(r => r[0] === 'tmux' && r[4] === 'status-right-length'); i++) await $.command.run(SESSIONS)
+    runs.length = 0
     await $.command.run({ ...SESSIONS, command: 'workspace', args: 'open practice rbac' })
     const osa = () => runs.filter(r => r[0] === '/usr/bin/osascript' && r[4] !== BACKGROUND_SCRIPT).map(r => [r[4] === FOCUS_SCRIPT ? 'focus' : 'open', r[5]])
     expect(osa()).toEqual([['focus', 'ttys001']])
@@ -3604,6 +3607,20 @@ describe('hiding a workspace window', () => {
     await $.session.start(START)
     expect((await $.command.run({ ...SESSIONS, command: 'workspace', args: 'open practice-rbac' })).text).toBe('Opened ws-practice-rbac in a new Terminal window.')
     expect(runs.filter(r => r[0] === 'tmux' && r[1] === 'set-option' && r[4] === 'status-left').map(r => r[5])).toEqual([` Practice RBAC ${HIDE_LABEL}`])
+  })
+
+  test('a workspace session an earlier version made is set up as this one sets one up when a session starts; one not its own is left', async ($, on) => {
+    const { files, runs } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [practice, { ...practice, id: 'other', name: 'Other', createdAt: NOW + 1 }] }))
+    // practice-rbac's own session runs; ws-other runs too, but was started for something else
+    world.tmuxPanes = `ws-practice-rbac\tpeers\t/dev/ttys004\t%1\tclaude\t${NOW}\nws-other\tpeers\t/dev/ttys045\t%2\tcodex\t${NOW + 1}\n`
+    world.tmuxOwner = String(NOW)
+    await $.session.start(START)
+    // (done in the background once the session's first look is in: practice-rbac first, then ws-other asked about)
+    for (let i = 0; i < 20 && !runs.some(r => r[0] === 'tmux' && r[1] === 'show-options' && r[3] === 'ws-other'); i++) await $.command.run(SESSIONS)
+    const set = runs.filter(r => r[0] === 'tmux' && r[1] === 'set-option')
+    expect(set.filter(r => r[4] === 'status-left').map(r => [r[3], r[5]])).toEqual([['ws-practice-rbac', ` Practice RBAC ${HIDE_LABEL}`]])
+    expect(set.filter(r => r[1] === 'set-option' && r[2] === '-u').map(r => r.slice(3))).toEqual([['-t', 'ws-practice-rbac', 'status-right'], ['-t', 'ws-practice-rbac', 'status-right-length']])
   })
 
   test('Hide leaves a tmux session not started for the workspace as it is', async ($, on) => {

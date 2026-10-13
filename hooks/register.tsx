@@ -757,6 +757,20 @@ async function endLeftover($: EngineInterface, name: string, owner: string): Pro
   return (await run(['tmux', 'kill-session', '-t', `=${name}`])).exitCode === 0
 }
 
+/**
+ * Each workspace's own tmux session running when a session starts, set up as this version sets one up: one an earlier
+ * version made gets Hide beside its name and gives the bar's right end back to tmux.conf (where tmux-continuum saves
+ * from), without waiting to be opened again. A session not started for its workspace is left as it is.
+ */
+async function prepareRunning($: EngineInterface) {
+  const home = (await $.env.get('HOME')) ?? ''
+  const snap = await read($, snapshot)
+  for (const ws of snap.workspaces) {
+    if (!Object.values(snap.tmux.panes).some(p => isOwnPane(ws, p))) continue
+    if (await isOwnSession($, ws)) await prepareSession($, home, tmuxName(ws), ws.name)
+  }
+}
+
 /** Whether the running tmux session `ws` would use was started for it (its owner mark is its createdAt). */
 async function isOwnSession($: EngineInterface, ws: Workspace) {
   const out = await $.process
@@ -2125,9 +2139,9 @@ export const register: Register = on => {
     const hasStatusLine = e.isInteractive
     // a pane left open across a reload is painted without being reopened
     if (hasStatusLine) {
-      void refresh($, IDLE_MAX_AGE_MS)
-        .then(() => learnBackground($))
-        .catch(() => undefined)
+      const refreshed = refresh($, IDLE_MAX_AGE_MS)
+      void refreshed.then(() => learnBackground($)).catch(() => undefined)
+      void refreshed.then(() => prepareRunning($)).catch(() => undefined)
     }
     $.clock.every(TICK_MS, () => {
       void tick($, hasStatusLine).catch(() => undefined)
