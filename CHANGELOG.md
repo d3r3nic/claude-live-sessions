@@ -2,6 +2,11 @@
 
 What each version changed, newest first. Each links its pull request, which holds the details, the checks and the reviews. After updating, run `/reload-plugins` in your sessions.
 
+## 0.28.0 — 2026-10-13
+- **Close a workspace for now, open it again later:** `/workspace close <name>`, `Close` in the pane or `■` on its Ops tile (each pressed twice) ends its agents between turns and keeps their conversations; `Open` starts it again, each going on with its own. Nothing is closed while an agent works, waits on you or has background work running.
+- **After a restart or a crash:** a workspace's tmux session that a session restore (tmux-resurrect) brought back as empty shells counts as stopped, and `Open` replaces it with the workspace, resuming its conversations. The Ops screen's `📁` now starts a stopped workspace too, through a Claude session running this plugin in a Terminal tab.
+- **tmux-continuum saves again while workspace windows are open:** a workspace's bar no longer replaces the bar's right end (where tmux.conf runs the save from); `Hide window` moved next to the workspace's name.
+
 ## 0.27.0 — 2026-10-12 ([#34](https://github.com/d3r3nic/claude-live-sessions/pull/34))
 - **Every workspace agent runs bypassed**, new or resumed: Claude with `--dangerously-skip-permissions`, Codex with `--dangerously-bypass-approvals-and-sandbox` (no `--add-dir` needed). A conversation brought in, or resumed when a workspace opens again, no longer keeps the mode it ran in; the permission flags earlier versions kept with it are let go. Sessions outside workspaces, and `To background`, are as before.
 

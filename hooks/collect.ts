@@ -2,7 +2,7 @@
 import type { BackgroundTask, ClaudeSession, CodexSession, Place, SessionContext, Snapshot, Workspace } from '../types'
 import { COMPACT_FROM, RELAY_CAP, tokensSaid } from './relay'
 import { DRIFT_EVERY } from './drift'
-import { tmuxName } from './workspaces'
+import { isOwnPane, tmuxName } from './workspaces'
 
 /** A Codex thread counts as active this long after its last write. */
 export const ACTIVE_MS = 30 * 60_000
@@ -1175,7 +1175,6 @@ export function viewOf(
   const repoAuto = (a: RepoView, b: RepoView) =>
     Number(a.key === '') - Number(b.key === '') ||
     byActivity(lead(a.trees.flatMap(t => t.items))!, lead(b.trees.flatMap(t => t.items))!)
-  const sessionsRunning = new Set(Object.values(snap.tmux.panes).map(p => p.session))
   const workspaces: WorkspaceView[] = snap.workspaces.map(ws => ({
     key: ws.id,
     name: ws.name,
@@ -1183,8 +1182,9 @@ export function viewOf(
     dir: tilde(ws.dir, o.home),
     ...(ws.only === undefined ? {} : { only: ws.only }),
     ...(ws.branch === undefined ? {} : { branch: ws.branch }),
-    isRunning: sessionsRunning.has(tmuxName(ws)),
-    isAttached: (snap.tmux.clients[tmuxName(ws)]?.length ?? 0) > 0,
+    // its own session: one a session restore brought back under its name (empty shells, no owner mark) is not it
+    isRunning: Object.values(snap.tmux.panes).some(p => isOwnPane(ws, p)),
+    isAttached: Object.values(snap.tmux.panes).some(p => isOwnPane(ws, p)) && (snap.tmux.clients[tmuxName(ws)]?.length ?? 0) > 0,
     items: arrange(inWorkspaces.get(tmuxName(ws)) ?? [], i => i.key, order[itemsScope(`ws:${ws.id}`)], byActivity),
     relay: {
       mode: ws.relay?.mode ?? 'off',

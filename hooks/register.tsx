@@ -20,6 +20,14 @@ import {
   envsFrom,
   findWorkspace,
   OWNER_OPTION,
+  isLeftover,
+  isOwnPane,
+  LEFTOVER_FORMAT,
+  parentsFrom,
+  REQUEST_FILE,
+  REQUEST_MAX_AGE_MS,
+  requestFrom,
+  requestsDir,
   openCommand,
   parseClients,
   parsePanes,
@@ -736,6 +744,19 @@ async function prepareSession($: EngineInterface, home: string, name: string, ti
   for (const args of sessionSetup(name, windows, canHide, title)) await tmux(args)
 }
 
+/**
+ * Ends the tmux session `name` when it holds only what a session restore (tmux-resurrect, after a restart) brought back
+ * under it: no owner mark (`owner`), empty shells (isLeftover). Answers whether it did.
+ */
+async function endLeftover($: EngineInterface, name: string, owner: string): Promise<boolean> {
+  if (owner !== '') return false
+  const run = (argv: string[]) => $.process.run(argv, { timeoutMs: 10_000 }).catch(() => ({ exitCode: -1, stdout: '', stderr: '' }))
+  const listed = await run(['tmux', 'list-panes', '-s', '-t', `=${name}`, '-F', LEFTOVER_FORMAT])
+  const ps = await run(['/bin/ps', '-ax', '-o', 'ppid='])
+  if (listed.exitCode !== 0 || ps.exitCode !== 0 || !isLeftover(owner, listed.stdout, parentsFrom(ps.stdout))) return false
+  return (await run(['tmux', 'kill-session', '-t', `=${name}`])).exitCode === 0
+}
+
 /** Whether the running tmux session `ws` would use was started for it (its owner mark is its createdAt). */
 async function isOwnSession($: EngineInterface, ws: Workspace) {
   const out = await $.process
@@ -766,6 +787,13 @@ async function hideWorkspace($: EngineInterface, ws: Workspace) {
     await toast($, `Not hidden: tmux session ${tmuxName(ws)} was not started for ${ws.name}.`)
     return
   }
+  const hidden = await hideWindows($, home, ws)
+  await toast($, hidden === 0 ? `${ws.name} has no window open.` : `${ws.name} hidden: its agents keep running; Open brings it back.`)
+  await refresh($, 0)
+}
+
+/** Each terminal attached to a workspace's session detached and its Terminal window closed (hide.sh); how many there were. */
+async function hideWindows($: EngineInterface, home: string, ws: Workspace): Promise<number> {
   await $.fs.write(hidePath(home), HIDE_SCRIPT)
   const listed = await $.process
     .run(['tmux', 'list-clients', '-F', CLIENTS_FORMAT], { timeoutMs: 10_000 })
@@ -774,8 +802,86 @@ async function hideWorkspace($: EngineInterface, ws: Workspace) {
   for (const tty of ttys) {
     await $.process.run(['/bin/sh', hidePath(home), `/dev/${tty}`], { timeoutMs: 15_000 }).catch(() => undefined)
   }
-  await toast($, ttys.length === 0 ? `${ws.name} has no window open.` : `${ws.name} hidden: its agents keep running; Open brings it back.`)
+  return ttys.length
+}
+
+/**
+ * Closes a workspace for now, to be opened again later: each agent in it, checked between turns, closed as a terminal
+ * closing does (its conversation kept for the workspace, which Open goes on with), its windows hidden, then its tmux
+ * session ended. Nothing is closed while an agent works, waits on the owner or has background work going, nor while
+ * the conversation it runs is not the one kept. An agent that began a turn after the checks is left running.
+ */
+async function closeWorkspace($: EngineInterface, ws: Workspace): Promise<{ isClosed: boolean; text: string }> {
+  const home = (await $.env.get('HOME')) ?? ''
+  const name = tmuxName(ws)
+  const tmux = (args: string[]) =>
+    $.process.run(['tmux', ...args], { timeoutMs: 10_000 }).catch((error: unknown) => ({ exitCode: -1, stdout: '', stderr: message(error) }))
+  const not = (why: string) => ({ isClosed: false, text: `Not closed: ${why}.` })
+  const reopens = 'Open starts it again, going on with its conversations'
+  if ((await tmux(['has-session', '-t', `=${name}`])).exitCode !== 0) return { isClosed: true, text: `${ws.name} is closed already; ${reopens}.` }
+  // show-options takes no `=` target; has-session just found this exact name, which tmux prefers to a prefix
+  const owner = (await tmux(['show-options', '-t', name, '-qv', OWNER_OPTION])).stdout.trim()
+  if (owner !== String(ws.createdAt)) {
+    if (!(await endLeftover($, name, owner))) return not(`tmux session ${name} was not started for this workspace`)
+    await refresh($, 0)
+    return { isClosed: true, text: `${ws.name} was not running (tmux had brought back empty shells under its name after a restart: ended); ${reopens}.` }
+  }
+  // what each of its panes runs now, and the conversations kept for it, as they are now
   await refresh($, 0)
+  const snap = await read($, snapshot)
+  const kept = snap.workspaces.find(w => w.id === ws.id) ?? ws
+  const NAME = { claude: 'Claude', codex: 'Codex' } as const
+  const asked = 'close the workspace'
+  type Agent = { tool: 'claude' | 'codex'; tty: string; pid: number; check: () => Promise<string | undefined> }
+  const agents: Agent[] = []
+  for (const [tty, pane] of Object.entries(snap.tmux.panes)) {
+    if (!isOwnPane(ws, pane) || (pane.window !== 'claude' && pane.window !== 'codex')) continue
+    if (pane.window === 'claude') {
+      // (none: its agent has exited, and a shell is left)
+      const s = snap.claude.find(c => c.tty === tty && c.kind === 'interactive')
+      if (s === undefined) continue
+      if (kept.threads?.claude?.id !== s.sessionId) return not('the conversation Claude runs is not kept for the workspace yet; try again in a moment')
+      const check = async () => {
+        const live = await liveClaude($, home, s.pid, s.profile, s.sessionId, asked)
+        return typeof live === 'string' ? `Claude ${live}` : undefined
+      }
+      agents.push({ tool: 'claude', tty, pid: s.pid, check })
+    } else {
+      const s = snap.codex.find(c => c.tty === tty && c.surface === 'terminal' && c.pid !== undefined)
+      if (s === undefined) continue
+      if (kept.threads?.codex?.id !== s.key) return not('which conversation Codex runs is not known for certain yet; try again in a moment')
+      const rollout = (await $.process.run(['/bin/sh', '-c', ROLLOUT_SCRIPT, 'sh', `${home}/.${s.profile}`, s.key], { timeoutMs: 15_000 }).catch(() => ({ stdout: '' }))).stdout.trim()
+      if (!rollout.startsWith('/')) return not(`Codex's conversation was not found under ~/.${s.profile}`)
+      const check = async () => {
+        const busy = await codexBusy($, rollout, asked)
+        return busy !== undefined ? `Codex ${busy}` : s.updatedAt > 0 && (await $.clock.now()) - s.updatedAt < WORKING_MS ? `Codex is working: ${asked} once its turn is done` : undefined
+      }
+      agents.push({ tool: 'codex', tty, pid: s.pid!, check })
+    }
+  }
+  // every agent between turns first, so nothing is closed while one is not
+  for (const a of agents) {
+    const why = await a.check()
+    if (why !== undefined) return not(why)
+  }
+  const closed: string[] = []
+  for (const a of agents) {
+    // checked again just before it is closed: one that began a turn since is left running
+    const why = await a.check()
+    const out = why !== undefined
+      ? why
+      : (await $.process.run(['/bin/sh', '-c', STOP_SCRIPT, 'sh', a.tty, JOB_COMMANDS[a.tool], String(a.pid)], { timeoutMs: 30_000 }).catch(() => ({ stdout: 'failed' }))).stdout.trim()
+    // (not in front of its terminal any more: it has exited, or the session's end hangs it up)
+    if (out === 'stopped' || out === 'not-running') closed.push(NAME[a.tool])
+    else {
+      const left = why ?? `${NAME[a.tool]} did not exit in 20 s`
+      return { isClosed: false, text: `Not closed: ${left}.${closed.length === 0 ? '' : ` ${closed.join(' and ')} closed meanwhile, its conversation kept; close the workspace again once ${NAME[a.tool]} can be.`}` }
+    }
+  }
+  await hideWindows($, home, ws)
+  await tmux(['kill-session', '-t', `=${name}`])
+  await refresh($, 0)
+  return { isClosed: true, text: `Closed ${ws.name}${closed.length === 0 ? ' (no agent was running in it)' : `: ${closed.join(' and ')} ended between turns`}; ${reopens}.` }
 }
 
 /**
@@ -791,13 +897,15 @@ async function openWorkspace($: EngineInterface, ws: Workspace, at?: { window: s
   const isDir = await $.fs.stat(ws.dir).then(s => s.kind === 'dir').catch(() => false)
   if (!isDir) return { isOpen: false, text: `Not opened: its folder ${ws.dir} is not there any more.` }
   // a running session of that name must be this workspace's own, not an older one or anyone else's
-  const wasRunning = (await tmux(['has-session', '-t', `=${name}`])).exitCode === 0
+  let wasRunning = (await tmux(['has-session', '-t', `=${name}`])).exitCode === 0
+  // show-options takes no `=` target; has-session just found this exact name, which tmux prefers to a prefix
+  const owner = wasRunning ? (await tmux(['show-options', '-t', name, '-qv', OWNER_OPTION])).stdout.trim() : ''
+  // what a session restore brought back under its name after a restart (empty shells): ended, the workspace started anew
+  if (wasRunning && owner !== String(ws.createdAt) && (await endLeftover($, name, owner))) wasRunning = false
+  if (wasRunning && owner !== String(ws.createdAt)) {
+    return { isOpen: false, text: `Not opened: tmux session ${name} was not started for this workspace; end it (tmux kill-session -t ${name}) or remove this workspace.` }
+  }
   if (wasRunning) {
-    // show-options takes no `=` target; has-session just found this exact name, which tmux prefers to a prefix
-    const owner = (await tmux(['show-options', '-t', name, '-qv', OWNER_OPTION])).stdout.trim()
-    if (owner !== String(ws.createdAt)) {
-      return { isOpen: false, text: `Not opened: tmux session ${name} was not started for this workspace; end it (tmux kill-session -t ${name}) or remove this workspace.` }
-    }
     // one made before the mouse, the side labels and Hide were set up gets them now, in each of its windows
     await prepareSession($, home, name, ws.name)
     // its agent's pane (a workspace made before panes were marked has a window per agent)
@@ -1226,15 +1334,21 @@ async function checkBring($: EngineInterface, home: string, snap: Snapshot, memb
   return { bring }
 }
 
-/** A Claude session as it runs now, by its registry entry and process: between turns, in front of its terminal; else why not. */
-async function liveClaude($: EngineInterface, home: string, pid: number, profile: string, id: string): Promise<ClaudeSession | string> {
+/**
+ * A Claude session as it runs now, by its registry entry and process: between turns, in front of its terminal; else why
+ * not, said for what was `asked` of it.
+ */
+async function liveClaude($: EngineInterface, home: string, pid: number, profile: string, id: string, asked = 'bring it in'): Promise<ClaudeSession | string> {
   const raw = await $.fs.read(`${home}/.${profile}/sessions/${pid}.json`).then(text => JSON.parse(text) as unknown).catch(() => undefined)
   const ps = await $.process.run(['/bin/ps', '-ww', '-o', PS_COLUMNS, '-p', String(pid)], { env: PS_ENV, timeoutMs: 10_000 })
   const procs = parsePs(ps.stdout)
   const proc = procs.get(pid)
   const still = claudeFromRegistry(raw, profile, procs, home)
   if (proc === undefined || still === undefined || still.sessionId !== id || !isClaudeProcess(proc.args)) return 'has ended or its process changed'
-  if (claudeState(still, await $.clock.now()) !== 'idle') return 'is working: bring it in once its turn is done'
+  const state = claudeState(still, await $.clock.now())
+  if (state === 'background') return `has background work running: ${asked} once it has ended`
+  if (state === 'waiting') return `waits on you: answer it, then ${asked}`
+  if (state !== 'idle') return `is working: ${asked} once its turn is done`
   if (!isForeground(proc.stat)) return 'is suspended (Ctrl+Z) or not in front of its terminal; bring it back first'
   return still
 }
@@ -1253,10 +1367,13 @@ async function codexWrittenSince($: EngineInterface, codexHome: string, since: n
   return parseThreads(out.stdout).filter(t => t.updated_at_ms >= since && isFromTerminal(t) && t.source !== 'exec').map(t => t.id)
 }
 
-/** Why a Codex conversation cannot be closed now, by its whole rollout: a turn under way, or none yet; undefined when between turns. */
-async function codexBusy($: EngineInterface, rollout: string): Promise<string | undefined> {
+/**
+ * Why a Codex conversation cannot be closed now, by its whole rollout: a turn under way, or none yet; undefined when
+ * between turns. Said for what was `asked` of it.
+ */
+async function codexBusy($: EngineInterface, rollout: string, asked = 'bring it in'): Promise<string | undefined> {
   const state = codexTaskState((await $.process.run(['/bin/sh', '-c', CODEX_TASK_SCRIPT, 'sh', rollout], { timeoutMs: 20_000 }).catch(() => ({ stdout: '' }))).stdout)
-  return state === 'done' ? undefined : state === 'busy' ? 'is working: bring it in once its turn is done' : 'has no finished turn to go on from'
+  return state === 'done' ? undefined : state === 'busy' ? `is working: ${asked} once its turn is done` : 'has no finished turn to go on from'
 }
 
 async function submitDraft($: EngineInterface) {
@@ -1737,6 +1854,8 @@ const isPaneVisible = async ($: EngineInterface) =>
 async function tick($: EngineInterface, hasStatusLine: boolean) {
   const isVisible = await isPaneVisible($)
   if (!isVisible && !hasStatusLine) return
+  // what the ops screen asks of a session
+  void takeRequests($).catch(() => undefined)
   // this account's Claude limits, for every account's panes; the usage, while a pane shows it
   void shareLimits($).catch(() => undefined)
   if (isVisible) void refreshUsage($).catch(() => undefined)
@@ -1744,6 +1863,53 @@ async function tick($: EngineInterface, hasStatusLine: boolean) {
   if ((await $.clock.now()) - lastAttemptAt < maxAgeMs) return
   await refresh($, maxAgeMs)
 }
+
+/**
+ * What the ops screen asks (requestsDir: open or close a workspace), done as /sessions does it, only by a session in a
+ * Terminal tab (where a workspace's window opens as /sessions opens one; one inside tmux, a workspace's agent, never
+ * does): each request taken by one session alone, by renaming it to its own name first, and answered in its `.done`
+ * file. One asked longer ago than REQUEST_MAX_AGE_MS (the ops screen has given up on it) is dropped.
+ */
+async function takeRequests($: EngineInterface) {
+  if (isTaking || (await $.env.get('TERM_PROGRAM')) !== 'Apple_Terminal') return
+  isTaking = true
+  try {
+    const home = (await $.env.get('HOME')) ?? ''
+    const dir = requestsDir(home)
+    const self = (await $.session.id()).replace(/[^A-Za-z0-9-]/g, '')
+    for (const entry of await $.fs.list(dir).catch(() => [])) {
+      const nonce = REQUEST_FILE.exec(entry.name)?.[1]
+      if (nonce === undefined || entry.kind !== 'file') continue
+      const taken = `${dir}/${nonce}.taken-${self}`
+      const moved = await $.process.run(['/bin/mv', `${dir}/${entry.name}`, taken], { timeoutMs: 10_000 }).catch(() => ({ exitCode: -1 }))
+      if (moved.exitCode !== 0) continue
+      const asked = requestFrom(await readJson($, taken))
+      await $.process.run(['/bin/rm', '-f', taken], { timeoutMs: 10_000 }).catch(() => undefined)
+      const answer = (text: string, isDone: boolean) => $.fs.write(`${dir}/${nonce}.done`, `${JSON.stringify({ text, isDone })}\n`)
+      if (asked === undefined) {
+        await answer('Not done: the request could not be read.', false)
+        continue
+      }
+      if ((await $.clock.now()) - asked.at > REQUEST_MAX_AGE_MS) continue
+      const { list, isReadable } = await readWorkspaces($, home)
+      const ws = list.find(w => w.id === asked.id)
+      if (!isReadable || ws === undefined) {
+        await answer(isReadable ? 'Not done: that workspace is gone.' : `Not done: ${UNREADABLE}.`, false)
+        continue
+      }
+      if (asked.action === 'open') {
+        const opened = await openWorkspace($, ws)
+        await answer(opened.text, opened.isOpen)
+      } else {
+        const closed = await closeWorkspace($, ws)
+        await answer(closed.text, closed.isClosed)
+      }
+    }
+  } finally {
+    isTaking = false
+  }
+}
+let isTaking = false
 
 /** Where the usage read so far is kept, and each account's Claude limits, for every session on the Mac. */
 const usagePath = (home: string) => `${home}/Library/Caches/live-sessions/usage.json`
@@ -1942,7 +2108,7 @@ export const register: Register = on => {
     await $.command.register({
       name: 'workspace',
       description: 'Named workspaces: a folder, an environment, Claude and Codex (or one of them) in one tmux session',
-      argumentHint: 'new <folder> <env> <name> [--only claude|codex] [--go-on] [--for <purpose>] | open <name> | rm <name>',
+      argumentHint: 'new <folder> <env> <name> [--only claude|codex] [--go-on] [--for <purpose>] | open <name> | close <name> | rm <name>',
     })
     const kept = await $.store.get('windowMs')
     if (typeof kept === 'number' && kept >= 0) await update($, activeWindow, () => kept)
@@ -1980,7 +2146,7 @@ export const register: Register = on => {
     await refresh($, VISIBLE_MAX_AGE_MS)
     const snap = await read($, snapshot)
     const named = snap.envs.filter(env => env !== '')
-    const usage = `Usage: /workspace new <folder> <${['default', ...named].join(' | ')}> <name> [--only claude | codex] [--go-on: with the branch checked out in <folder>] [--for <what it is for: Claude gets peer coding ready for it>]; /workspace open <name>; /workspace rm <name>`
+    const usage = `Usage: /workspace new <folder> <${['default', ...named].join(' | ')}> <name> [--only claude | codex] [--go-on: with the branch checked out in <folder>] [--for <what it is for: Claude gets peer coding ready for it>]; /workspace open <name>; /workspace close <name> (its agents end between turns; open goes on with their conversations); /workspace rm <name>`
     const command = parseWorkspaceArgs(e.args, named, home)
     const { list, isReadable } = await readWorkspaces($, home)
     const label = (ws: Workspace) => `${ws.name} (${ws.env || 'default'}, ${ws.dir})`
@@ -1990,6 +2156,7 @@ export const register: Register = on => {
       case 'list':
         return { text: list.length === 0 ? `No workspaces yet. ${usage}` : `Workspaces: ${list.map(label).join('; ')}. ${usage}` }
       case 'open':
+      case 'close':
       case 'rm':
         if (!isReadable) return { text: `Not done: ${UNREADABLE}.` }
     }
@@ -1998,6 +2165,11 @@ export const register: Register = on => {
         const ws = findWorkspace(list, command.ref)
         if (ws === undefined) return { text: `No workspace named "${command.ref}".` }
         return { text: (await openWorkspace($, ws)).text }
+      }
+      case 'close': {
+        const ws = findWorkspace(list, command.ref)
+        if (ws === undefined) return { text: `No workspace named "${command.ref}".` }
+        return { text: (await closeWorkspace($, ws)).text }
       }
       case 'rm': {
         const ws = findWorkspace(list, command.ref)
@@ -2108,6 +2280,18 @@ export const register: Register = on => {
         await update($, selected, () => '')
       } else {
         await update($, pendingMove, () => ({ key: `rm:${id}`, at }))
+      }
+    }
+    // Close too: its agents end (between turns), their conversations kept for Open
+    const pressClose = (id: string) => async () => {
+      const at = await $.clock.now()
+      const asked = await read($, pendingMove)
+      if (asked.key === `close:${id}` && at - asked.at < CONFIRM_MS) {
+        await update($, pendingMove, () => ({ key: '', at: 0 }))
+        const ws = (await read($, snapshot)).workspaces.find(w => w.id === id)
+        if (ws !== undefined) await toast($, (await closeWorkspace($, ws)).text, { timeoutMs: 15_000 })
+      } else {
+        await update($, pendingMove, () => ({ key: `close:${id}`, at }))
       }
     }
     const pressMove = (key: string, move: NonNullable<Item['move']>) => async () => {
@@ -2526,6 +2710,17 @@ export const register: Register = on => {
                   <Button key={`wsopen-bar ${ws.key}`} label="Open (o)" hotkey="o" variant="primary" onPress={() => void openWorkspaceById($, ws.key)} />,
                   // by a click only: turned on, the relay types into the agents
                   ...(ws.isAttached ? [<Button key={`hide ${ws.key}`} label="Hide window" onPress={() => void hideWorkspaceById($, ws.key)} />] : []),
+                  // for now: its agents end between turns, and Open goes on with their conversations
+                  ...(ws.isRunning
+                    ? [
+                        <Button
+                          key={`wsclose ${ws.key}`}
+                          label={isPending(`close:${ws.key}`) ? 'Press again to close it' : 'Close (Open goes on with it)'}
+                          {...(isPending(`close:${ws.key}`) ? { variant: 'primary' as const } : {})}
+                          onPress={() => void pressClose(ws.key)()}
+                        />,
+                      ]
+                    : []),
                   // the relay, the compaction at a hand-off and the drift check all go by hand-offs: one agent makes none
                   ...(ws.only !== undefined
                     ? []

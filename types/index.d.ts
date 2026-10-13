@@ -165,7 +165,7 @@ export type Snapshot = {
   /** The environments on this machine: '' (the default) and each other's name. */
   envs: string[]
   /** tmux: which session and window each tty is, and the terminals attached to each session. */
-  tmux: { panes: Record<string, { session: string; window: string; pane?: string }>; clients: Record<string, string[]> }
+  tmux: { panes: Record<string, { session: string; window: string; pane?: string; owner?: string }>; clients: Record<string, string[]> }
   /** When this snapshot was taken; 0 before the first. */
   checkedAt: number
   /** What could not be read, one line each. */

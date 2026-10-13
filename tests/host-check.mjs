@@ -323,7 +323,12 @@ if (process.argv.includes('--slow')) {
   writeFileSync(standIn, `#!/bin/sh\necho "$1" > "${scratch}/hidden"\ntmux detach-client -t "$1"\necho closed\n`)
   check('hide: the click is tmux\'s own before the mod binds it', w.mayBindHide(t6('list-keys', '-T', 'root', 'MouseDown1Status')))
   t6(...w.hideBinding(standIn))
-  for (const args of w.sessionSetup('ws-check', [], true)) t6(...args)
+  // as a session made before had it: its own right end, which kept tmux.conf's from running (dropped now)
+  t6('set-option', '-t', 'ws-check', 'status-right', 'old')
+  for (const args of w.sessionSetup('ws-check', [], true, 'Check')) t6(...args)
+  // what tmux.conf runs from the bar's right end (tmux-continuum saves the sessions so): it runs while a terminal shows
+  // the workspace, as it does for the person's other sessions
+  t6('set-option', '-g', 'status-right', `#(touch '${scratch}/saved')`)
   const hid = spawnSync('python3', ['-c', `
 import os, pty, select, subprocess, time, struct, fcntl, termios, sys
 S = sys.argv[1]
@@ -342,7 +347,7 @@ def pump(s):
             except OSError: return
 pump(1.5)
 before = t('list-clients', '-t', '=ws-check', '-F', '#{client_tty}')
-os.write(fd, b'\\x1b[<0;90;1M\\x1b[<0;90;1m'); pump(1.5)
+os.write(fd, b'\\x1b[<0;14;1M\\x1b[<0;14;1m'); pump(1.5)
 after = t('list-clients', '-t', '=ws-check', '-F', '#{client_tty}')
 print(before or '-', after or '-')
 os.close(fd)
@@ -353,6 +358,8 @@ except ChildProcessError: pass
   check('hide: a click on the bar\'s Hide detaches that terminal; the session keeps running', hid[0].startsWith('/dev/') && hid[1] === '-' && hiddenTty === hid[0] &&
     spawnSync('tmux', ['-L', socket, '-f', '/dev/null', 'has-session', '-t', '=ws-check']).status === 0, `${hid.join(' → ')} (${hiddenTty})`)
   check('hide: other clicks on the bar stay tmux\'s own', t6('list-keys', '-T', 'root', 'MouseDown1Status').includes(w.STATUS_CLICK))
+  check('hide: the bar\'s right end is tmux.conf\'s, and what runs from it ran while a terminal showed the workspace (a session restore\'s save goes on)',
+    t6('show-options', '-t', 'ws-check', 'status-right') === '' && existsSync(join(scratch, 'saved')), `${JSON.stringify(t6('show-options', '-t', 'ws-check', 'status-right'))} ${existsSync(join(scratch, 'saved'))}`)
   check('hide: what the hide prints never shows in a pane (over the agent, in a view the relay waits on)', t6('list-panes', '-s', '-t', '=ws-check', '-F', '#{pane_in_mode}').split('\n').every(m => m === '0'), t6('list-panes', '-s', '-t', '=ws-check', '-F', '#{pane_id}=#{pane_in_mode}').replace(/\n/g, ' '))
   // hide.sh, the mod's own, run by the bar's click: a terminal switched here from another session goes back to
   // it, attached, its window untouched (Terminal is never asked)
@@ -380,7 +387,7 @@ pump(1.5)
 tty = t('list-clients', '-F', '#{client_tty}')
 t('switch-client', '-c', tty, '-t', '=ws-check'); pump(1)
 on = t('list-clients', '-F', '#{client_session}')
-os.write(fd, b'\\x1b[<0;90;1M\\x1b[<0;90;1m'); pump(1.5)
+os.write(fd, b'\\x1b[<0;14;1M\\x1b[<0;14;1m'); pump(1.5)
 print(on, t('list-clients', '-F', '#{client_session}') or '-')
 t('detach-client', '-t', tty); pump(0.5)
 os.close(fd)
@@ -496,6 +503,34 @@ except ChildProcessError: pass
     // kill-server leaves its socket file behind
     rmSync(join(process.env.TMUX_TMPDIR ?? '/tmp', `tmux-${process.getuid()}`, socket), { force: true })
     rmSync(scratch, { recursive: true, force: true })
+  }
+}
+
+// 6c. What a session restore (tmux-resurrect, after a restart) brings back under a workspace's name: login shells
+// started with no command, and no owner mark. On a private tmux server, with the real `ps`: told apart from shells
+// with a process under them and from a workspace's own session; each pane listed with its session's mark.
+{
+  const socket = `live-sessions-left-${process.pid}`
+  const t = (...args) => spawnSync('tmux', ['-L', socket, '-f', '/dev/null', ...args], { encoding: 'utf8' })
+  try {
+    t('new-session', '-d', '-s', 'ws-left')
+    t('split-window', '-h', '-t', '=ws-left:')
+    t('new-session', '-d', '-s', 'ws-busy')
+    t('split-window', '-h', '-t', '=ws-busy:')
+    t('new-session', '-d', '-s', 'ws-own', 'sleep 30')
+    t('set-option', '-t', 'ws-own', w.OWNER_OPTION, '1234')
+    // the shells up, then something left running under one of them
+    await new Promise(r => setTimeout(r, 1500))
+    t('send-keys', '-t', '=ws-busy:0.1', 'sleep 30 &', 'Enter')
+    await new Promise(r => setTimeout(r, 1000))
+    const parents = w.parentsFrom(spawnSync('/bin/ps', ['-ax', '-o', 'ppid='], { encoding: 'utf8' }).stdout)
+    const left = name => w.isLeftover(t('show-options', '-t', name, '-qv', w.OWNER_OPTION).stdout.trim(), t('list-panes', '-s', '-t', `=${name}`, '-F', w.LEFTOVER_FORMAT).stdout, parents)
+    check('leftover: empty shells a restore brought back are told apart; shells with a process under one, and a workspace\'s own session, are not', left('ws-left') && !left('ws-busy') && !left('ws-own'), `${left('ws-left')} ${left('ws-busy')} ${left('ws-own')}`)
+    const panes = Object.values(w.parsePanes(t('list-panes', '-a', '-F', w.PANES_FORMAT).stdout))
+    check('leftover: each pane listed with its session\'s mark (none: \'\')', panes.some(p => p.session === 'ws-own' && p.owner === '1234') && panes.filter(p => p.session === 'ws-left').length === 2 && panes.filter(p => p.session === 'ws-left').every(p => p.owner === ''), JSON.stringify(panes.map(p => [p.session, p.owner])))
+  } finally {
+    t('kill-server')
+    rmSync(join(process.env.TMUX_TMPDIR ?? '/tmp', `tmux-${process.getuid()}`, socket), { force: true })
   }
 }
 
@@ -1516,16 +1551,20 @@ except ChildProcessError: pass
         JSON.stringify(tiles.slice(first, first + 5).map(l => l.trim().slice(0, 60))))
       check('ops, compact: an agent at background work is at work in its tile (never idle or done), its context beside it',
         /╭─ Ops X 要確認 ✅ é ─+ ◐ ─╮/.test(tiles[first]) && /│ ◐ CLAUDE background +208k │/.test(tiles[first + 1]) && /│ · CODEX +offline +│/.test(tiles[first + 2]) &&
-        /│ ⇄ off +\[📁\] \[»\] │/.test(relayRow) && tiles[1].includes('BACKGROUND 1') && !tiles.some(l => /done \d/.test(l)),
+        /│ ⇄ off +\[📁\] \[■\] \[»\] │/.test(relayRow) && tiles[1].includes('BACKGROUND 1') && !tiles.some(l => /done \d/.test(l)),
         JSON.stringify(tiles.slice(first, first + 4).map(l => l.slice(0, 44))))
-      // a click on the tile's 📁 opens it; anywhere else on it shows its details; a forged id is no tile to press
+      // a click on the tile's 📁 opens it, on its ■ closes it (while it runs); anywhere else on it shows its details; a
+      // stopped one has no ■; a forged id is no tile to press
       const folderAt = columnOf(relayRow, '[📁]')
+      const shutAt = columnOf(relayRow, '[■]')
       const tileAt = columnOf(tiles[first], '╭─ Ops X')
-      check('ops, compact: a click on a tile\'s 📁 opens its window, anywhere else on it its details; a forged workspace\'s tile presses nothing',
-        JSON.stringify(tileTargets[first + 3]?.slice(0, 2)) === JSON.stringify([{ kind: 'workspace', id: 'opsx', cols: [folderAt, folderAt + 3] }, { kind: 'details', id: 'opsx', cols: [tileAt, tileAt + 37] }]) &&
+      const stoppedRow = tiles[tiles.findIndex(l => l.includes('╭─ Stopped one')) + 3] ?? ''
+      check('ops, compact: a click on a tile\'s 📁 opens its window, on its ■ closes it, anywhere else on it its details; a stopped one has no ■; a forged workspace\'s tile presses nothing',
+        JSON.stringify(tileTargets[first + 3]?.slice(0, 3)) === JSON.stringify([{ kind: 'workspace', id: 'opsx', cols: [folderAt, folderAt + 3] }, { kind: 'shut', id: 'opsx', cols: [shutAt, shutAt + 2] }, { kind: 'details', id: 'opsx', cols: [tileAt, tileAt + 37] }]) &&
+        /│ ■ stopped +\[📁\] \[»\] │/.test(stoppedRow) &&
         [0, 1, 2, 4].every(k => JSON.stringify(tileTargets[first + k]?.[0]) === JSON.stringify({ kind: 'details', id: 'opsx', cols: [tileAt, tileAt + 37] })) &&
         !JSON.stringify(tileTargets).includes('../..'),
-        `${folderAt} ${tileAt} ${JSON.stringify(tileTargets[first + 3])}`)
+        `${folderAt} ${shutAt} ${tileAt} ${JSON.stringify(tileTargets[first + 3])} ${JSON.stringify(stoppedRow.trim())}`)
       // its details: over the screen, the rest dimmed, all the detailed view says of it, its background work listed;
       // its buttons open its window and close them, a click anywhere else closes them
       const modalLines = show({ MODAL: 'opsx' }).split('\n')
@@ -1533,15 +1572,16 @@ except ChildProcessError: pass
       const modalTargets = JSON.parse(show({ MODAL: 'opsx' }, ['--targets']))
       const buttonsRow = modalLines.findIndex(l => l.includes('[📁 open window]'))
       const openAt = columnOf(modalLines[buttonsRow] ?? '', '[📁 open window]')
-      const closeAt = columnOf(modalLines[buttonsRow] ?? '', '[✕ close]')
+      const shutInAt = columnOf(modalLines[buttonsRow] ?? '', '[■ close workspace]')
+      const closeAt = columnOf(modalLines[buttonsRow] ?? '', '[✕ back]')
       const dim = `\x1b[38;2;${[1, 3, 5].map(k => parseInt('#0a4a22'.slice(k, k + 2), 16)).join(';')}m`
       check('ops, compact: a workspace\'s details over the screen: what the detailed view says, its background work listed, the rest dimmed',
         modalLines.some(l => l.includes('◐ BACKGROUND  ▓▒░ Ops X 要確認 ✅ é ░▒▓')) && modalLines.some(l => /\[CLAUDE\] ◐ background +context 208k/.test(l)) &&
         modalLines.some(l => l.includes('↳ monitor  Wait for CI on PR 8 · 4m')) && modalLines.some(l => l.includes('↳ shell · 1m')) &&
-        modalLines.some(l => l.includes('[✕ close]')) && modalLines.filter(l => l !== '').at(-1).includes('esc closes') && modalColored[first].startsWith(`\x1b[48;2;2;10;5m${dim}`),
+        modalLines.some(l => l.includes('[■ close workspace]') && l.includes('[✕ back]')) && modalLines.filter(l => l !== '').at(-1).includes('esc closes') && modalColored[first].startsWith(`\x1b[48;2;2;10;5m${dim}`),
         JSON.stringify(modalLines.filter(l => l.includes('║ ') && /BACKGROUND|↳|open window/.test(l)).map(l => l.trim().slice(0, 100))))
-      check('ops, compact: its details\' buttons open its window and close them; a click anywhere else closes them',
-        buttonsRow > 0 && JSON.stringify(modalTargets[buttonsRow].slice(0, 2)) === JSON.stringify([{ kind: 'workspace', id: 'opsx', cols: [openAt, openAt + 15] }, { kind: 'close', cols: [closeAt, closeAt + 8] }]) &&
+      check('ops, compact: its details\' buttons open its window, close the workspace and close them; a click anywhere else closes them',
+        buttonsRow > 0 && JSON.stringify(modalTargets[buttonsRow].slice(0, 3)) === JSON.stringify([{ kind: 'workspace', id: 'opsx', cols: [openAt, openAt + 15] }, { kind: 'shut', id: 'opsx', cols: [shutInAt, shutInAt + 18] }, { kind: 'close', cols: [closeAt, closeAt + 7] }]) &&
         JSON.stringify(modalTargets[buttonsRow].at(-1)) === JSON.stringify({ kind: 'close' }) && JSON.stringify(modalTargets[2]) === JSON.stringify({ kind: 'close' }) &&
         modalTargets.filter(t => Array.isArray(t)).every(t => t.some(x => x.kind === 'none')),
         JSON.stringify(modalTargets[buttonsRow]))
@@ -1603,6 +1643,20 @@ except ChildProcessError: pass
         opensAfter.length === 1 && opensAfter[0].startsWith(`OPEN tmux -L '${socket}' -f /dev/null attach -t '=ws-opsx'`) &&
         lastFrame(pressed, pressed.length).includes('|O|') && lastFrame(pressed, pressed.length).includes('[□ COMPACT] v') && keptView === 'detailed',
         `${lastFrame(pressed, pressed.indexOf('<<DETAILS>>')).includes('[📁 open window]')} ${lastFrame(pressed, pressed.indexOf('<<CLOSED>>')).includes('[📁 open window]')} ${JSON.stringify(opensAfter)} ${keptView}`)
+      // a tile's ■: a second press asks a Claude session to close the workspace
+      writeFileSync(join(prefsDir(compactHome), 'ops.json'), JSON.stringify({ view: 'compact' }))
+      const shutReq = join(compactHome, 'Library', 'Application Support', 'live-sessions', 'requests')
+      const shutClick = `os.write(fd, b"\\x1b[<0;${shutAt};${tileRow(first + 3)}M\\x1b[<0;${shutAt};${tileRow(first + 3)}m")`
+      const shutOut = bare(live([
+        shutClick, 'drain(1.0)', 'out += b"<<ONCE>>"',
+        'import glob', 'open(os.environ["REQ_ONCE"], "w").write(str(len(glob.glob(os.path.join(os.environ["REQ_DIR"], "*.json")))))',
+        shutClick, 'drain(1.0)',
+      ].join('\n'), { HOME: compactHome, LIVE_SESSIONS_SNAPSHOT: compactFile, LIVE_SESSIONS_OSASCRIPT: stubHere, NOW: '', REQ_DIR: shutReq, REQ_ONCE: join(scratch, 'req-once') }))
+      const shutAsked = existsSync(shutReq) ? readdirSync(shutReq).filter(f => f.endsWith('.json')).map(f => JSON.parse(readFileSync(join(shutReq, f), 'utf8'))) : []
+      check('ops, compact, live: a tile\'s ■ asks for a second press, then asks a Claude session to close the workspace',
+        readFileSync(join(scratch, 'req-once'), 'utf8') === '0' && shutOut.slice(0, shutOut.indexOf('<<ONCE>>')).includes('■ again closes Ops X') &&
+        shutAsked.length === 1 && shutAsked[0].action === 'close' && shutAsked[0].id === 'opsx' && shutOut.slice(shutOut.indexOf('<<ONCE>>')).includes('closing Ops X'),
+        `${readFileSync(join(scratch, 'req-once'), 'utf8')} ${JSON.stringify(shutAsked)}`)
       check('ops, live: an agent whose turn ends with background work still running is logged BG WORK, never IDLE',
         /BG WORK CLAUDE/.test(lastFrame(pressed, pressed.length)) && !/IDLE +CLAUDE/.test(lastFrame(pressed, pressed.length)),
         JSON.stringify(lastFrame(pressed, pressed.length).split('\n').filter(l => /WORK|IDLE/.test(l)).map(l => l.trim().slice(0, 60))))
@@ -1615,10 +1669,32 @@ except ChildProcessError: pass
     const openedByRow = existsSync(asked) ? readFileSync(asked, 'utf8').trim().split('\n').filter(Boolean).length : 0
     const outB = live(`os.write(fd, b"\\x1b[<0;4;${rowOf('[CODEX]')}M\\x1b[<0;4;${rowOf('[CODEX]')}m")`)
     const activeB = t('display-message', '-p', '-t', '=ws-opsx:peers', '#{pane_id}').stdout.trim()
-    const outC = live(`os.write(fd, b"\\x1b[<0;4;${rowOf('Stopped one')}M")`)
+    // a stopped workspace's button: asked of a Claude session (a request file, which one takes), its answer said here
+    const reqDir = join(scratch, 'Library', 'Application Support', 'live-sessions', 'requests')
+    const outC = bare(live([
+      `os.write(fd, b"\\x1b[<0;4;${rowOf('Stopped one')}M\\x1b[<0;4;${rowOf('Stopped one')}m")`, 'drain(1.0)', 'out += b"<<ASKED>>"',
+      'import glob, json',
+      'found = sorted(glob.glob(os.path.join(os.environ["REQ_DIR"], "*.json")))',
+      'open(os.environ["REQ_SEEN"], "w").write(json.dumps([json.load(open(f)) for f in found]))',
+      // (a session's answer, as takeRequests writes it)
+      'if found: open(found[0][:-5] + ".done", "w").write(json.dumps({"text": "Opened ws-stopped in a new Terminal window.", "isDone": True}))',
+      'drain(1.5)',
+    ].join('\n'), { REQ_DIR: reqDir, REQ_SEEN: join(scratch, 'req-seen.json') }))
     const opens = existsSync(asked) ? readFileSync(asked, 'utf8').trim().split('\n') : []
-    check('ops: only a workspace\'s OPEN button opens its window (60% of the screen, a little smaller than its font); its agent rows open nothing; a stopped workspace is left to /sessions',
-      openedByRow === 0 && activeB === right && outC.includes('Stopped one is not running: open it from /sessions') &&
+    const seenAsked = existsSync(join(scratch, 'req-seen.json')) ? JSON.parse(readFileSync(join(scratch, 'req-seen.json'), 'utf8')) : []
+    check('ops: a stopped workspace\'s button asks a Claude session to open it (as /sessions does), and says what it answers',
+      seenAsked.length === 1 && seenAsked[0].action === 'open' && seenAsked[0].id === 'stopped' && Math.abs(seenAsked[0].at - Date.now()) < 60_000 &&
+      outC.slice(0, outC.indexOf('<<ASKED>>')).includes('opening Stopped one: asked a Claude session') && outC.slice(outC.indexOf('<<ASKED>>')).includes('Opened ws-stopped in a new Terminal window.') &&
+      readdirSync(reqDir).every(f => !f.endsWith('.done')),
+      `${JSON.stringify(seenAsked)} ${readdirSync(reqDir).join(',')}`)
+    // one nobody takes (no session runs this plugin in a Terminal tab) is taken back after a while, and said
+    rmSync(reqDir, { recursive: true, force: true })
+    const outU = bare(live([`os.write(fd, b"\\x1b[<0;4;${rowOf('Stopped one')}M\\x1b[<0;4;${rowOf('Stopped one')}m")`, 'drain(14.0)'].join('\n')))
+    check('ops: what no Claude session takes is taken back after a while, and said',
+      outU.includes('no Claude session running this plugin in a Terminal tab took it') && readdirSync(reqDir).length === 0,
+      `${outU.includes('took it')} ${existsSync(reqDir) ? readdirSync(reqDir).join(',') : '-'}`)
+    check('ops: only a workspace\'s OPEN button opens its window (60% of the screen, a little smaller than its font); its agent rows open nothing',
+      openedByRow === 0 && activeB === right &&
       opens.length === 1 && opens[0] === `OPEN tmux -L '${socket}' -f /dev/null attach -t '=ws-opsx' {"x":512,"y":312,"width":1536,"height":846,"fontSize":10}`,
       `${openedByRow} ${activeB}/${right} ${JSON.stringify(opens)}`)
     void outA; void outB

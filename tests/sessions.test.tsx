@@ -106,6 +106,14 @@ import {
   openCommand,
   parseClients,
   parsePanes,
+  isOwnPane,
+  isLeftover,
+  LEFTOVER_FORMAT,
+  parentsFrom,
+  requestFrom,
+  answerFrom,
+  requestsDir,
+  REQUEST_MAX_AGE_MS,
   parseWorkspaceArgs,
   slugOf,
   words,
@@ -184,6 +192,11 @@ const world = {
   placeFails: false,
   /** What `tmux list-panes -a` and `tmux list-clients` print; empty: no tmux server. */
   tmuxPanes: '',
+  /** What `tmux list-panes -s -t =<session> -F LEFTOVER_FORMAT` prints, and `ps -ax -o ppid=` (a pid a line). */
+  leftover: '',
+  parents: '1\n',
+  /** The tmux sessions ended (`kill-session -t`). */
+  killed: [] as string[],
   tmuxClients: '',
   /** The owner option tmux reports for a running ws- session. */
   tmuxOwner: '',
@@ -263,6 +276,9 @@ const resetWorld = () => {
   world.parent = 'Ss -zsh'
   world.placeFails = false
   world.tmuxPanes = ''
+  world.leftover = ''
+  world.parents = '1\n'
+  world.killed = []
   world.tmuxClients = ''
   world.tmuxOwner = ''
   world.openFails = false
@@ -314,6 +330,7 @@ function machine(argv: readonly string[], env: unknown): Run {
     case '/usr/bin/pgrep':
       return ok(PGREP.split('\n').filter(pid => !world.exited.has(Number(pid))).join('\n'))
     case '/bin/ps': {
+      if (argv.includes('-ax') && argv.includes('ppid=')) return ok(world.parents)
       if (argv.includes('ppid=')) return ok(`${9000 + Number(argv[argv.length - 1])}\n`)
       if (argv.includes('stat=,comm=')) return ok(`${world.parent}\n`)
       // no -p, -a or -x: this person's processes that have a terminal (the fixture's own, and a test's, as they are)
@@ -408,9 +425,29 @@ function machine(argv: readonly string[], env: unknown): Run {
     }
     case '/bin/rm':
       world.removed.push(...argv.slice(2))
+      // (what the sessions take from the ops screen goes; the rest is only recorded)
+      for (const path of argv.slice(2)) if (path.startsWith(`${requestsDir(HOME)}/`)) world.files.delete(path)
       return ok('')
+    case '/bin/mv': {
+      // a rename: one only, the file gone from where it was
+      const [from = '', to = ''] = argv.slice(1)
+      const text = world.files.get(from)
+      if (text === undefined) return { exitCode: 1, stdout: '', stderr: `mv: rename ${from} to ${to}: No such file or directory\n` }
+      world.files.delete(from)
+      world.files.set(to, text)
+      return ok('')
+    }
     case 'tmux':
+      if (argv[1] === 'list-panes' && argv[2] === '-s') return ok(world.leftover)
       if (argv[1] === 'list-panes') return world.tmuxPanes === '' ? { exitCode: 1, stdout: '', stderr: 'no server running\n' } : ok(world.tmuxPanes)
+      if (argv[1] === 'kill-session') {
+        // ended: its panes gone, and the session a window made
+        world.killed.push(argv[3] ?? '')
+        const name = (argv[3] ?? '').slice(1)
+        world.tmuxPanes = world.tmuxPanes.split('\n').filter(line => !line.startsWith(`${name}\t`)).join('\n')
+        world.started.delete(name)
+        return ok('')
+      }
       if (argv[1] === 'list-clients') return ok(world.tmuxClients)
       if (argv[1] === 'list-windows') return ok('@1\n@2\n')
       if (argv[1] === 'select-window' || argv[1] === 'switch-client') return ok('')
@@ -553,6 +590,10 @@ function engine(
   const files = new Map<string, string>(Object.entries(REGISTRY))
   world.files = files
   on('fs.list', async ($, e) => {
+    // what the ops screen left for the sessions: as the engine's files have it
+    if (e.path === requestsDir(HOME)) {
+      return { value: [...files.keys()].filter(k => k.startsWith(`${e.path}/`) && !k.slice(e.path.length + 1).includes('/')).map(k => ({ name: k.slice(e.path.length + 1), kind: 'file' as const, size: 0, mtimeMs: 0, isLink: false })) }
+    }
     const entries = LISTINGS[e.path]?.map(entry => {
       const mtimeMs = world.mtimes.get(`${e.path}/${entry.name}`)
       return mtimeMs === undefined ? entry : { ...entry, mtimeMs }
@@ -1651,13 +1692,18 @@ describe('workspaces', () => {
     expect(runs.find(r => r[0] === 'tmux' && r[1] === 'list-windows')).toEqual(['tmux', 'list-windows', '-t', '=ws-practice-rbac', '-F', '#{window_id}'])
     expect(setUp.slice(0, 10)).toEqual(sessionSetup('ws-practice-rbac', ['@1', '@2'], true, 'Practice RBAC').map(a => ['tmux', ...a]))
     // the bar's left end names the workspace (a # doubled, as tmux reads it)
-    expect(sessionSetup('x', [], false, 'A #1').find(a => a[3] === 'status-left')?.[4]).toBe(' A ##1 ')
+    expect(sessionSetup('x', [], false, 'A #1').find(a => a[3] === 'status-left')?.[4]).toBe(` A ##1 ${KEEPS_LABEL}`)
+    // a long name cut, so Hide beside it always shows; none: Hide alone
+    expect(sessionSetup('x', [], true, 'N'.repeat(60)).find(a => a[3] === 'status-left')?.[4]).toBe(` ${'N'.repeat(39)}… ${HIDE_LABEL}`)
+    expect(sessionSetup('x', [], true).find(a => a[3] === 'status-left')?.[4]).toBe(HIDE_LABEL)
     expect(sessionSetup('ws-practice-rbac', ['@1', '@2'], true, 'Practice RBAC').map(a => `${a[0]} ${a[2]} ${a[3]}`)).toEqual([
       'set-option ws-practice-rbac mouse', 'set-option ws-practice-rbac status-position', 'set-option ws-practice-rbac status-left-length', 'set-option ws-practice-rbac status-left',
-      'set-option ws-practice-rbac status-right-length', 'set-option ws-practice-rbac status-right',
+      // (these two drop the session's own right end: `set-option -u -t <session> status-right[-length]`)
+      'set-option -t ws-practice-rbac', 'set-option -t ws-practice-rbac',
       'set-window-option @1 pane-border-status', 'set-window-option @1 pane-border-format',
       'set-window-option @2 pane-border-status', 'set-window-option @2 pane-border-format',
     ])
+    expect(sessionSetup('x', [], true).filter(a => a[1] === '-u')).toEqual([['set-option', '-u', '-t', 'x', 'status-right'], ['set-option', '-u', '-t', 'x', 'status-right-length']])
     // the bar at the top; one window: no window list (its `0:peers*` says nothing), two: theirs kept
     expect(sessionSetup('x', ['@1'], false, 'A').filter(a => ['status-position', 'window-status-format', 'window-status-current-format'].includes(a[3]!)).map(a => `${a[0]} ${a[2]} ${a[3]} '${a[4]}'`))
       .toEqual(["set-option x status-position 'top'", "set-window-option @1 window-status-format ''", "set-window-option @1 window-status-current-format ''"])
@@ -1717,6 +1763,177 @@ describe('workspaces', () => {
     world.openFails = true
     expect(await run('open practice-rbac')).toBe(`Not opened (execution error: Not authorized to send Apple events to Terminal. (-1743)). Run: /bin/sh '${openScriptPath(HOME, 'practice-rbac')}'`)
     expect(runs.filter(r => r[0] === '/usr/bin/osascript' && r[4] === OPEN_SCRIPT)).toHaveLength(1)
+  })
+
+  test('a session a restore brought back under a workspace\'s name is told apart from its own', () => {
+    const parents = parentsFrom('    1\n  300\n\n')
+    expect([...parents]).toEqual([1, 300])
+    // two login shells, started with no command, nothing under them, no mark: as tmux-resurrect restores one
+    expect(isLeftover('', '5661\t-zsh\t\n5707\tzsh\t\n', parents)).toBe(true)
+    // a mark, a pane started with a command, a program in front, a process under a shell, nothing listed: not
+    expect(isLeftover(String(NOW), '5661\tzsh\t\n', parents)).toBe(false)
+    expect(isLeftover('', '5661\tbash\t"/bin/sh -c \'claude\'"\n', parents)).toBe(false)
+    expect(isLeftover('', '5661\tnode\t\n', parents)).toBe(false)
+    expect(isLeftover('', '300\tzsh\t\n', parents)).toBe(false)
+    expect(isLeftover('', '', parents)).toBe(false)
+    expect(isLeftover('', 'x\tzsh\t\n', parents)).toBe(false)
+    // each pane says its session's mark ('' for none); a line that does not say it has none to tell
+    expect(parsePanes(`ws-a\tpeers\t/dev/ttys001\t%1\tclaude\t${NOW}\nws-a\tpeers\t/dev/ttys002\t%2\t\t\nold\tzsh\t/dev/ttys003\t%3\t`)).toEqual({
+      ttys001: { session: 'ws-a', window: 'claude', pane: '%1', owner: String(NOW) },
+      ttys002: { session: 'ws-a', window: 'peers', pane: '%2', owner: '' },
+      ttys003: { session: 'old', window: 'zsh', pane: '%3' },
+    })
+    const a = { id: 'a', createdAt: NOW }
+    expect([{ session: 'ws-a', owner: String(NOW) }, { session: 'ws-a' }, { session: 'ws-a', owner: '' }, { session: 'ws-a', owner: '12' }, { session: 'ws-b', owner: String(NOW) }].map(p => isOwnPane(a, p)))
+      .toEqual([true, true, false, false, false])
+  })
+
+  test('what the ops screen asks, read as it must be', () => {
+    expect(requestFrom({ action: 'open', id: 'practice-rbac', at: NOW })).toEqual({ action: 'open', id: 'practice-rbac', at: NOW })
+    expect(requestFrom({ action: 'close', id: 'practice-rbac', at: NOW, more: 1 })).toEqual({ action: 'close', id: 'practice-rbac', at: NOW })
+    for (const raw of [null, 'open', { action: 'rm', id: 'a', at: NOW }, { action: 'open', id: '../a', at: NOW }, { action: 'open', id: 'A', at: NOW }, { action: 'open', id: 'a' }, { action: 'open', id: 'a', at: Infinity }]) {
+      expect(requestFrom(raw)).toBeUndefined()
+    }
+    expect(answerFrom({ text: 'Closed.', isDone: true })).toEqual({ text: 'Closed.', isDone: true })
+    expect(answerFrom({ text: 'Closed.' })).toBeUndefined()
+    expect(parseWorkspaceArgs('close Practice RBAC', [], HOME)).toEqual({ action: 'close', ref: 'Practice RBAC' })
+    expect(parseWorkspaceArgs('close', [], HOME)).toEqual({ action: 'help', error: 'say which workspace to close' })
+  })
+
+  test('open ends what a restore brought back under its name (empty shells) and starts the workspace; anything running there is left', async ($, on) => {
+    const { files, runs } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [practice] }))
+    world.tmuxPanes = 'ws-practice-rbac\tpeers\t/dev/ttys090\t%9\t\t\nws-practice-rbac\tpeers\t/dev/ttys091\t%10\t\t\n'
+    world.leftover = '5661\t-zsh\t\n5707\tzsh\t\n'
+    await $.session.start(START)
+    // listed as not running: what runs under its name is not its own
+    await $.command.run(SESSIONS)
+    expect((await shownOn($, 'terminal', 110)).join('\n')).toMatch(/Practice RBAC[\s\S]*stopped/)
+    const run = async (args: string) => (await $.command.run({ ...SESSIONS, command: 'workspace', args })).text
+    // a shell with a process under it: left as it is
+    world.parents = '1\n5707\n'
+    expect(await run('open practice-rbac')).toMatch(/^Not opened: tmux session ws-practice-rbac was not started for this workspace/)
+    expect(world.killed).toEqual([])
+    // empty shells alone: ended, and the workspace started in their place
+    world.parents = '1\n300\n'
+    expect(await run('open practice-rbac')).toBe('Opened ws-practice-rbac in a new Terminal window.')
+    expect(world.killed).toEqual(['=ws-practice-rbac'])
+    expect(runs.find(r => r[0] === 'tmux' && r[1] === 'list-panes' && r[2] === '-s')).toEqual(['tmux', 'list-panes', '-s', '-t', '=ws-practice-rbac', '-F', LEFTOVER_FORMAT])
+    expect(runs.some(r => r[0] === '/bin/ps' && r[1] === '-ax' && r.includes('ppid='))).toBe(true)
+  })
+
+  test('close: each agent checked between turns, closed where it runs; its windows hidden, its session ended, its conversations kept for open', async ($, on) => {
+    const { files, runs } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    // WEB CONSOLE (Claude, ttys004) and the Codex terminal holding HELD (ttys000) run in its panes, under the default accounts
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, env: '' }] }))
+    world.tmuxPanes = `ws-practice-rbac\tpeers\t/dev/ttys004\t%1\tclaude\t${NOW}\nws-practice-rbac\tpeers\t/dev/ttys000\t%2\tcodex\t${NOW}\n`
+    world.tmuxOwner = String(NOW)
+    world.tmuxClients = 'ws-practice-rbac\t/dev/ttys001\n'
+    await $.session.start(START)
+    const run = async (args: string) => (await $.command.run({ ...SESSIONS, command: 'workspace', args })).text
+    // Claude mid-turn: nothing closed, nothing ended
+    expect(await run('close practice-rbac')).toBe('Not closed: Claude is working: close the workspace once its turn is done.')
+    // Codex mid-turn
+    files.set('/Users/u/.claude/sessions/101.json', JSON.stringify({ ...JSON.parse(files.get('/Users/u/.claude/sessions/101.json')!), status: 'idle', statusUpdatedAt: NOW - 60_000 }))
+    world.codexTask = '"type":"task_started"\n'
+    expect(await run('close practice-rbac')).toBe('Not closed: Codex is working: close the workspace once its turn is done.')
+    // background work going in Claude
+    world.codexTask = '"type":"task_complete"\n'
+    files.set('/Users/u/.claude/sessions/101.json', JSON.stringify({ ...JSON.parse(files.get('/Users/u/.claude/sessions/101.json')!), status: 'shell' }))
+    expect(await run('close practice-rbac')).toBe('Not closed: Claude has background work running: close the workspace once it has ended.')
+    expect(world.stopped).toEqual([])
+    expect(world.killed).toEqual([])
+    // both between turns: each closed where it runs, that very process; its window hidden; its session ended
+    files.set('/Users/u/.claude/sessions/101.json', JSON.stringify({ ...JSON.parse(files.get('/Users/u/.claude/sessions/101.json')!), status: 'idle' }))
+    expect(await run('close practice-rbac')).toBe('Closed Practice RBAC: Claude and Codex ended between turns; Open starts it again, going on with its conversations.')
+    expect(world.stopped).toEqual(['ttys004 claude 101', 'ttys000 codex|node 201'])
+    expect(runs.filter(r => r[0] === '/bin/sh' && r[1] === hidePath(HOME))).toEqual([['/bin/sh', hidePath(HOME), '/dev/ttys001']])
+    expect(world.killed).toEqual(['=ws-practice-rbac'])
+    // the conversations they ran, kept: opened again, each goes on with its own
+    const kept = JSON.parse(files.get(WORKSPACES)!).workspaces[0]
+    expect([kept.threads.claude.id, kept.threads.codex.id]).toEqual(['session-101', HELD])
+    expect(await run('close practice-rbac')).toBe('Practice RBAC is closed already; Open starts it again, going on with its conversations.')
+    world.tmuxClients = ''
+    expect(await run('open practice-rbac')).toBe('Opened ws-practice-rbac in a new Terminal window.')
+    expect(files.get(openScriptPath(HOME, 'practice-rbac'))).toContain('--resume session-101')
+    expect(files.get(openScriptPath(HOME, 'practice-rbac'))).toContain(`-- ${HELD}`)
+  })
+
+  test('close never ends what it could not open again: a conversation not kept for the workspace, an agent that will not exit', async ($, on) => {
+    const { files } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    // its panes run the default accounts' sessions, but it is the work environment's: neither is kept for it
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [practice] }))
+    world.tmuxPanes = `ws-practice-rbac\tpeers\t/dev/ttys004\t%1\tclaude\t${NOW}\nws-practice-rbac\tpeers\t/dev/ttys000\t%2\tcodex\t${NOW}\n`
+    world.tmuxOwner = String(NOW)
+    files.set('/Users/u/.claude/sessions/101.json', JSON.stringify({ ...JSON.parse(files.get('/Users/u/.claude/sessions/101.json')!), status: 'idle', statusUpdatedAt: NOW - 60_000 }))
+    await $.session.start(START)
+    const run = async (args: string) => (await $.command.run({ ...SESSIONS, command: 'workspace', args })).text
+    expect(await run('close practice-rbac')).toBe('Not closed: the conversation Claude runs is not kept for the workspace yet; try again in a moment.')
+    // kept, but Codex would not exit: Claude closed, the session left running for another close
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, env: '' }] }))
+    world.stop.ttys000 = 'stuck'
+    expect(await run('close practice-rbac')).toBe('Not closed: Codex did not exit in 20 s. Claude closed meanwhile, its conversation kept; close the workspace again once Codex can be.')
+    expect(world.killed).toEqual([])
+    // a session not started for it is left as it is
+    world.tmuxOwner = '12345'
+    world.tmuxPanes = 'ws-practice-rbac\tpeers\t/dev/ttys090\t%9\t\t12345\n'
+    expect(await run('close practice-rbac')).toBe('Not closed: tmux session ws-practice-rbac was not started for this workspace.')
+    expect(world.killed).toEqual([])
+  })
+
+  test('Close in the pane asks for a second press, then closes it', async ($, on) => {
+    const { files, toasts } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, env: '' }] }))
+    world.tmuxPanes = `ws-practice-rbac\tpeers\t/dev/ttys004\t%1\tclaude\t${NOW}\nws-practice-rbac\tpeers\t/dev/ttys000\t%2\tcodex\t${NOW}\n`
+    world.tmuxOwner = String(NOW)
+    files.set('/Users/u/.claude/sessions/101.json', JSON.stringify({ ...JSON.parse(files.get('/Users/u/.claude/sessions/101.json')!), status: 'idle', statusUpdatedAt: NOW - 60_000 }))
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    await reveal(ui, 'ws:practice-rbac')
+    expect((await ui.find({ key: 'wsclose practice-rbac' }))?.props.label).toBe('Close (Open goes on with it)')
+    await ui.press({ key: 'wsclose practice-rbac' })
+    expect((await ui.find({ key: 'wsclose practice-rbac' }))?.props.label).toBe('Press again to close it')
+    expect(world.killed).toEqual([])
+    await ui.press({ key: 'wsclose practice-rbac' })
+    expect(world.killed).toEqual(['=ws-practice-rbac'])
+    expect(toasts.at(-1)).toBe('Closed Practice RBAC: Claude and Codex ended between turns; Open starts it again, going on with its conversations.')
+    // stopped now: no Close offered
+    expect(await ui.find({ key: 'wsclose practice-rbac' })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('what the ops screen asks is done by one session in a Terminal tab, as /sessions does it, and answered', async ($, on) => {
+    const { files, clock } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [practice] }))
+    const dir = requestsDir(HOME)
+    files.set(`${dir}/abcdef0123.json`, JSON.stringify({ action: 'open', id: 'practice-rbac', at: NOW }))
+    files.set(`${dir}/close00000.json`, JSON.stringify({ action: 'close', id: 'practice-rbac', at: NOW }))
+    // given up on by the screen, a workspace that is gone, one that is not a request
+    files.set(`${dir}/stale00000.json`, JSON.stringify({ action: 'open', id: 'practice-rbac', at: NOW - REQUEST_MAX_AGE_MS - 1 }))
+    files.set(`${dir}/gone000000.json`, JSON.stringify({ action: 'open', id: 'gone', at: NOW }))
+    files.set(`${dir}/broken0000.json`, '{ nope')
+    await $.session.start(START)
+    await clock.advance(4_000)
+    const answer = (nonce: string) => JSON.parse(files.get(`${dir}/${nonce}.done`) ?? 'null')
+    expect(answer('abcdef0123')).toEqual({ text: 'Opened ws-practice-rbac in a new Terminal window.', isDone: true })
+    // (taken in turn: the window the first one opened made its session, with no agent running in it yet)
+    expect(answer('close00000')).toEqual({ text: 'Closed Practice RBAC (no agent was running in it); Open starts it again, going on with its conversations.', isDone: true })
+    expect(answer('stale00000')).toBeNull()
+    expect(answer('gone000000')).toEqual({ text: 'Not done: that workspace is gone.', isDone: false })
+    expect(answer('broken0000')).toEqual({ text: 'Not done: the request could not be read.', isDone: false })
+    // each taken once (renamed first), nothing of them left but the answers
+    expect([...files.keys()].filter(k => k.startsWith(`${dir}/`) && !k.endsWith('.done'))).toEqual([])
+  })
+
+  test('a session inside tmux (a workspace\'s agent) never takes what the ops screen asks', async ($, on) => {
+    const { files, clock, runs } = engine(on, machine, { termProgram: 'tmux' })
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [practice] }))
+    files.set(`${requestsDir(HOME)}/abcdef0123.json`, JSON.stringify({ action: 'open', id: 'practice-rbac', at: NOW }))
+    await $.session.start(START)
+    await clock.advance(8_000)
+    expect(files.has(`${requestsDir(HOME)}/abcdef0123.json`)).toBe(true)
+    expect(runs.some(r => r[0] === '/bin/mv')).toBe(false)
   })
 
   test('inside tmux it creates the session if need be and switches this terminal to it', async ($, on) => {
@@ -3360,8 +3577,11 @@ describe('hiding a workspace window', () => {
     // once the window made the session, it is prepared
     expect(files.get(hidePath(HOME))).toBe(HIDE_SCRIPT)
     expect(runs.find(r => r[0] === 'tmux' && r[1] === 'bind-key')).toEqual(['tmux', ...hideBinding(hidePath(HOME))!])
-    const right = runs.filter(r => r[0] === 'tmux' && r[1] === 'set-option' && r[4] === 'status-right').map(r => r[5])
-    expect(right).toEqual([HIDE_LABEL])
+    // after its name on the bar's left end; its right end left to tmux.conf (what runs from there, a session restore's
+    // save, goes on running), and one made before had its own right end dropped
+    const left = runs.filter(r => r[0] === 'tmux' && r[1] === 'set-option' && r[4] === 'status-left').map(r => r[5])
+    expect(left).toEqual([` Practice RBAC ${HIDE_LABEL}`])
+    expect(runs.filter(r => r[0] === 'tmux' && r[1] === 'set-option' && r.includes('status-right'))).toEqual([['tmux', 'set-option', '-u', '-t', 'ws-practice-rbac', 'status-right']])
     // the click on Hide runs hide.sh with the terminal; any other click on the bar is still tmux's own
     expect(hideBinding('/h/hide.sh')).toEqual(['bind-key', '-T', 'root', 'MouseDown1Status', 'if-shell', '-F', '#{==:#{mouse_status_range},ls-hide}', `run-shell -b "/bin/sh '/h/hide.sh' '#{client_tty}' >/dev/null 2>&1"`, 'switch-client -t ='])
     expect(hideBinding("/it's/hide.sh")).toBeUndefined()
@@ -3374,7 +3594,7 @@ describe('hiding a workspace window', () => {
     await $.session.start(START)
     await $.command.run({ ...SESSIONS, command: 'workspace', args: 'new ~/dev/web-app work Practice RBAC' })
     expect(runs.filter(r => r[0] === 'tmux' && r[1] === 'bind-key')).toEqual([])
-    expect(runs.filter(r => r[0] === 'tmux' && r[1] === 'set-option' && r[4] === 'status-right').map(r => r[5])).toEqual([KEEPS_LABEL])
+    expect(runs.filter(r => r[0] === 'tmux' && r[1] === 'set-option' && r[4] === 'status-left').map(r => r[5])).toEqual([` Practice RBAC ${KEEPS_LABEL}`])
     expect([mayBindHide('bind-key -T root MouseDown1Status switch-client -t ='), mayBindHide(`bind-key -T root MouseDown1Status if-shell -F "#{==:#{mouse_status_range},ls-hide}" x y`), mayBindHide('bind-key -T root MouseDown1Status select-pane -t =')]).toEqual([true, true, false])
   })
 
@@ -3383,7 +3603,7 @@ describe('hiding a workspace window', () => {
     files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [practice] }))
     await $.session.start(START)
     expect((await $.command.run({ ...SESSIONS, command: 'workspace', args: 'open practice-rbac' })).text).toBe('Opened ws-practice-rbac in a new Terminal window.')
-    expect(runs.filter(r => r[0] === 'tmux' && r[1] === 'set-option' && r[4] === 'status-right').map(r => r[5])).toEqual([HIDE_LABEL])
+    expect(runs.filter(r => r[0] === 'tmux' && r[1] === 'set-option' && r[4] === 'status-left').map(r => r[5])).toEqual([` Practice RBAC ${HIDE_LABEL}`])
   })
 
   test('Hide leaves a tmux session not started for the workspace as it is', async ($, on) => {
@@ -3533,7 +3753,7 @@ describe('a workspace of one agent', () => {
     const { files } = engine(on, machine, { termProgram: 'Apple_Terminal' })
     await $.session.start(START)
     // the command's hint and its usage say how
-    expect(world.commands.find(c => c.name === 'workspace')?.argumentHint).toBe('new <folder> <env> <name> [--only claude|codex] [--go-on] [--for <purpose>] | open <name> | rm <name>')
+    expect(world.commands.find(c => c.name === 'workspace')?.argumentHint).toBe('new <folder> <env> <name> [--only claude|codex] [--go-on] [--for <purpose>] | open <name> | close <name> | rm <name>')
     expect((await $.command.run({ ...SESSIONS, command: 'workspace', args: 'new' })).text).toContain('<name> [--only claude | codex] [--go-on: with the branch checked out in <folder>] [--for')
     const text = (await $.command.run({ ...SESSIONS, command: 'workspace', args: 'new ~/dev/web-app work Solo --only codex --for roles and permissions' })).text
     expect(text).toContain('Codex starts alone in tmux session ws-solo; it gets ready for the purpose, says where things stand and waits for you.')

@@ -26,13 +26,13 @@ export function words(args: string): string[] {
 export type WorkspaceCommand =
   | { action: 'list' }
   | { action: 'new'; dir: string; env: string; name: string; purpose: string; only?: 'claude' | 'codex'; goOn?: true }
-  | { action: 'open' | 'rm'; ref: string }
+  | { action: 'open' | 'close' | 'rm'; ref: string }
   | { action: 'help'; error?: string }
 
 /**
  * `/workspace` arguments: `new <folder> <env> <name> [--only claude|codex]
- * [--go-on] [--for <purpose>]`, `open <name>`, `rm <name>`, or nothing to
- * list. `<env>` is required and must be one of `envs` or `default`: a
+ * [--go-on] [--for <purpose>]`, `open <name>`, `close <name>`, `rm <name>`,
+ * or nothing to list. `<env>` is required and must be one of `envs` or `default`: a
  * misspelt one is an error, never another account. `~` in the folder is the
  * home directory. Before `--for`: `--only` names the one agent it runs;
  * `--go-on` has the agents go on with the branch checked out in the folder.
@@ -41,10 +41,10 @@ export type WorkspaceCommand =
 export function parseWorkspaceArgs(args: string, envs: readonly string[], home: string): WorkspaceCommand {
   const [verb = '', ...rest] = words(args)
   if (verb === '' || verb === 'list') return { action: 'list' }
-  if (verb === 'open' || verb === 'rm') {
+  if (verb === 'open' || verb === 'close' || verb === 'rm') {
     return rest.length > 0 ? { action: verb, ref: rest.join(' ') } : { action: 'help', error: `say which workspace to ${verb}` }
   }
-  if (verb !== 'new') return { action: 'help', error: `"${verb}" is not one of new, open, rm, list` }
+  if (verb !== 'new') return { action: 'help', error: `"${verb}" is not one of new, open, close, rm, list` }
   const [folder = '', envWord = '', ...afterEnv] = rest
   const at = afterEnv.indexOf('--for')
   const beforeFor = at >= 0 ? afterEnv.slice(0, at) : afterEnv
@@ -85,6 +85,30 @@ export const findWorkspace = (list: readonly Workspace[], ref: string) =>
 /** A string as one shell word. */
 const shellWord = (text: string) => `'${text.replace(/'/g, `'\\''`)}'`
 export const shellQuote = shellWord
+
+/**
+ * Where the ops screen leaves what it asks of a Claude session running this plugin in a Terminal tab (it opens and
+ * closes workspaces as /sessions does, with the same checks): `<nonce>.json`, a Request; taken by renaming it (one
+ * session alone can), answered in `<nonce>.done`, an Answer.
+ */
+export const requestsDir = (home: string) => `${home}/Library/Application Support/live-sessions/requests`
+export const REQUEST_FILE = /^([a-z0-9]{8,40})\.json$/
+export type Request = { action: 'open' | 'close'; id: string; at: number }
+export type Answer = { text: string; isDone: boolean }
+/** A request, if it is one: open or close a workspace by its id, asked at `at`. */
+export function requestFrom(raw: unknown): Request | undefined {
+  const o = raw as Partial<Record<keyof Request, unknown>> | null
+  if (typeof o !== 'object' || o === null || (o.action !== 'open' && o.action !== 'close')) return undefined
+  if (typeof o.id !== 'string' || !/^[a-z0-9-]{1,40}$/.test(o.id) || typeof o.at !== 'number' || !Number.isFinite(o.at)) return undefined
+  return { action: o.action, id: o.id, at: o.at }
+}
+/** An answer, if it is one. */
+export function answerFrom(raw: unknown): Answer | undefined {
+  const o = raw as Partial<Record<keyof Answer, unknown>> | null
+  return typeof o === 'object' && o !== null && typeof o.text === 'string' && typeof o.isDone === 'boolean' ? { text: o.text, isDone: o.isDone } : undefined
+}
+/** How long a request waits to be taken; older ones are dropped untaken. */
+export const REQUEST_MAX_AGE_MS = 30_000
 
 /** The file a terminal runs (`/bin/sh <file>`) to open a workspace: its command line, in POSIX sh whatever the login shell. */
 export const openScriptPath = (home: string, id: string) => `${home}/Library/Application Support/live-sessions/open/${id}.sh`
@@ -172,19 +196,25 @@ export const BORDER_FORMAT =
  * (arguments) for the session `name` (titled `title` on its bar) and each of its `windows` (targets): the
  * mouse on in that session alone, so a click picks the side the keys go to
  * and the wheel scrolls the side under it (or reaches its agent, when the
- * agent takes the mouse); its bar at the top, the workspace's name first, and
- * for one window no window list; and each side's border naming its agent.
- * tmux.conf and other sessions are left as they are.
+ * agent takes the mouse); its bar at the top, the workspace's name first, then
+ * Hide (or what closing the window does), and for one window no window list;
+ * and each side's border naming its agent. The bar's right end stays the
+ * person's own: what tmux.conf puts there runs there (tmux-continuum saves the
+ * sessions from it, so a session of theirs never stops it). tmux.conf and other
+ * sessions are left as they are.
  */
 export function sessionSetup(name: string, windows: readonly string[], canHide = false, title = ''): string[][] {
+  // the workspace's own name (tmux reads `#` in it as a format: doubled), cut so Hide always shows beside it
+  const shown = [...title].length > TITLE_MAX ? `${[...title].slice(0, TITLE_MAX - 1).join('')}…` : title
   return [
     ['set-option', '-t', name, 'mouse', 'on'],
     // the bar at the top, the workspace's name first
     ['set-option', '-t', name, 'status-position', 'top'],
-    // the bar's left end: the workspace's own name (tmux reads `#` in it as a format: doubled)
-    ...(title === '' ? [] : [['set-option', '-t', name, 'status-left-length', '50'], ['set-option', '-t', name, 'status-left', ` ${title.replace(/#/g, '##')} `]]),
-    ['set-option', '-t', name, 'status-right-length', '60'],
-    ['set-option', '-t', name, 'status-right', canHide ? HIDE_LABEL : KEEPS_LABEL],
+    ['set-option', '-t', name, 'status-left-length', '100'],
+    ['set-option', '-t', name, 'status-left', `${shown === '' ? '' : ` ${shown.replace(/#/g, '##')} `}${canHide ? HIDE_LABEL : KEEPS_LABEL}`],
+    // (a session made before had its own right end, which kept tmux.conf's from running: dropped)
+    ['set-option', '-u', '-t', name, 'status-right'],
+    ['set-option', '-u', '-t', name, 'status-right-length'],
     ...windows.flatMap(window => [
       ['set-window-option', '-t', window, 'pane-border-status', 'top'],
       ['set-window-option', '-t', window, 'pane-border-format', BORDER_FORMAT],
@@ -196,7 +226,9 @@ export function sessionSetup(name: string, windows: readonly string[], canHide =
   ]
 }
 
-/** The status bar's right end, which a click hides the window by (HIDE_RANGE), or, where it cannot, what closing it does. */
+/** The most characters of a workspace's name its bar shows. */
+const TITLE_MAX = 40
+/** On the status bar, after the name: Hide, which a click hides the window by (HIDE_RANGE), or, where it cannot, what closing it does. */
 export const HIDE_RANGE = 'ls-hide'
 export const HIDE_LABEL = `#[range=user|${HIDE_RANGE}]#[reverse] Hide window · agents keep running #[norange default] `
 export const KEEPS_LABEL = ' closing this window leaves the agents running '
@@ -428,23 +460,50 @@ export function openCommand(
 }
 
 /** `tmux list-panes -a -F PANES_FORMAT`: one line per pane. */
-export const PANES_FORMAT = `#{session_name}\t#{window_name}\t#{pane_tty}\t#{pane_id}\t#{${AGENT_OPTION}}`
+export const PANES_FORMAT = `#{session_name}\t#{window_name}\t#{pane_tty}\t#{pane_id}\t#{${AGENT_OPTION}}\t#{${OWNER_OPTION}}`
 /** `tmux list-clients -F CLIENTS_FORMAT`: one line per attached terminal. */
 export const CLIENTS_FORMAT = '#{session_name}\t#{client_tty}'
 
 /**
  * Which tmux pane each tty is: tty (`ttys012`) → its session, its agent (the
  * pane's mark, or else its window's name, as workspaces made before the
- * mark had a window per agent) and the pane's id (`%12`).
+ * mark had a window per agent), the pane's id (`%12`) and its session's
+ * owner mark (OWNER_OPTION: '' for none; unset when the line does not say).
  */
-export function parsePanes(stdout: string): Record<string, { session: string; window: string; pane: string }> {
-  const panes: Record<string, { session: string; window: string; pane: string }> = {}
+export function parsePanes(stdout: string): Record<string, { session: string; window: string; pane: string; owner?: string }> {
+  const panes: Record<string, { session: string; window: string; pane: string; owner?: string }> = {}
   for (const line of stdout.split('\n')) {
-    const [session, window, tty, pane = '', agent = ''] = line.split('\t')
-    if (session && window !== undefined && tty?.startsWith('/dev/')) panes[tty.slice(5)] = { session, window: agent || window, pane }
+    const [session, window, tty, pane = '', agent = '', ...rest] = line.split('\t')
+    if (session && window !== undefined && tty?.startsWith('/dev/')) panes[tty.slice(5)] = { session, window: agent || window, pane, ...(rest.length === 0 ? {} : { owner: rest[0]! }) }
   }
   return panes
 }
+
+/** Whether a pane is part of a workspace's own session: its session's name, and its owner mark when the pane says it. */
+export const isOwnPane = (ws: Pick<Workspace, 'id' | 'createdAt'>, p: { session: string; owner?: string }) =>
+  p.session === tmuxName(ws) && (p.owner === undefined || p.owner === String(ws.createdAt))
+
+/** `tmux list-panes -s -t =<session> -F LEFTOVER_FORMAT`: each pane's start command, what is in front of it, its process. */
+export const LEFTOVER_FORMAT = '#{pane_pid}\t#{pane_current_command}\t#{pane_start_command}'
+const SHELLS = new Set(['sh', 'bash', 'zsh', 'fish', 'dash', 'ksh', 'tcsh', 'csh'])
+
+/**
+ * Whether a tmux session under a workspace's name holds only empty shells, as
+ * a session restore (tmux-resurrect, after a restart) brings one back: no
+ * owner mark (`owner`), and every pane (`listed`, LEFTOVER_FORMAT) started
+ * with no command, a login shell in front, and no process under it
+ * (`parents`: the parent pid of each process there is). Nothing runs there,
+ * so it may be ended and the workspace started again.
+ */
+export function isLeftover(owner: string, listed: string, parents: ReadonlySet<number>): boolean {
+  if (owner !== '') return false
+  const panes = listed.split('\n').filter(line => line.trim() !== '').map(line => line.split('\t'))
+  return panes.length > 0 && panes.every(([pid = '', command = '', start]) =>
+    /^\d+$/.test(pid) && !parents.has(Number(pid)) && SHELLS.has(command.replace(/^-/, '')) && start === '')
+}
+
+/** `ps -ax -o ppid=`: the processes that have a process under them. */
+export const parentsFrom = (stdout: string) => new Set(stdout.split('\n').map(s => Number(s.trim())).filter(n => Number.isInteger(n) && n > 0))
 
 /** The terminals attached to each tmux session: session → ttys. */
 export function parseClients(stdout: string): Record<string, string[]> {

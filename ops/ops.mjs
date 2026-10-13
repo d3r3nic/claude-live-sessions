@@ -6,8 +6,9 @@
 //                                          workspace's details, q quit)
 //   node ops/ops.mjs --frame [--plain]     one frame, printed (COLS, ROWS, TICK; MODAL: a workspace's details open);
 //                                          --targets prints what each row opens
-import { accessSync, constants, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync, writeSync } from 'node:fs'
+import { accessSync, constants, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
 import * as nodeModule from 'node:module'
 import { fileURLToPath } from 'node:url'
 
@@ -242,6 +243,9 @@ const RAIN = 'ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄ012345
 /** The compact view's tiles: at least this many cells wide, and at most this many. */
 const TILE_MIN = 32
 const TILE_MAX = 44
+/** A tile's buttons, left to right: 📁 opens it (or starts it again), ■ closes it for now (while it runs), » its details. */
+const tileButtons = n =>
+  !n.isOpenable ? [] : [{ label: '[📁]', kind: 'workspace' }, ...(n.ws.isRunning ? [{ label: '[■]', kind: 'shut' }] : []), { label: '[»]', kind: 'details' }]
 /** An agent's background work listed under it: the oldest this many, then how many more. */
 const TASKS_SHOWN = 3
 
@@ -496,7 +500,8 @@ function frame(snap, now, cols, rows, tick, note = '', modal = undefined) {
    * A workspace as a tile `w` cells wide, five rows: its name in its border, coloured by what it does (red, blinking:
    * the relay needs the owner; amber: working; red: an agent waits on the owner; cyan: background work; dim: stopped)
    * and marked at its right (⚠ ● ◆ ◐ ■, or since when it is idle); a row for each agent, what it does and its context;
-   * the relay's mode and last hand-off, and its two buttons: 📁 opens its window, » its details.
+   * the relay's mode and last hand-off, and its buttons: 📁 opens its window (starts it again when it is not running,
+   * going on with its agents' conversations), ■ closes it for now (while it runs), » its details.
    */
   const tileOf = (n, w) => {
     const blink = tick % 6 < 3
@@ -527,7 +532,7 @@ function frame(snap, now, cols, rows, tick, note = '', modal = undefined) {
       return inside(`${rgb(color, icon)} ${rgb(n.isBright ? G.hi : G.mid, pad(tool, 6))} ${rgb(color, word)}`, contextShown(n, item) ?? '')
     }
     const relayRow = () => {
-      const buttons = n.isOpenable ? `${rgb(G.hi, '[📁]')} ${rgb(G.hi, '[»]')}` : ''
+      const buttons = tileButtons(n).map(b => rgb(G.hi, b.label)).join(' ')
       if (!n.ws.isRunning) return inside(rgb(G.dim, '■ stopped'), buttons)
       if (n.only !== undefined) return inside(rgb(G.lo, 'one agent'), buttons)
       const mode = clean(n.relay?.mode ?? 'off')
@@ -556,7 +561,15 @@ function frame(snap, now, cols, rows, tick, note = '', modal = undefined) {
         const presses = row.flatMap((n, j) => {
           if (!n.isOpenable) return []
           const left = 3 + j * (w + 1)
-          return [...(y === 3 ? [{ kind: 'workspace', id: n.ws.key, cols: [left + w - 10, left + w - 7] }] : []), { kind: 'details', id: n.ws.key, cols: [left, left + w - 1] }]
+          // its buttons end where its row's text does, two cells in from its right edge
+          const buttons = tileButtons(n)
+          let at = left + w - 2 - buttons.reduce((sum, b) => sum + width(b.label) + 1, -1)
+          const pressed = buttons.map(b => {
+            const cols = [at, at + width(b.label) - 1]
+            at += width(b.label) + 1
+            return { kind: b.kind, id: n.ws.key, cols }
+          })
+          return [...(y === 3 ? pressed.filter(b => b.kind !== 'details') : []), { kind: 'details', id: n.ws.key, cols: [left, left + w - 1] }]
         })
         line(` ${drawn.map(t => t[y]).join(' ')}`, presses.length === 0 ? undefined : presses)
       }
@@ -579,8 +592,10 @@ function frame(snap, now, cols, rows, tick, note = '', modal = undefined) {
     // what it does first: on a small window what is cut is its folder
     const content = [...nodeRows(n), '', rgb(G.lo, HOME !== '' && dir.startsWith(`${HOME}/`) ? `~${dir.slice(HOME.length)}` : dir)]
     const open = '[📁 open window]'
-    const close = '[✕ close]'
-    const buttons = `${rgb(G.hi, bold(open))}   ${rgb(G.hi, close)}`
+    // (closing the workspace, while it runs; the details themselves go back)
+    const shut = n.ws.isRunning ? '[■ close workspace]' : ''
+    const close = '[✕ back]'
+    const buttons = `${rgb(G.hi, bold(open))}   ${shut === '' ? '' : `${rgb(G.hi, shut)}   `}${rgb(G.hi, close)}`
     const bw = Math.min(inner - 2, Math.max(64, ...content.map(l => width(l) + 4)))
     // its rows: as many as the screen holds below the header (below the first row, on a small window), the rest cut
     const below = rows >= 24 ? 3 : 1
@@ -606,10 +621,18 @@ function frame(snap, now, cols, rows, tick, note = '', modal = undefined) {
       // (screen columns count from 1)
       const span = { kind: 'none', cols: [x + 1, x + bw] }
       const at = x + 3
+      const shutAt = at + width(open) + 3
+      const backAt = shut === '' ? shutAt : shutAt + width(shut) + 3
       targets[y] = !inBox
         ? { kind: 'close' }
         : y === top + box.length - 2
-          ? [{ kind: 'workspace', id: n.ws.key, cols: [at, at + width(open) - 1] }, { kind: 'close', cols: [at + width(open) + 3, at + width(open) + 2 + width(close)] }, span, { kind: 'close' }]
+          ? [
+              { kind: 'workspace', id: n.ws.key, cols: [at, at + width(open) - 1] },
+              ...(shut === '' ? [] : [{ kind: 'shut', id: n.ws.key, cols: [shutAt, shutAt + width(shut) - 1] }]),
+              { kind: 'close', cols: [backAt, backAt + width(close) - 1] },
+              span,
+              { kind: 'close' },
+            ]
           : [span, { kind: 'close' }]
     }
   }
@@ -669,10 +692,87 @@ const SOCKET = process.env.LIVE_SESSIONS_TMUX_SOCKET
 const OSASCRIPT = process.env.LIVE_SESSIONS_OSASCRIPT ?? '/usr/bin/osascript'
 const tmux = (...args) => run(['tmux', ...(SOCKET === undefined ? [] : ['-L', SOCKET, '-f', '/dev/null']), ...args])
 /**
+ * What this screen asks of a Claude session (w.requestsDir): open a workspace that is not running, or close one. A
+ * session running this plugin in a Terminal tab takes it and does it as /sessions does, with the same checks, and
+ * answers; what it answers is said here. One at a time; one nobody takes in UNTAKEN_MS is taken back.
+ */
+const REQUESTS = w.requestsDir(HOME)
+const UNTAKEN_MS = 12_000
+/** How long a taken request is waited on (closing waits for each agent to exit, 20 s at most). */
+const ANSWER_MAX_MS = 120_000
+let pending
+function ask(action, ws) {
+  const said = `${action === 'open' ? 'opening' : 'closing'} ${clean(ws.name)}`
+  if (pending !== undefined) return `still ${pending.said}: one at a time`
+  const nonce = randomBytes(8).toString('hex')
+  try {
+    mkdirSync(REQUESTS, { recursive: true })
+    writeFileSync(`${REQUESTS}/${nonce}.tmp`, JSON.stringify({ action, id: ws.id, at: Date.now() }))
+    renameSync(`${REQUESTS}/${nonce}.tmp`, `${REQUESTS}/${nonce}.json`)
+  } catch (error) {
+    return `${said}: could not ask (${String(error).split('\n')[0]})`
+  }
+  pending = { nonce, said, at: Date.now() }
+  return `${said}: asked a Claude session…`
+}
+/** The answer to what was asked, once there is one: said, for a while; undefined meanwhile. */
+function answered() {
+  if (pending === undefined) return undefined
+  const base = `${REQUESTS}/${pending.nonce}`
+  const { said } = pending
+  try {
+    const answer = w.answerFrom(JSON.parse(readFileSync(`${base}.done`, 'utf8')))
+    rmSync(`${base}.done`, { force: true })
+    pending = undefined
+    return answer?.text ?? `${said}: its answer could not be read`
+  } catch {}
+  const waited = Date.now() - pending.at
+  if (existsSync(`${base}.json`)) {
+    if (waited < UNTAKEN_MS) return undefined
+    try {
+      // taken back (a session taking it meanwhile has it: then it is waited on)
+      renameSync(`${base}.json`, `${base}.dropped`)
+      rmSync(`${base}.dropped`, { force: true })
+      pending = undefined
+      return `${said}: no Claude session running this plugin in a Terminal tab took it; open one, or use /sessions`
+    } catch {
+      return undefined
+    }
+  }
+  if (waited < ANSWER_MAX_MS) return undefined
+  pending = undefined
+  return `${said}: no answer after ${ANSWER_MAX_MS / 60_000} minutes; see /sessions`
+}
+/** What earlier screens left there (asked and never answered, answers never read) once it is 10 minutes old. */
+function clearRequests() {
+  try {
+    for (const name of readdirSync(REQUESTS)) {
+      if (!/^[a-z0-9]{8,40}\.(json|tmp|done|dropped|taken-[A-Za-z0-9-]+)$/.test(name)) continue
+      const file = `${REQUESTS}/${name}`
+      if (Date.now() - statSync(file).mtimeMs > 600_000) rmSync(file, { force: true })
+    }
+  } catch {}
+}
+/** A workspace's ■: closed at a second press within CONFIRM_MS. */
+const CONFIRM_MS = 6_000
+let armed
+function shut(id, snap) {
+  const ws = snap.workspaces.find(x => x.id === id)
+  if (ws === undefined) return 'that workspace is gone'
+  if (armed?.id === id && Date.now() - armed.at < CONFIRM_MS) {
+    armed = undefined
+    return ask('close', ws)
+  }
+  armed = { id, at: Date.now() }
+  return `■ again closes ${clean(ws.name)}: its agents end between turns; 📁 opens it again, going on with their conversations`
+}
+
+/**
  * Opens what a row is about: a session's own Terminal tab; or a running workspace's window (its tmux session, marked
  * as this workspace's), at its agent's pane when the row is one agent's: the terminal attached to it brought up, else
  * a new window attached to it, placed as /sessions opens one (60% of the screen it was on when last hidden, in this
- * screen's font). A workspace not running is opened from /sessions, which checks it first. Says what it did.
+ * screen's font). A workspace not running (or one only a session restore brought back) is asked of a Claude session,
+ * which opens it as /sessions does. Says what it did.
  */
 function open(target, snap) {
   if (target.kind === 'tty') {
@@ -683,8 +783,9 @@ function open(target, snap) {
   const ws = snap.workspaces.find(x => x.id === target.id)
   if (ws === undefined) return 'that workspace is gone'
   const name = `ws-${target.id}`
-  if (tmux('has-session', '-t', `=${name}`).status !== 0) return `${clean(ws.name)} is not running: open it from /sessions`
-  if (tmux('show-options', '-t', name, '-qv', w.OWNER_OPTION).stdout.trim() !== String(ws.createdAt)) return `tmux session ${name} was not started for ${clean(ws.name)}: see /sessions`
+  // not running, or what runs under its name is not its own (a session restore's empty shells, which /sessions ends)
+  if (tmux('has-session', '-t', `=${name}`).status !== 0) return ask('open', ws)
+  if (tmux('show-options', '-t', name, '-qv', w.OWNER_OPTION).stdout.trim() !== String(ws.createdAt)) return ask('open', ws)
   const pane = Object.values(snap.tmux.panes).find(p => p.session === name && p.window === target.agent)?.pane
   if (pane !== undefined && /^%\d+$/.test(pane)) {
     tmux('select-window', '-t', pane)
@@ -783,6 +884,7 @@ if (process.argv.includes('--frame')) {
     process.stdin.off('end', onGone)
     process.stdin.off('error', onGone)
   }
+  clearRequests()
   let tick = 0
   let note = stale
   let noteUntil = 0
@@ -857,7 +959,7 @@ if (process.argv.includes('--frame')) {
         continue
       }
       try {
-        note = target.kind === 'toggle' ? press(target.what) : open(target, loaded.snap)
+        note = target.kind === 'toggle' ? press(target.what) : target.kind === 'shut' ? shut(target.id, loaded.snap) : open(target, loaded.snap)
       } catch (error) {
         note = `could not open it (${String(error).split('\n')[0]})`
       }
@@ -913,7 +1015,16 @@ if (process.argv.includes('--frame')) {
     tick++
     // the names' switch, as another screen may have turned it: looked at about once a second
     if (tick % 7 === 0) hiding = readHiding(hiding)
-    if (Date.now() > noteUntil) note = stale
+    // what was asked of a Claude session: said while it is under way, and its answer for a while
+    if (pending !== undefined && tick % 3 === 0) {
+      const answer = answered()
+      if (answer !== undefined) {
+        note = answer
+        noteUntil = Date.now() + 10_000
+      }
+    }
+    if (pending !== undefined && Date.now() > noteUntil) note = `${pending.said}…`
+    else if (Date.now() > noteUntil) note = stale
     const cols = process.stdout.columns ?? 80
     const rows = process.stdout.rows ?? 24
     try {
