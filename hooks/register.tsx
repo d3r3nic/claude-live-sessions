@@ -744,7 +744,8 @@ async function prepareSession($: EngineInterface, home: string, name: string, ti
   const windows = (await tmux(['list-windows', '-t', `=${name}`, '-F', '#{window_id}'])).stdout.split('\n').filter(id => /^@\d+$/.test(id.trim())).map(id => id.trim())
   // what tmux.conf runs from the bar's right end, carried on this bar's own
   const right = await tmux(['show-options', '-gv', 'status-right'])
-  for (const args of sessionSetup(name, windows, canHide, title, right.exitCode === 0 ? statusJobs(right.stdout.replace(/\n$/, '')) : '')) await tmux(args)
+  // (not read: the right end left to tmux.conf, never one that drops what it runs)
+  for (const args of sessionSetup(name, windows, canHide, title, right.exitCode === 0 ? statusJobs(right.stdout.replace(/\n$/, '')) : undefined)) await tmux(args)
 }
 
 /**
@@ -762,7 +763,7 @@ async function endLeftover($: EngineInterface, name: string, owner: string): Pro
 
 /**
  * Each workspace's own tmux session running when a session starts, set up as this version sets one up: one an earlier
- * version made gets Hide beside its name and gives the bar's right end back to tmux.conf (where tmux-continuum saves
+ * version made gets HIDE WINDOW at its bar's right end, with what tmux.conf runs from there (where tmux-continuum saves
  * from), without waiting to be opened again. A session not started for its workspace is left as it is.
  */
 async function prepareRunning($: EngineInterface) {

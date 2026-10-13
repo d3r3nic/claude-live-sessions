@@ -1702,16 +1702,17 @@ describe('workspaces', () => {
     const setUp = runs.filter(r => r[0] === 'tmux' && (r[1] === 'set-option' || r[1] === 'set-window-option'))
     // each of its windows, by id: the agents' windows whatever window is current
     expect(runs.find(r => r[0] === 'tmux' && r[1] === 'list-windows')).toEqual(['tmux', 'list-windows', '-t', '=ws-practice-rbac', '-F', '#{window_id}'])
-    expect(setUp.slice(0, 10)).toEqual(sessionSetup('ws-practice-rbac', ['@1', '@2'], true, 'Practice RBAC').map(a => ['tmux', ...a]))
+    // (tmux.conf's right end read: here it runs nothing)
+    expect(setUp.slice(0, 10)).toEqual(sessionSetup('ws-practice-rbac', ['@1', '@2'], true, 'Practice RBAC', '').map(a => ['tmux', ...a]))
     // the bar's left end names the workspace (a # doubled, as tmux reads it), a long name cut; its right end HIDE WINDOW
     // (or what closing does), then what tmux.conf runs from there
     expect(sessionSetup('x', [], false, 'A #1').find(a => a[3] === 'status-left')?.[4]).toBe(' A ##1 ')
     expect(sessionSetup('x', [], true, 'N'.repeat(60)).find(a => a[3] === 'status-left')?.[4]).toBe(` ${'N'.repeat(39)}… `)
     expect(sessionSetup('x', [], true).find(a => a[3] === 'status-left')?.[4]).toBe('')
     expect(sessionSetup('x', [], true, 'A', '#(save.sh)').find(a => a[3] === 'status-right')?.[4]).toBe(`${HIDE_LABEL}#(save.sh)`)
-    expect(sessionSetup('x', [], false, 'A').find(a => a[3] === 'status-right')?.[4]).toBe(KEEPS_LABEL)
+    expect(sessionSetup('x', [], false, 'A', '').find(a => a[3] === 'status-right')?.[4]).toBe(KEEPS_LABEL)
     expect(HIDE_LABEL).toContain(' HIDE WINDOW ')
-    expect(sessionSetup('ws-practice-rbac', ['@1', '@2'], true, 'Practice RBAC').map(a => `${a[0]} ${a[2]} ${a[3]}`)).toEqual([
+    expect(sessionSetup('ws-practice-rbac', ['@1', '@2'], true, 'Practice RBAC', '').map(a => `${a[0]} ${a[2]} ${a[3]}`)).toEqual([
       'set-option ws-practice-rbac mouse', 'set-option ws-practice-rbac status-position', 'set-option ws-practice-rbac status-left-length', 'set-option ws-practice-rbac status-left',
       'set-option ws-practice-rbac status-right-length', 'set-option ws-practice-rbac status-right',
       'set-window-option @1 pane-border-status', 'set-window-option @1 pane-border-format',
@@ -1721,6 +1722,11 @@ describe('workspaces', () => {
     expect(statusJobs('#(/p/continuum_save.sh)#{?window_bigger,[#{window_offset_x}#,#{window_offset_y}] ,}"#{=21:pane_title}" %H:%M %d-%b-%y')).toBe('#(/p/continuum_save.sh)')
     expect(statusJobs('#(a (b) c) mid #(d)')).toBe('#(a (b) c)#(d)')
     expect([statusJobs('"#{=21:pane_title}" %H:%M'), statusJobs('##(not a command)'), statusJobs('#(never closed'), statusJobs('')]).toEqual(['', '', '', ''])
+    // as tmux reads it: `###(` is a `#` then a command; one inside a `#{…}` (a condition's branch, a literal) is not carried
+    expect(statusJobs('###(a)')).toBe('#(a)')
+    expect(statusJobs('#{?client_prefix,#(b),#(c)} #{l:#(d)} #(e)')).toBe('#(e)')
+    // tmux.conf's right end not read: left to tmux.conf (unset), never a right end that drops what it runs
+    expect(sessionSetup('x', [], true, 'A').filter(a => a.includes('status-right') || a.includes('status-right-length'))).toEqual([['set-option', '-u', '-t', 'x', 'status-right'], ['set-option', '-u', '-t', 'x', 'status-right-length']])
     // the bar at the top; one window: no window list (its `0:peers*` says nothing), two: theirs kept
     expect(sessionSetup('x', ['@1'], false, 'A').filter(a => ['status-position', 'window-status-format', 'window-status-current-format'].includes(a[3]!)).map(a => `${a[0]} ${a[2]} ${a[3]} '${a[4]}'`))
       .toEqual(["set-option x status-position 'top'", "set-window-option @1 window-status-format ''", "set-window-option @1 window-status-current-format ''"])

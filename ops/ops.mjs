@@ -519,7 +519,7 @@ function frame(snap, now, cols, rows, tick, note = '', modal = undefined) {
     const markCells = mark === '' ? 0 : width(mark) + 2
     const name = cut(clean(n.ws.name), Math.max(1, w - 7 - markCells))
     // its name in amber while an agent works, as its border
-    const top = `${rgb(edge, '╭─ ')}${rgb(n.isWorking ? G.amber : n.isBright ? G.hi : G.mid, bold(name))}${rgb(edge, ` ${'─'.repeat(Math.max(1, w - 6 - width(name) - markCells))}`)}${mark === '' ? '' : ` ${mark} `}${rgb(edge, '─╮')}`
+    const top = `${rgb(edge, '╭─ ')}${rgb(n.needs ? edge : n.isWorking ? G.amber : n.isBright ? G.hi : G.mid, bold(name))}${rgb(edge, ` ${'─'.repeat(Math.max(1, w - 6 - width(name) - markCells))}`)}${mark === '' ? '' : ` ${mark} `}${rgb(edge, '─╮')}`
     // a row inside the border: what it says at its left, and at its right
     const room = w - 4
     const inside = (left, right = '') => {

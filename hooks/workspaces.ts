@@ -199,11 +199,12 @@ export const BORDER_FORMAT =
  * agent takes the mouse); its bar at the top, the workspace's name at its
  * left end, `HIDE WINDOW` (or what closing it does) at its right end, then
  * `jobs`: what tmux.conf runs from the bar's right end (statusJobs; a session
- * restore's save, tmux-continuum's, runs so), and for one window no window
- * list; and each side's border naming its agent. tmux.conf and other sessions
- * are left as they are.
+ * restore's save, tmux-continuum's, runs so); with no `jobs` read, the right
+ * end left to tmux.conf until they are; for one window no window list; and
+ * each side's border naming its agent. tmux.conf and other sessions are left
+ * as they are.
  */
-export function sessionSetup(name: string, windows: readonly string[], canHide = false, title = '', jobs = ''): string[][] {
+export function sessionSetup(name: string, windows: readonly string[], canHide = false, title = '', jobs?: string): string[][] {
   // the workspace's own name (tmux reads `#` in it as a format: doubled), cut to the bar's left end
   const shown = [...title].length > TITLE_MAX ? `${[...title].slice(0, TITLE_MAX - 1).join('')}…` : title
   return [
@@ -212,8 +213,10 @@ export function sessionSetup(name: string, windows: readonly string[], canHide =
     ['set-option', '-t', name, 'status-position', 'top'],
     ['set-option', '-t', name, 'status-left-length', '50'],
     ['set-option', '-t', name, 'status-left', shown === '' ? '' : ` ${shown.replace(/#/g, '##')} `],
-    ['set-option', '-t', name, 'status-right-length', '60'],
-    ['set-option', '-t', name, 'status-right', `${canHide ? HIDE_LABEL : KEEPS_LABEL}${jobs}`],
+    // (tmux.conf's right end not read yet, as when a window first makes the session: tmux.conf's own until it is)
+    ...(jobs === undefined
+      ? [['set-option', '-u', '-t', name, 'status-right'], ['set-option', '-u', '-t', name, 'status-right-length']]
+      : [['set-option', '-t', name, 'status-right-length', '60'], ['set-option', '-t', name, 'status-right', `${canHide ? HIDE_LABEL : KEEPS_LABEL}${jobs}`]]),
     ...windows.flatMap(window => [
       ['set-window-option', '-t', window, 'pane-border-status', 'top'],
       ['set-window-option', '-t', window, 'pane-border-format', BORDER_FORMAT],
@@ -226,28 +229,43 @@ export function sessionSetup(name: string, windows: readonly string[], canHide =
 }
 
 /**
- * What tmux.conf runs from the bar's right end (`tmux show-options -gv status-right`): each `#(command)` in it, as
- * written, parentheses inside it kept, its order kept; the rest of it (the text it shows) left out. A workspace's
- * bar carries them after its own right end, so they go on running while only workspace windows are open
- * (tmux-continuum saves the sessions from one, which shows nothing).
+ * What tmux.conf runs from the bar's right end (`tmux show-options -gv status-right`): each `#(command)` in it as tmux
+ * runs it, written as it is, parentheses inside it kept, in its order; the rest of it (the text it shows) left out. A
+ * `#(` after an odd number of `#` is text (`##` is a `#`), and one inside a `#{…}` (a condition's branch, a literal)
+ * is left out, as tmux may not run it. A workspace's bar carries them after its own right end, so they go on running
+ * while only workspace windows are open (tmux-continuum saves the sessions from one, which shows nothing).
  */
 export function statusJobs(right: string): string {
   const jobs: string[] = []
-  for (let at = right.indexOf('#('); at >= 0; at = right.indexOf('#(', at + 1)) {
-    // `##(` is a `#` written out, no command
-    if (at > 0 && right[at - 1] === '#') continue
-    let depth = 0
-    let end = -1
-    for (let k = at + 1; k < right.length; k++) {
-      if (right[k] === '(') depth++
-      else if (right[k] === ')' && --depth === 0) {
-        end = k
-        break
-      }
+  let inFormat = 0
+  for (let k = 0; k < right.length; k++) {
+    if (right[k] !== '#') {
+      if (inFormat > 0 && right[k] === '}') inFormat--
+      continue
     }
-    if (end < 0) break
-    jobs.push(right.slice(at, end + 1))
-    at = end
+    let hashes = 0
+    while (right[k + hashes] === '#') hashes++
+    const next = right[k + hashes]
+    k += hashes - 1
+    // `##` pairs are a `#` written out: what follows counts only after an odd run
+    if (hashes % 2 === 0) continue
+    if (next === '{') {
+      inFormat++
+      k++
+    } else if (next === '(' && inFormat === 0) {
+      let depth = 0
+      let end = -1
+      for (let j = k + 1; j < right.length; j++) {
+        if (right[j] === '(') depth++
+        else if (right[j] === ')' && --depth === 0) {
+          end = j
+          break
+        }
+      }
+      if (end < 0) break
+      jobs.push(right.slice(k, end + 1))
+      k = end
+    }
   }
   return jobs.join('')
 }
