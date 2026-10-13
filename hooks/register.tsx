@@ -45,6 +45,7 @@ import {
   rankProjects,
   shellQuote,
   sessionSetup,
+  statusJobs,
   setupPrompt,
   joinPrompt,
   soloPrompt,
@@ -741,7 +742,9 @@ async function prepareSession($: EngineInterface, home: string, name: string, ti
   const listed = await tmux(['list-keys', '-T', 'root', 'MouseDown1Status'])
   const canHide = binding !== undefined && listed.exitCode === 0 && mayBindHide(listed.stdout) && (await tmux(binding)).exitCode === 0
   const windows = (await tmux(['list-windows', '-t', `=${name}`, '-F', '#{window_id}'])).stdout.split('\n').filter(id => /^@\d+$/.test(id.trim())).map(id => id.trim())
-  for (const args of sessionSetup(name, windows, canHide, title)) await tmux(args)
+  // what tmux.conf runs from the bar's right end, carried on this bar's own
+  const right = await tmux(['show-options', '-gv', 'status-right'])
+  for (const args of sessionSetup(name, windows, canHide, title, right.exitCode === 0 ? statusJobs(right.stdout.replace(/\n$/, '')) : '')) await tmux(args)
 }
 
 /**

@@ -88,6 +88,7 @@ import {
   HIDE_LABEL,
   HIDE_SCRIPT,
   KEEPS_LABEL,
+  statusJobs,
   mayBindHide,
   setupPrompt,
   joinPrompt,
@@ -194,6 +195,8 @@ const world = {
   placeFails: false,
   /** What `tmux list-panes -a` and `tmux list-clients` print; empty: no tmux server. */
   tmuxPanes: '',
+  /** What tmux.conf puts at the bar's right end (`tmux show-options -gv status-right`). */
+  globalRight: '',
   /** What `tmux list-panes -s -t =<session> -F PANE_STATE_FORMAT` prints, and `ps -ax -o ppid=` (a pid a line). */
   leftover: '',
   parents: '1\n',
@@ -278,6 +281,7 @@ const resetWorld = () => {
   world.parent = 'Ss -zsh'
   world.placeFails = false
   world.tmuxPanes = ''
+  world.globalRight = ''
   world.leftover = ''
   world.parents = '1\n'
   world.killed = []
@@ -459,6 +463,7 @@ function machine(argv: readonly string[], env: unknown): Run {
       }
       if (argv[1] === 'list-keys') return ok(`${world.statusClick}\n`)
       if (argv[1] === 'bind-key' || argv[1] === 'set-option' || argv[1] === 'set-window-option') return ok('')
+      if (argv[1] === 'show-options' && argv[2] === '-gv') return ok(`${world.globalRight}\n`)
       if (argv[1] === 'show-options') return ok(`${world.started.get(argv[3] ?? '') ?? world.tmuxOwner}\n`)
       return { exitCode: 1, stdout: '', stderr: `unexpected tmux ${argv.join(' ')}` }
     case '/usr/sbin/lsof':
@@ -1698,19 +1703,24 @@ describe('workspaces', () => {
     // each of its windows, by id: the agents' windows whatever window is current
     expect(runs.find(r => r[0] === 'tmux' && r[1] === 'list-windows')).toEqual(['tmux', 'list-windows', '-t', '=ws-practice-rbac', '-F', '#{window_id}'])
     expect(setUp.slice(0, 10)).toEqual(sessionSetup('ws-practice-rbac', ['@1', '@2'], true, 'Practice RBAC').map(a => ['tmux', ...a]))
-    // the bar's left end names the workspace (a # doubled, as tmux reads it)
-    expect(sessionSetup('x', [], false, 'A #1').find(a => a[3] === 'status-left')?.[4]).toBe(` A ##1 ${KEEPS_LABEL}`)
-    // a long name cut, so Hide beside it always shows; none: Hide alone
-    expect(sessionSetup('x', [], true, 'N'.repeat(60)).find(a => a[3] === 'status-left')?.[4]).toBe(` ${'N'.repeat(39)}… ${HIDE_LABEL}`)
-    expect(sessionSetup('x', [], true).find(a => a[3] === 'status-left')?.[4]).toBe(HIDE_LABEL)
+    // the bar's left end names the workspace (a # doubled, as tmux reads it), a long name cut; its right end HIDE WINDOW
+    // (or what closing does), then what tmux.conf runs from there
+    expect(sessionSetup('x', [], false, 'A #1').find(a => a[3] === 'status-left')?.[4]).toBe(' A ##1 ')
+    expect(sessionSetup('x', [], true, 'N'.repeat(60)).find(a => a[3] === 'status-left')?.[4]).toBe(` ${'N'.repeat(39)}… `)
+    expect(sessionSetup('x', [], true).find(a => a[3] === 'status-left')?.[4]).toBe('')
+    expect(sessionSetup('x', [], true, 'A', '#(save.sh)').find(a => a[3] === 'status-right')?.[4]).toBe(`${HIDE_LABEL}#(save.sh)`)
+    expect(sessionSetup('x', [], false, 'A').find(a => a[3] === 'status-right')?.[4]).toBe(KEEPS_LABEL)
+    expect(HIDE_LABEL).toContain(' HIDE WINDOW ')
     expect(sessionSetup('ws-practice-rbac', ['@1', '@2'], true, 'Practice RBAC').map(a => `${a[0]} ${a[2]} ${a[3]}`)).toEqual([
       'set-option ws-practice-rbac mouse', 'set-option ws-practice-rbac status-position', 'set-option ws-practice-rbac status-left-length', 'set-option ws-practice-rbac status-left',
-      // (these two drop the session's own right end: `set-option -u -t <session> status-right[-length]`)
-      'set-option -t ws-practice-rbac', 'set-option -t ws-practice-rbac',
+      'set-option ws-practice-rbac status-right-length', 'set-option ws-practice-rbac status-right',
       'set-window-option @1 pane-border-status', 'set-window-option @1 pane-border-format',
       'set-window-option @2 pane-border-status', 'set-window-option @2 pane-border-format',
     ])
-    expect(sessionSetup('x', [], true).filter(a => a[1] === '-u')).toEqual([['set-option', '-u', '-t', 'x', 'status-right'], ['set-option', '-u', '-t', 'x', 'status-right-length']])
+    // what tmux.conf runs from the bar's right end: each #(command), parentheses inside kept, the text it shows left out
+    expect(statusJobs('#(/p/continuum_save.sh)#{?window_bigger,[#{window_offset_x}#,#{window_offset_y}] ,}"#{=21:pane_title}" %H:%M %d-%b-%y')).toBe('#(/p/continuum_save.sh)')
+    expect(statusJobs('#(a (b) c) mid #(d)')).toBe('#(a (b) c)#(d)')
+    expect([statusJobs('"#{=21:pane_title}" %H:%M'), statusJobs('##(not a command)'), statusJobs('#(never closed'), statusJobs('')]).toEqual(['', '', '', ''])
     // the bar at the top; one window: no window list (its `0:peers*` says nothing), two: theirs kept
     expect(sessionSetup('x', ['@1'], false, 'A').filter(a => ['status-position', 'window-status-format', 'window-status-current-format'].includes(a[3]!)).map(a => `${a[0]} ${a[2]} ${a[3]} '${a[4]}'`))
       .toEqual(["set-option x status-position 'top'", "set-window-option @1 window-status-format ''", "set-window-option @1 window-status-current-format ''"])
@@ -3618,16 +3628,17 @@ describe('the drift check', () => {
 describe('hiding a workspace window', () => {
   test('its status bar hides it: hide.sh written, the click bound over tmux\'s own, the bar says so', async ($, on) => {
     const { files, runs } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    world.globalRight = '#(/p/continuum_save.sh)#{?window_bigger,[#{window_offset_x}#,#{window_offset_y}] ,}"#{=21:pane_title}" %H:%M %d-%b-%y'
     await $.session.start(START)
     expect((await $.command.run({ ...SESSIONS, command: 'workspace', args: 'new ~/dev/web-app work Practice RBAC' })).text).toMatch(/^Created Practice RBAC/)
     // once the window made the session, it is prepared
     expect(files.get(hidePath(HOME))).toBe(HIDE_SCRIPT)
     expect(runs.find(r => r[0] === 'tmux' && r[1] === 'bind-key')).toEqual(['tmux', ...hideBinding(hidePath(HOME))!])
-    // after its name on the bar's left end; its right end left to tmux.conf (what runs from there, a session restore's
-    // save, goes on running), and one made before had its own right end dropped
-    const left = runs.filter(r => r[0] === 'tmux' && r[1] === 'set-option' && r[4] === 'status-left').map(r => r[5])
-    expect(left).toEqual([` Practice RBAC ${HIDE_LABEL}`])
-    expect(runs.filter(r => r[0] === 'tmux' && r[1] === 'set-option' && r.includes('status-right'))).toEqual([['tmux', 'set-option', '-u', '-t', 'ws-practice-rbac', 'status-right']])
+    // its name at the bar's left end; HIDE WINDOW at its right, then what tmux.conf runs from there (a session restore's
+    // save goes on running)
+    expect(runs.filter(r => r[0] === 'tmux' && r[1] === 'set-option' && r[4] === 'status-left').map(r => r[5])).toEqual([' Practice RBAC '])
+    expect(runs.filter(r => r[0] === 'tmux' && r[1] === 'set-option' && r[4] === 'status-right').map(r => r[5])).toEqual([`${HIDE_LABEL}#(/p/continuum_save.sh)`])
+    expect(runs.some(r => r[0] === 'tmux' && r[1] === 'show-options' && r[2] === '-gv' && r[3] === 'status-right')).toBe(true)
     // the click on Hide runs hide.sh with the terminal; any other click on the bar is still tmux's own
     expect(hideBinding('/h/hide.sh')).toEqual(['bind-key', '-T', 'root', 'MouseDown1Status', 'if-shell', '-F', '#{==:#{mouse_status_range},ls-hide}', `run-shell -b "/bin/sh '/h/hide.sh' '#{client_tty}' >/dev/null 2>&1"`, 'switch-client -t ='])
     expect(hideBinding("/it's/hide.sh")).toBeUndefined()
@@ -3640,7 +3651,7 @@ describe('hiding a workspace window', () => {
     await $.session.start(START)
     await $.command.run({ ...SESSIONS, command: 'workspace', args: 'new ~/dev/web-app work Practice RBAC' })
     expect(runs.filter(r => r[0] === 'tmux' && r[1] === 'bind-key')).toEqual([])
-    expect(runs.filter(r => r[0] === 'tmux' && r[1] === 'set-option' && r[4] === 'status-left').map(r => r[5])).toEqual([` Practice RBAC ${KEEPS_LABEL}`])
+    expect(runs.filter(r => r[0] === 'tmux' && r[1] === 'set-option' && r[4] === 'status-right').map(r => r[5])).toEqual([KEEPS_LABEL])
     expect([mayBindHide('bind-key -T root MouseDown1Status switch-client -t ='), mayBindHide(`bind-key -T root MouseDown1Status if-shell -F "#{==:#{mouse_status_range},ls-hide}" x y`), mayBindHide('bind-key -T root MouseDown1Status select-pane -t =')]).toEqual([true, true, false])
   })
 
@@ -3649,7 +3660,7 @@ describe('hiding a workspace window', () => {
     files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [practice] }))
     await $.session.start(START)
     expect((await $.command.run({ ...SESSIONS, command: 'workspace', args: 'open practice-rbac' })).text).toBe('Opened ws-practice-rbac in a new Terminal window.')
-    expect(runs.filter(r => r[0] === 'tmux' && r[1] === 'set-option' && r[4] === 'status-left').map(r => r[5])).toEqual([` Practice RBAC ${HIDE_LABEL}`])
+    expect(runs.filter(r => r[0] === 'tmux' && r[1] === 'set-option' && r[4] === 'status-right').map(r => r[5])).toEqual([HIDE_LABEL])
   })
 
   test('a workspace session an earlier version made is set up as this one sets one up when a session starts; one not its own is left', async ($, on) => {
@@ -3662,8 +3673,7 @@ describe('hiding a workspace window', () => {
     // (done in the background once the session's first look is in: practice-rbac first, then ws-other asked about)
     for (let i = 0; i < 20 && !runs.some(r => r[0] === 'tmux' && r[1] === 'show-options' && r[3] === 'ws-other'); i++) await $.command.run(SESSIONS)
     const set = runs.filter(r => r[0] === 'tmux' && r[1] === 'set-option')
-    expect(set.filter(r => r[4] === 'status-left').map(r => [r[3], r[5]])).toEqual([['ws-practice-rbac', ` Practice RBAC ${HIDE_LABEL}`]])
-    expect(set.filter(r => r[1] === 'set-option' && r[2] === '-u').map(r => r.slice(3))).toEqual([['-t', 'ws-practice-rbac', 'status-right'], ['-t', 'ws-practice-rbac', 'status-right-length']])
+    expect(set.filter(r => r[4] === 'status-right').map(r => [r[3], r[5]])).toEqual([['ws-practice-rbac', HIDE_LABEL]])
   })
 
   test('Hide leaves a tmux session not started for the workspace as it is', async ($, on) => {

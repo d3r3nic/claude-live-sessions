@@ -196,25 +196,24 @@ export const BORDER_FORMAT =
  * (arguments) for the session `name` (titled `title` on its bar) and each of its `windows` (targets): the
  * mouse on in that session alone, so a click picks the side the keys go to
  * and the wheel scrolls the side under it (or reaches its agent, when the
- * agent takes the mouse); its bar at the top, the workspace's name first, then
- * Hide (or what closing the window does), and for one window no window list;
- * and each side's border naming its agent. The bar's right end stays the
- * person's own: what tmux.conf puts there runs there (tmux-continuum saves the
- * sessions from it, so a session of theirs never stops it). tmux.conf and other
- * sessions are left as they are.
+ * agent takes the mouse); its bar at the top, the workspace's name at its
+ * left end, `HIDE WINDOW` (or what closing it does) at its right end, then
+ * `jobs`: what tmux.conf runs from the bar's right end (statusJobs; a session
+ * restore's save, tmux-continuum's, runs so), and for one window no window
+ * list; and each side's border naming its agent. tmux.conf and other sessions
+ * are left as they are.
  */
-export function sessionSetup(name: string, windows: readonly string[], canHide = false, title = ''): string[][] {
-  // the workspace's own name (tmux reads `#` in it as a format: doubled), cut so Hide always shows beside it
+export function sessionSetup(name: string, windows: readonly string[], canHide = false, title = '', jobs = ''): string[][] {
+  // the workspace's own name (tmux reads `#` in it as a format: doubled), cut to the bar's left end
   const shown = [...title].length > TITLE_MAX ? `${[...title].slice(0, TITLE_MAX - 1).join('')}…` : title
   return [
     ['set-option', '-t', name, 'mouse', 'on'],
     // the bar at the top, the workspace's name first
     ['set-option', '-t', name, 'status-position', 'top'],
-    ['set-option', '-t', name, 'status-left-length', '100'],
-    ['set-option', '-t', name, 'status-left', `${shown === '' ? '' : ` ${shown.replace(/#/g, '##')} `}${canHide ? HIDE_LABEL : KEEPS_LABEL}`],
-    // (a session made before had its own right end, which kept tmux.conf's from running: dropped)
-    ['set-option', '-u', '-t', name, 'status-right'],
-    ['set-option', '-u', '-t', name, 'status-right-length'],
+    ['set-option', '-t', name, 'status-left-length', '50'],
+    ['set-option', '-t', name, 'status-left', shown === '' ? '' : ` ${shown.replace(/#/g, '##')} `],
+    ['set-option', '-t', name, 'status-right-length', '60'],
+    ['set-option', '-t', name, 'status-right', `${canHide ? HIDE_LABEL : KEEPS_LABEL}${jobs}`],
     ...windows.flatMap(window => [
       ['set-window-option', '-t', window, 'pane-border-status', 'top'],
       ['set-window-option', '-t', window, 'pane-border-format', BORDER_FORMAT],
@@ -226,12 +225,39 @@ export function sessionSetup(name: string, windows: readonly string[], canHide =
   ]
 }
 
+/**
+ * What tmux.conf runs from the bar's right end (`tmux show-options -gv status-right`): each `#(command)` in it, as
+ * written, parentheses inside it kept, its order kept; the rest of it (the text it shows) left out. A workspace's
+ * bar carries them after its own right end, so they go on running while only workspace windows are open
+ * (tmux-continuum saves the sessions from one, which shows nothing).
+ */
+export function statusJobs(right: string): string {
+  const jobs: string[] = []
+  for (let at = right.indexOf('#('); at >= 0; at = right.indexOf('#(', at + 1)) {
+    // `##(` is a `#` written out, no command
+    if (at > 0 && right[at - 1] === '#') continue
+    let depth = 0
+    let end = -1
+    for (let k = at + 1; k < right.length; k++) {
+      if (right[k] === '(') depth++
+      else if (right[k] === ')' && --depth === 0) {
+        end = k
+        break
+      }
+    }
+    if (end < 0) break
+    jobs.push(right.slice(at, end + 1))
+    at = end
+  }
+  return jobs.join('')
+}
+
 /** The most characters of a workspace's name its bar shows. */
 const TITLE_MAX = 40
-/** On the status bar, after the name: Hide, which a click hides the window by (HIDE_RANGE), or, where it cannot, what closing it does. */
+/** At the status bar's right end: HIDE WINDOW, which a click hides the window by (HIDE_RANGE), or, where it cannot, what closing it does. */
 export const HIDE_RANGE = 'ls-hide'
-export const HIDE_LABEL = `#[range=user|${HIDE_RANGE}]#[reverse] Hide window · agents keep running #[norange default] `
-export const KEEPS_LABEL = ' closing this window leaves the agents running '
+export const HIDE_LABEL = `#[range=user|${HIDE_RANGE}]#[reverse] HIDE WINDOW #[norange default] `
+export const KEEPS_LABEL = ' closing this window keeps the agents running '
 
 /** The script a Hide runs, kept beside the workspaces: `/bin/sh <it> <the terminal's tty>`. */
 export const hidePath = (home: string) => `${home}/Library/Application Support/live-sessions/hide.sh`

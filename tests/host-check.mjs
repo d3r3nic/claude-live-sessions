@@ -323,12 +323,10 @@ if (process.argv.includes('--slow')) {
   writeFileSync(standIn, `#!/bin/sh\necho "$1" > "${scratch}/hidden"\ntmux detach-client -t "$1"\necho closed\n`)
   check('hide: the click is tmux\'s own before the mod binds it', w.mayBindHide(t6('list-keys', '-T', 'root', 'MouseDown1Status')))
   t6(...w.hideBinding(standIn))
-  // as a session made before had it: its own right end, which kept tmux.conf's from running (dropped now)
-  t6('set-option', '-t', 'ws-check', 'status-right', 'old')
-  for (const args of w.sessionSetup('ws-check', [], true, 'Check')) t6(...args)
-  // what tmux.conf runs from the bar's right end (tmux-continuum saves the sessions so): it runs while a terminal shows
-  // the workspace, as it does for the person's other sessions
-  t6('set-option', '-g', 'status-right', `#(touch '${scratch}/saved')`)
+  // what tmux.conf runs from the bar's right end (tmux-continuum saves the sessions so), carried on the workspace's own
+  // right end after HIDE WINDOW: it runs while a terminal shows the workspace, as it does for the person's other sessions
+  t6('set-option', '-g', 'status-right', `#(touch '${scratch}/saved') "#{=21:pane_title}" %H:%M`)
+  for (const args of w.sessionSetup('ws-check', [], true, 'Check', w.statusJobs(t6('show-options', '-gv', 'status-right')))) t6(...args)
   const hid = spawnSync('python3', ['-c', `
 import os, pty, select, subprocess, time, struct, fcntl, termios, sys
 S = sys.argv[1]
@@ -347,7 +345,7 @@ def pump(s):
             except OSError: return
 pump(1.5)
 before = t('list-clients', '-t', '=ws-check', '-F', '#{client_tty}')
-os.write(fd, b'\\x1b[<0;14;1M\\x1b[<0;14;1m'); pump(1.5)
+os.write(fd, b'\\x1b[<0;94;1M\\x1b[<0;94;1m'); pump(1.5)
 after = t('list-clients', '-t', '=ws-check', '-F', '#{client_tty}')
 print(before or '-', after or '-')
 os.close(fd)
@@ -358,8 +356,8 @@ except ChildProcessError: pass
   check('hide: a click on the bar\'s Hide detaches that terminal; the session keeps running', hid[0].startsWith('/dev/') && hid[1] === '-' && hiddenTty === hid[0] &&
     spawnSync('tmux', ['-L', socket, '-f', '/dev/null', 'has-session', '-t', '=ws-check']).status === 0, `${hid.join(' → ')} (${hiddenTty})`)
   check('hide: other clicks on the bar stay tmux\'s own', t6('list-keys', '-T', 'root', 'MouseDown1Status').includes(w.STATUS_CLICK))
-  check('hide: the bar\'s right end is tmux.conf\'s, and what runs from it ran while a terminal showed the workspace (a session restore\'s save goes on)',
-    t6('show-options', '-t', 'ws-check', 'status-right') === '' && existsSync(join(scratch, 'saved')), `${JSON.stringify(t6('show-options', '-t', 'ws-check', 'status-right'))} ${existsSync(join(scratch, 'saved'))}`)
+  check('hide: HIDE WINDOW at the bar\'s right end, then what tmux.conf runs there, which ran while a terminal showed the workspace (a session restore\'s save goes on); its pane title and clock not carried',
+    t6('show-options', '-t', 'ws-check', '-v', 'status-right') === `${w.HIDE_LABEL}#(touch '${scratch}/saved')` && existsSync(join(scratch, 'saved')), `${JSON.stringify(t6('show-options', '-t', 'ws-check', '-v', 'status-right'))} ${existsSync(join(scratch, 'saved'))}`)
   check('hide: what the hide prints never shows in a pane (over the agent, in a view the relay waits on)', t6('list-panes', '-s', '-t', '=ws-check', '-F', '#{pane_in_mode}').split('\n').every(m => m === '0'), t6('list-panes', '-s', '-t', '=ws-check', '-F', '#{pane_id}=#{pane_in_mode}').replace(/\n/g, ' '))
   // hide.sh, the mod's own, run by the bar's click: a terminal switched here from another session goes back to
   // it, attached, its window untouched (Terminal is never asked)
@@ -387,7 +385,7 @@ pump(1.5)
 tty = t('list-clients', '-F', '#{client_tty}')
 t('switch-client', '-c', tty, '-t', '=ws-check'); pump(1)
 on = t('list-clients', '-F', '#{client_session}')
-os.write(fd, b'\\x1b[<0;14;1M\\x1b[<0;14;1m'); pump(1.5)
+os.write(fd, b'\\x1b[<0;94;1M\\x1b[<0;94;1m'); pump(1.5)
 print(on, t('list-clients', '-F', '#{client_session}') or '-')
 t('detach-client', '-t', tty); pump(0.5)
 os.close(fd)
