@@ -772,45 +772,58 @@ export function soloPrompt(ws: Pick<Workspace, 'name' | 'purpose' | 'checkout' |
  * folder; a worktree or submodule has a `.git` file), at most five levels
  * down, skipping Library, hidden folders and node_modules; and the branches'
  * worktrees in each worktrees folder (`<checkout>-worktrees/<branch>`, a
- * `.git` file), found by their folder's name, never gone into.
+ * `.git` file), found by their folder's name, never gone into. Each path
+ * ends with a NUL, so no folder's name can pass for another path.
  */
 export const PROJECTS_SCRIPT = [
   'find "$1" -maxdepth 5 \\( -name Library -o -name node_modules -o -name .Trash -o \\( -name ".*" ! -name .git \\) \\) -prune',
   // a worktrees folder and a .git folder are printed, never gone into
-  '  -o -type d -name "*-worktrees" -print -prune -o -type d -name .git -print -prune 2>/dev/null |',
-  `  while IFS= read -r p; do case $p in */.git) printf '%s\\n' "\${p%/.git}";; *) for w in "$p"/*; do [ -f "$w/.git" ] && printf '%s\\n' "$w"; done;; esac; done`,
+  '  -o -type d -name "*-worktrees" -print0 -prune -o -type d -name .git -print0 -prune 2>/dev/null |',
+  `  xargs -0 /bin/sh -c 'for p; do case $p in */.git) printf "%s\\0" "\${p%/.git}";; *) for w in "$p"/*; do [ -f "$w/.git" ] && printf "%s\\0" "$w"; done;; esac; done' sh`,
 ].join(' ')
 
 /**
  * Where the path "$1" (a folder, or a file in one) is in git: its worktree's
- * top folder, ended by a NUL, then the repository's worktrees as
- * WORKTREES_SCRIPT prints them, the main checkout first. Nothing (exit 11)
- * outside a repository. With git's settings as the other scripts here set them.
+ * top folder and the repository's main checkout, each ended by a NUL, then
+ * the repository's worktrees as WORKTREES_SCRIPT prints them. The main
+ * checkout is found as CHECKOUT_SCRIPT finds it (a submodule's or a separate
+ * git dir's own checkout, never its git folder); nothing (exit 11) outside a
+ * repository, nor (exit 15) where git cannot tell its main checkout (a bare
+ * repository's, a separate git dir's worktree). With git's settings as the
+ * other scripts here set them.
  */
 export const WHERE_SCRIPT = [
   'd=$1',
   '[ -d "$d" ] || d=$(dirname "$d")',
   'g() { git -c core.hooksPath=/dev/null -c core.fsmonitor= "$@"; }',
   'top=$(g -C "$d" rev-parse --show-toplevel 2>/dev/null) && [ -n "$top" ] || exit 11',
-  `printf '%s\\0' "$top"`,
+  'own=$(g -C "$d" rev-parse --path-format=absolute --git-dir) || exit 11',
+  'common=$(g -C "$d" rev-parse --path-format=absolute --git-common-dir) || exit 11',
+  'main=',
+  'if [ "$own" = "$common" ]; then main=$top',
+  'else',
+  '  wt=$(g --git-dir="$common" config --get core.worktree)',
+  '  if [ -n "$wt" ]; then main=$(cd "$common" && cd "$wt" && pwd -P)',
+  '  elif [ "$(basename "$common")" = .git ]; then main=$(dirname "$common")',
+  '  fi',
+  'fi',
+  'case $main in /*) ;; *) exit 15;; esac',
+  `printf '%s\\0%s\\0' "$top" "$main"`,
   'g -C "$d" worktree list --porcelain -z',
 ].join('\n')
 
 /**
- * WHERE_SCRIPT's answer: the repository's main checkout (the project), the
- * branches it can go on with (parseWorktrees), and the one whose worktree the
- * path is in, if it is in one of those; undefined outside git.
+ * WHERE_SCRIPT's answer: the folder's worktree (`top`), the repository's main
+ * checkout (the project), the branches it can go on with (parseWorktrees),
+ * and the one whose worktree the path is in, if it is in one of those;
+ * undefined outside git.
  */
-export function whereFrom(stdout: string): { checkout: string; worktrees: { path: string; branch: string }[]; goOn?: { path: string; branch: string } } | undefined {
-  const at = stdout.indexOf('\0')
-  if (at <= 0) return undefined
-  const top = stdout.slice(0, at)
-  const list = stdout.slice(at + 1)
-  const checkout = list.split('\0').find(field => field.startsWith('worktree '))?.slice(9)
-  if (!top.startsWith('/') || checkout === undefined || !checkout.startsWith('/')) return undefined
-  const worktrees = parseWorktrees(list)
+export function whereFrom(stdout: string): { top: string; checkout: string; worktrees: { path: string; branch: string }[]; goOn?: { path: string; branch: string } } | undefined {
+  const [top = '', checkout = '', ...rest] = stdout.split('\0')
+  if (!top.startsWith('/') || !checkout.startsWith('/') || rest.length === 0) return undefined
+  const worktrees = parseWorktrees(rest.join('\0'))
   const goOn = worktrees.find(w => w.path === top)
-  return { checkout, worktrees, ...(goOn === undefined ? {} : { goOn }) }
+  return { top, checkout, worktrees, ...(goOn === undefined ? {} : { goOn }) }
 }
 
 /**
@@ -820,7 +833,10 @@ export function whereFrom(stdout: string): { checkout: string; worktrees: { path
  * `relative` is true for one that is neither absolute nor from `~/`.
  */
 export function typedPath(typed: string): { path: string; isRelative: boolean } | undefined {
-  const text = (/\(([^()]+)\)\s*$/.exec(typed.trim())?.[1] ?? typed).trim().replace(/^\.\//, '')
+  const whole = typed.trim()
+  // a path from the root or home is whole, brackets and all; only another may be an editor's `name (path)`
+  const isRooted = whole.startsWith('/') || whole === '~' || whole.startsWith('~/')
+  const text = (isRooted ? whole : (/\(([^()]+)\)\s*$/.exec(whole)?.[1] ?? whole)).trim().replace(/^\.\//, '')
   if (text === '' || !text.includes('/')) return undefined
   return { path: text.replace(/\/+$/, '') || '/', isRelative: !text.startsWith('/') && text !== '~' && !text.startsWith('~/') }
 }

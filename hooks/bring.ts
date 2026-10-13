@@ -51,14 +51,16 @@ export function isKnownCodex(snap: Pick<Snapshot, 'codex'>, s: CodexSession): bo
  * The running sessions a new workspace can bring in: a Claude session in a
  * terminal (not in the background, not this one) or a Codex terminal whose
  * conversation is known, neither already in a workspace's panes; with
- * `dir`, only those of the repository it is in (any of its worktrees). Idle
- * ones first, then most recent.
+ * `dir`, only those of the repository it is in (any of its worktrees): `dir`
+ * may name the repository's folders (its main checkout and its worktrees,
+ * wherever they are). Idle ones first, then most recent.
  */
-export function bringable(snap: Snapshot, o: { now: number; selfId: string }, dir?: string): Bringable[] {
-  const repo = dir === undefined ? undefined : snap.places[dir]?.repo
+export function bringable(snap: Snapshot, o: { now: number; selfId: string }, dir?: string | readonly string[]): Bringable[] {
+  const dirs = dir === undefined ? undefined : typeof dir === 'string' ? [dir] : dir
+  const repo = dirs?.map(d => snap.places[d]?.repo).find(r => r !== undefined && r !== '')
   const inRepo = (cwd: string) =>
-    dir === undefined ||
-    (repo !== undefined && repo !== '' ? snap.places[cwd]?.repo === repo : cwd === dir || cwd.startsWith(`${dir}/`) || cwd.startsWith(`${dir}-worktrees/`))
+    dirs === undefined ||
+    (repo !== undefined ? snap.places[cwd]?.repo === repo : dirs.some(d => cwd === d || cwd.startsWith(`${d}/`) || cwd.startsWith(`${d}-worktrees/`)))
   const workspaceSessions = new Set(snap.workspaces.map(tmuxName))
   const inWorkspace = (tty: string) => workspaceSessions.has(snap.tmux.panes[tty]?.session ?? '')
   const found: (Bringable & { at: number })[] = []

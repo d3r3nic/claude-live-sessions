@@ -178,7 +178,7 @@ const allAccounts = atom({ plugin: 'live-sessions', key: 'allAccounts' } as cons
 const pendingMove = atom({ plugin: 'live-sessions', key: 'pendingMove' } as const, { key: '', at: 0 })
 const CONFIRM_MS = 6_000
 
-const NO_DRAFT = { isOpen: false, name: '', query: '', dir: '', env: '', purpose: '', error: '', bring: [] as string[], only: '' as '' | 'claude' | 'codex', goOn: '' }
+const NO_DRAFT = { isOpen: false, name: '', query: '', dir: '', env: '', purpose: '', error: '', bring: [] as string[], only: '' as '' | 'claude' | 'codex', goOn: '', choices: [] as string[] }
 /** The new-workspace form. */
 const draft = atom({ plugin: 'live-sessions', key: 'draft' } as const, NO_DRAFT)
 /** The session whose workspace is being chosen. */
@@ -1062,6 +1062,8 @@ type NewWorkspace = {
   goOn?: boolean
   goOnBranch?: string
   bringFrom?: string
+  /** The repository's other folders (its branches' worktrees, wherever they are), whose sessions were offered too. */
+  bringAlso?: readonly string[]
 }
 
 async function makeWorkspace($: EngineInterface, w: NewWorkspace): Promise<{ isCreated: boolean; text: string }> {
@@ -1099,7 +1101,7 @@ async function makeWorkspace($: EngineInterface, w: NewWorkspace): Promise<{ isC
   // the sessions brought in, each checked as it runs now; then closed where they run, so each conversation
   // goes on in the workspace alone
   // checked as the form offered them: for its project, which a worktree chosen to go on with is part of
-  const checked = await checkBring($, home, snap, w.bring ?? [], w.env, absoluteDir(w.bringFrom ?? '', home) ?? dir)
+  const checked = await checkBring($, home, snap, w.bring ?? [], w.env, [absoluteDir(w.bringFrom ?? '', home) ?? dir, ...(w.bringAlso ?? [])])
   if ('error' in checked) return fail(checked.error)
   // a workspace of one agent takes in a session of that agent only
   const stranger = checked.bring.find(b => !agentsOf(w).includes(b.tool))
@@ -1182,7 +1184,7 @@ type Bring = { tool: 'claude' | 'codex'; label: string; runs?: { tty: string; pi
  * conversation known for certain; with the conversation it resumes there and
  * the flags that keep its permissions.
  */
-async function checkBring($: EngineInterface, home: string, snap: Snapshot, members: readonly string[], env: string, dir: string): Promise<{ bring: Bring[] } | { error: string }> {
+async function checkBring($: EngineInterface, home: string, snap: Snapshot, members: readonly string[], env: string, dir: string | readonly string[]): Promise<{ bring: Bring[] } | { error: string }> {
   const bring: Bring[] = []
   const now = await $.clock.now()
   const offered = bringable(snap, { now, selfId: await $.session.id() }, dir)
@@ -1260,17 +1262,23 @@ async function codexBusy($: EngineInterface, rollout: string): Promise<string | 
 }
 
 async function submitDraft($: EngineInterface) {
-  // a path typed (or pasted) and created at once: placed first, as the form would have shown it
-  if ((await read($, draft)).dir === '' && typedPath((await read($, draft)).query) !== undefined) await placeTyped($, (await read($, draft)).query)
+  // a path typed (or pasted, or picked) and created before the form had placed it: placed first, as the form would
+  // have shown it
+  const before = await read($, draft)
+  if (typedPath(before.query) !== undefined && (before.dir === '' || (await read($, worktrees)).dir !== before.dir)) await placeTyped($, before.query)
   const d = await read($, draft)
+  // found in several places: the owner picks one first (said on the form; a form from before has no such list)
+  if (Array.isArray(d.choices) && d.choices.length > 0) return
   // (a form open since before the choice was offered has none: both)
   const only = d.only === 'claude' || d.only === 'codex' ? d.only : undefined
   // a worktree chosen to go on with (one the form shows: found for its folder, which a new form, a pick or typing
-  // starts over) is the workspace's folder; the sessions to bring in were offered for the project
+  // starts over) is the workspace's folder; the sessions to bring in were offered for the project, its worktrees too
   const project = d.dir || d.query
-  const goOn = (await read($, worktrees)).list.find(w => w.path === d.goOn)
+  const found = await read($, worktrees)
+  const isPlaced = found.dir !== '' && found.dir === d.dir
+  const goOn = isPlaced ? found.list.find(w => w.path === d.goOn) : undefined
   const made = await createWorkspace($, {
-    name: d.name, dir: goOn?.path ?? project, env: d.env, purpose: d.purpose, bring: d.bring, bringFrom: project,
+    name: d.name, dir: goOn?.path ?? project, env: d.env, purpose: d.purpose, bring: d.bring, bringFrom: project, bringAlso: isPlaced ? found.list.map(w => w.path) : [],
     ...(only === undefined ? {} : { only }),
     ...(goOn === undefined ? {} : { goOn: true, goOnBranch: goOn.branch }),
   })
@@ -1283,37 +1291,56 @@ async function submitDraft($: EngineInterface) {
 }
 
 /**
- * The folder a path names: as typed (absolute, or from `~/`); a relative one (as an editor names a file:
- * `shop-worktrees/<branch>/docs/README.md`) in the home folder or beside or in a repository the form found, the first
- * that is there. A file names its folder (WHERE_SCRIPT takes either).
+ * The places a path names: as typed (absolute, or from `~/`); a relative one (as an editor names a file:
+ * `shop-worktrees/<branch>/docs/README.md`) everywhere it is, in the home folder or beside or in a repository the form
+ * found. Undefined once the form holds something else (typed on: the lookup is let go).
  */
-async function pathOf($: EngineInterface, typed: string, home: string): Promise<string | undefined> {
+async function pathsOf($: EngineInterface, typed: string, home: string): Promise<string[] | undefined> {
   const named = typedPath(typed)
-  if (named === undefined) return undefined
-  if (!named.isRelative) return absoluteDir(named.path, home)
+  if (named === undefined) return []
+  if (!named.isRelative) return [absoluteDir(named.path, home)].filter(p => p !== undefined)
   const found = await read($, projects)
   const bases = [...new Set([home, ...found.map(p => p.slice(0, p.lastIndexOf('/'))), ...found])].filter(b => b.startsWith('/'))
+  const paths: string[] = []
   for (const base of bases) {
+    if ((await read($, draft)).query !== typed) return undefined
     const path = `${base}/${named.path}`
-    if (await $.fs.exists(path).catch(() => false)) return path
+    if (await $.fs.exists(path).catch(() => false)) paths.push(path)
   }
-  return undefined
+  return paths
 }
 
 /**
- * What the form's project field names, placed in git: its repository's main checkout is the project, the branches
- * there are offered to go on with, and a path inside a branch's own worktree chooses that branch. A path outside git
- * is left as typed; a search word is not a path. Kept only while the form still holds what was placed.
+ * What the form's repository field names, placed in git: its repository's main checkout is the project, the branches
+ * there are offered to go on with, and a path inside a branch's own worktree chooses that branch. A relative path found
+ * in more than one worktree is placed nowhere: the places are listed to pick from. A path outside git is left as typed;
+ * a search word is not a path. Kept only while the form still holds what was placed.
  */
 async function placeTyped($: EngineInterface, typed: string) {
   const home = (await $.env.get('HOME')) ?? ''
-  const path = await pathOf($, typed, home)
-  const found = path === undefined ? undefined : await $.process.run(['/bin/sh', '-c', WHERE_SCRIPT, 'sh', path], { timeoutMs: 15_000 }).catch(() => undefined)
-  const where = found?.exitCode === 0 ? whereFrom(found.stdout) : undefined
-  const d = await read($, draft)
-  if (!d.isOpen || d.query !== typed || where === undefined) return
-  await update($, worktrees, () => ({ dir: where.checkout, list: where.worktrees }))
-  await update($, draft, now => (now.query !== typed ? now : { ...now, dir: where.checkout, goOn: where.goOn?.path ?? '', error: '' }))
+  const paths = await pathsOf($, typed, home)
+  if (paths === undefined) return
+  const places: { path: string; where: NonNullable<ReturnType<typeof whereFrom>> }[] = []
+  for (const path of paths) {
+    const found = await $.process.run(['/bin/sh', '-c', WHERE_SCRIPT, 'sh', path], { timeoutMs: 15_000 }).catch(() => undefined)
+    const where = found?.exitCode === 0 ? whereFrom(found.stdout) : undefined
+    if (where !== undefined) places.push({ path, where })
+  }
+  if (new Set(places.map(p => p.where.top)).size > 1) {
+    // in several worktrees: which one is the owner's to say
+    await update($, draft, now => (now.query !== typed ? now : { ...now, dir: '', goOn: '', choices: places.map(p => p.path), error: `${typed.trim()} is in ${places.length} places: pick one, or type more of its path` }))
+    return
+  }
+  const where = places[0]?.where
+  if (where === undefined) return
+  // the form first, and the worktrees offered only if it still holds what was placed: a lookup that ends late changes nothing
+  let isPlaced = false
+  await update($, draft, now => {
+    if (!now.isOpen || now.query !== typed) return now
+    isPlaced = true
+    return { ...now, dir: where.checkout, goOn: where.goOn?.path ?? '', choices: [], error: '' }
+  })
+  if (isPlaced) await update($, worktrees, () => ({ dir: where.checkout, list: where.worktrees }))
 }
 
 /** A workspace's first-prompt files, gone. */
@@ -1338,7 +1365,7 @@ async function openDraft($: EngineInterface, dir: string, with_?: { member: stri
   const found = await $.process
     .run(['/bin/sh', '-c', PROJECTS_SCRIPT, 'sh', home], { timeoutMs: 30_000 })
     .catch(() => ({ exitCode: -1, stdout: '', stderr: '' }))
-  const paths = found.stdout.split('\n').map(l => l.trim()).filter(l => l.startsWith('/'))
+  const paths = found.stdout.split('\0').filter(p => p.startsWith('/'))
   await update($, projects, () => paths)
 }
 
@@ -2064,8 +2091,11 @@ export const register: Register = on => {
     const offeredAll = bringable(snap, { now, selfId })
     const formDir = absoluteDir(form.dir || form.query, home)
     // of the agents chosen: a workspace of one agent takes in a session of that agent only
-    const offered = form.isOpen && formDir !== undefined ? bringable(snap, { now, selfId }, formDir).filter(b => formOnly === '' || b.tool === formOnly) : []
     const branches = form.isOpen && formDir !== undefined && found.dir === formDir ? found.list : []
+    // the places a path typed was found in, to pick one (a form from before this list has none)
+    const choices = Array.isArray(form.choices) ? form.choices : []
+    // the repository's sessions, wherever its worktrees are
+    const offered = form.isOpen && formDir !== undefined ? bringable(snap, { now, selfId }, [formDir, ...branches.map(b => b.path)]).filter(b => formOnly === '' || b.tool === formOnly) : []
     const matches = form.isOpen ? rankProjects(await read($, projects), [...snap.claude, ...snap.codex].map(s => ({ cwd: s.cwd, at: 'lastActive' in s ? s.lastActive : s.since })), form.dir === '' ? form.query : '', home) : []
     const pending = await read($, pendingMove)
     const isPending = (key: string) => pending.key === key && now - pending.at < CONFIRM_MS
@@ -2365,22 +2395,24 @@ export const register: Register = on => {
                 placeholder="search by name (a repository or a branch's worktree), or paste a folder or file in one"
                 onInput={value => {
                   void (async () => {
-                    await update($, draft, d => ({ ...d, query: value, dir: '', bring: [], goOn: '', error: '' }))
+                    await update($, draft, d => ({ ...d, query: value, dir: '', bring: [], goOn: '', choices: [], error: '' }))
                     // a path: placed in its repository, and in its branch's worktree when it is in one
                     if (typedPath(value) !== undefined) await placeTyped($, value)
                   })().catch(() => undefined)
                 }}
                 onSubmit={() => void submitDraft($)}
               />
-              {form.dir === '' && matches.length > 0 && (
+              {form.dir === '' && (choices.length > 0 || matches.length > 0) && (
                 <Select
                   key="form:pick"
                   label="found"
-                  options={matches.map(m => ({ value: m.path, label: m.label }))}
+                  // a path found in several places, those; else the repositories and branches the search found
+                  options={choices.length > 0 ? choices.map(path => ({ value: path, label: rankProjects([path], [], '', home)[0]?.label ?? path })) : matches.map(m => ({ value: m.path, label: m.label }))}
                   onSelect={value => {
                     const shown = rankProjects([value], [], '', home)[0]?.label ?? value
+                    // its folder (and branch) once placed; until then, the folder as picked
                     void (async () => {
-                      await update($, draft, d => ({ ...d, dir: value, query: shown, bring: [], goOn: '', error: '' }))
+                      await update($, draft, d => ({ ...d, dir: '', query: shown, bring: [], goOn: '', choices: [], error: '' }))
                       await placeTyped($, shown)
                     })().catch(() => undefined)
                   }}
