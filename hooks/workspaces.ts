@@ -295,8 +295,11 @@ export const HIDE_SCRIPT = [
   '',
 ].join('\n')
 
-/** Where a workspace window was, as hide.sh keeps it: its position and size (points, from the top left) and font size. */
-export type Placement = { x: number; y: number; width: number; height: number; fontSize: number }
+/**
+ * Where a window goes, as hide.sh keeps a workspace's: its position and size (points, from the top left) and font
+ * size; and, for one being opened, the Terminal profile (settings set) it takes: that of the tab it is opened from.
+ */
+export type Placement = { x: number; y: number; width: number; height: number; fontSize: number; profile?: string }
 
 /** The file hide.sh keeps a workspace session's window place in. */
 export const placementPath = (home: string, session: string) => `${home}/Library/Application Support/live-sessions/windows/${session}.json`
@@ -325,12 +328,16 @@ export function screenShowing(place: Placement, screens: readonly Screen[]): Scr
   return best !== undefined && shown(best) > 0 ? best : undefined
 }
 
-/** SCREEN_SCRIPT's answer: the screens there are (each of some size), the screen in use first, and the tab's font size. */
-export function screensFrom(stdout: string): { screens: Screen[]; fontSize: number } | undefined {
+/**
+ * SCREEN_SCRIPT's answer: the screens there are (each of some size), the screen in use first, and the tab's font size
+ * and profile ('' when not known; a name of at most 100 characters, no control characters).
+ */
+export function screensFrom(stdout: string): { screens: Screen[]; fontSize: number; profile: string } | undefined {
   try {
-    const seen = JSON.parse(stdout) as { screens?: Screen[]; fontSize?: number }
+    const seen = JSON.parse(stdout) as { screens?: Screen[]; fontSize?: number; profile?: unknown }
     const all = (seen.screens ?? []).filter(s => [s.x, s.y, s.width, s.height].every(n => typeof n === 'number' && Number.isFinite(n)) && s.width > 0 && s.height > 0)
-    return all.length === 0 ? undefined : { screens: all, fontSize: typeof seen.fontSize === 'number' ? seen.fontSize : 0 }
+    const profile = typeof seen.profile === 'string' && seen.profile.length <= 100 && !/[\u0000-\u001f\u007f]/.test(seen.profile) ? seen.profile : ''
+    return all.length === 0 ? undefined : { screens: all, fontSize: typeof seen.fontSize === 'number' ? seen.fontSize : 0, profile }
   } catch {
     return undefined
   }
@@ -340,8 +347,8 @@ export function screensFrom(stdout: string): { screens: Screen[]; fontSize: numb
  * A workspace's window, opened from /sessions or the ops screen (agentPlacement): on the screen it was on when last
  * hidden (`kept`), while that is still there, else on the screen in use.
  */
-export function workspacePlacement(seen: { screens: readonly Screen[]; fontSize: number }, kept: Placement | undefined): Placement {
-  return agentPlacement((kept === undefined ? undefined : screenShowing(kept, seen.screens)) ?? seen.screens[0]!, seen.fontSize)
+export function workspacePlacement(seen: { screens: readonly Screen[]; fontSize: number; profile?: string }, kept: Placement | undefined): Placement {
+  return agentPlacement((kept === undefined ? undefined : screenShowing(kept, seen.screens)) ?? seen.screens[0]!, seen.fontSize, seen.profile)
 }
 
 /**
@@ -358,18 +365,20 @@ export const AGENT_WINDOW_SHARE = 0.6
 /**
  * A window of agents this plugin opens (a workspace's, a session opened in the background's): 60% of the screen's free
  * part (what the menu bar and Dock leave) across and down, centred, a little smaller than the font of the window it is
- * opened from (openedFontSize); never a profile's small default window, nor the size and font it had before.
+ * opened from (openedFontSize), in that window's profile (its colours: never Terminal's default profile, which may be
+ * another); never a profile's small default window, nor the size and font it had before.
  */
-export function agentPlacement(screen: Screen, fontSize: number): Placement {
+export function agentPlacement(screen: Screen, fontSize: number, profile = ''): Placement {
   const width = Math.round(screen.width * AGENT_WINDOW_SHARE)
   const height = Math.round(screen.height * AGENT_WINDOW_SHARE)
-  return { x: Math.round(screen.x + (screen.width - width) / 2), y: Math.round(screen.y + (screen.height - height) / 2), width, height, fontSize: openedFontSize(fontSize) }
+  return { x: Math.round(screen.x + (screen.width - width) / 2), y: Math.round(screen.y + (screen.height - height) / 2), width, height, fontSize: openedFontSize(fontSize), ...(profile === '' ? {} : { profile }) }
 }
 
 /**
  * Every screen's free part (Screen), the one in use now (mainScreen: the
- * one with the keyboard's window) first, and the font size of terminal
- * "$1"'s tab (`ttys012`; 0 when no Terminal tab is that terminal): JSON.
+ * one with the keyboard's window) first, and the font size and profile of
+ * terminal "$1"'s tab (`ttys012`; 0 and '' when no Terminal tab is that
+ * terminal): JSON.
  * Screens are placed from the top left of the menu bar's screen
  * (screens[0]), as Terminal places windows. Never starts Terminal.
  */
@@ -388,12 +397,16 @@ export const SCREEN_SCRIPT = `function run(argv) {
     if (s.x !== main.x || s.y !== main.y || s.width !== main.width || s.height !== main.height) screens.push(s)
   }
   let fontSize = 0
+  let profile = ''
   const terminal = Application('Terminal')
   if (terminal.running()) {
     const tty = '/dev/' + argv[0]
-    for (const w of terminal.windows()) for (const t of w.tabs()) if (t.tty() === tty) fontSize = t.fontSize()
+    for (const w of terminal.windows()) for (const t of w.tabs()) if (t.tty() === tty) {
+      fontSize = t.fontSize()
+      try { profile = t.currentSettings().name() } catch (error) {}
+    }
   }
-  return JSON.stringify({ screens, fontSize })
+  return JSON.stringify({ screens, fontSize, profile })
 }`
 
 /**

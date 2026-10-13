@@ -2,7 +2,10 @@
 
 What each version changed, newest first. Each links its pull request, which holds the details, the checks and the reviews. After updating, run `/reload-plugins` in your sessions.
 
-## 0.28.0 — 2026-10-13
+## 0.28.1 — 2026-10-13
+- **Windows the plugin opens take the colours of the tab you open them from** (its Terminal profile): workspace windows, background sessions' windows and the Ops screen, and the windows the Ops screen opens. Before, they took Terminal's default profile, which on a Mac whose default is a light one put light windows (and a light strip at the Ops screen's right edge) beside dark tabs. An Ops screen already open keeps its window: close it and press `Ops screen` once.
+
+## 0.28.0 — 2026-10-13 ([#35](https://github.com/d3r3nic/claude-live-sessions/pull/35))
 - **Close a workspace for now, open it again later:** `/workspace close <name>`, `Close` in the pane or `■` on its Ops tile (each pressed twice) ends its agents between turns and keeps their conversations; `Open` starts it again, each going on with its own. Nothing is closed while an agent works, waits on you or has background work running.
 - **After a restart or a crash:** a workspace's tmux session that a session restore (tmux-resurrect) brought back as empty shells counts as stopped, and `Open` replaces it with the workspace, resuming its conversations. The Ops screen's `📁` now starts a stopped workspace too, through a Claude session running this plugin in a Terminal tab.
 - **tmux-continuum saves again while workspace windows are open:** a workspace's bar no longer replaces the bar's right end (where tmux.conf runs the save from); `Hide window` moved next to the workspace's name.

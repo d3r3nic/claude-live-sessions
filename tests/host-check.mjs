@@ -423,9 +423,11 @@ except ChildProcessError: pass
   // its window's place and size; none leaves them; a placement that fails leaves the window open all the same
   const openWith = (arg, failBounds = false) => {
     const did = []
-    const tab = { tty: () => '/dev/ttys060', set fontSize(v) { did.push(`font ${v}`) } }
+    const tab = { tty: () => '/dev/ttys060', set fontSize(v) { did.push(`font ${v}`) }, set currentSettings(v) { did.push(`profile ${v.name}`) } }
     const win = { tabs: () => [tab], set bounds(v) { if (failBounds) throw new Error('no'); did.push(`bounds ${v.x},${v.y},${v.width},${v.height}`) } }
-    const terminal = { doScript: () => tab, windows: () => [{ tabs: () => [{ tty: () => '/dev/ttys001' }] }, win], activate: () => did.push('activate') }
+    // Terminal's profiles: Homebrew is one; any other name is none
+    const settingsSets = { byName: name => ({ name, exists: () => name === 'Homebrew' }) }
+    const terminal = { doScript: () => tab, windows: () => [{ tabs: () => [{ tty: () => '/dev/ttys001' }] }, win], settingsSets, activate: () => did.push('activate') }
     try {
       const result = new Function('Application', `${c.OPEN_SCRIPT}\nreturn run(${JSON.stringify(arg === undefined ? ['cmd'] : ['cmd', arg])})`)(() => terminal)
       return `${result}: ${did.join('; ')}`
@@ -433,8 +435,12 @@ except ChildProcessError: pass
       return `threw ${error.message}: ${did.join('; ')}`
     }
   }
-  const opens = [openWith(JSON.stringify({ x: 5, y: 6, width: 700, height: 500, fontSize: 11 })), openWith(undefined), openWith(JSON.stringify({ x: 5, y: 6, width: 700, height: 500, fontSize: 0 }), true), openWith('not json')]
-  check('open: a placement sets the font, then the place; none leaves them; a failing one still opens', JSON.stringify(opens) === JSON.stringify(['opened: font 11; bounds 5,6,700,500; activate', 'opened: activate', 'opened: activate', 'opened: activate']), JSON.stringify(opens))
+  const opens = [
+    openWith(JSON.stringify({ x: 5, y: 6, width: 700, height: 500, fontSize: 11, profile: 'Homebrew' })), openWith(JSON.stringify({ x: 5, y: 6, width: 700, height: 500, fontSize: 11, profile: 'Gone' })),
+    openWith(undefined), openWith(JSON.stringify({ x: 5, y: 6, width: 700, height: 500, fontSize: 0 }), true), openWith('not json'),
+  ]
+  check('open: a placement sets the profile of the tab it is opened from (one Terminal has), then the font, then the place; none leaves them; a failing one still opens',
+    JSON.stringify(opens) === JSON.stringify(['opened: profile Homebrew; font 11; bounds 5,6,700,500; activate', 'opened: font 11; bounds 5,6,700,500; activate', 'opened: activate', 'opened: activate', 'opened: activate']), JSON.stringify(opens))
   // the screen script against stand-in screens: the menu bar's screen 2560×1440 at (0,0), an external 1920×1080
   // above its right half, in use; Terminal's places are from the menu bar screen's top left
   const nsScreen = (x, y, w, h, free) => ({ frame: { origin: { x, y }, size: { width: w, height: h } }, visibleFrame: { origin: { x: free.x, y: free.y }, size: { width: free.w, height: free.h } } })
@@ -442,7 +448,11 @@ except ChildProcessError: pass
   const external = nsScreen(1280, 1440, 1920, 1080, { x: 1280, y: 1440, w: 1920, h: 1080 })
   const stand$ = { NSScreen: { screens: { count: 2, objectAtIndex: i => [menuBar, external][i] }, mainScreen: external } }
   const seenScreens = JSON.parse(new Function('Application', 'ObjC', '$', `${w.SCREEN_SCRIPT}\nreturn run(['ttys070'])`)(() => ({ running: () => false }), { import: () => undefined }, stand$))
-  check('screens: every screen, the one in use first, placed from the menu bar screen\'s top left', JSON.stringify(seenScreens) === JSON.stringify({ screens: [{ x: 1280, y: -1080, width: 1920, height: 1080 }, { x: 0, y: 30, width: 2560, height: 1410 }], fontSize: 0 }), JSON.stringify(seenScreens))
+  check('screens: every screen, the one in use first, placed from the menu bar screen\'s top left', JSON.stringify(seenScreens) === JSON.stringify({ screens: [{ x: 1280, y: -1080, width: 1920, height: 1080 }, { x: 0, y: 30, width: 2560, height: 1410 }], fontSize: 0, profile: '' }), JSON.stringify(seenScreens))
+  // with Terminal running: the font size and profile of the tab on that terminal
+  const runningTerminal = () => ({ running: () => true, windows: () => [{ tabs: () => [{ tty: () => '/dev/ttys071', fontSize: () => 9, currentSettings: () => ({ name: () => 'Novel' }) }, { tty: () => '/dev/ttys070', fontSize: () => 13, currentSettings: () => ({ name: () => 'Homebrew' }) }] }] })
+  const seenTab = JSON.parse(new Function('Application', 'ObjC', '$', `${w.SCREEN_SCRIPT}\nreturn run(['ttys070'])`)(runningTerminal, { import: () => undefined }, stand$))
+  check('screens: the font size and profile of the tab the window is opened from', seenTab.fontSize === 13 && seenTab.profile === 'Homebrew', JSON.stringify([seenTab.fontSize, seenTab.profile]))
   // hide.sh's end, with tmux and osascript stood in for: where the window was is kept under the workspace
   // session's name, in the windows folder beside hide.sh, and only then
   const stubs = join(scratch, 'stubs')

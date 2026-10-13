@@ -474,7 +474,8 @@ function machine(argv: readonly string[], env: unknown): Run {
         if (id !== undefined && made !== null) world.started.set(made[1]!, made[2]!)
         return ok('opened\n')
       }
-      if (argv[4] === SCREEN_SCRIPT) return ok(JSON.stringify({ screens: [{ x: 0, y: 30, width: 2560, height: 1410 }, { x: 2560, y: 0, width: 1920, height: 1080 }], fontSize: argv[5] === 'ttys022' ? 12 : 0 }))
+      // the tab on ttys022 (this session's own, in some tests) has a font of 12 and the Homebrew profile
+      if (argv[4] === SCREEN_SCRIPT) return ok(JSON.stringify({ screens: [{ x: 0, y: 30, width: 2560, height: 1410 }, { x: 2560, y: 0, width: 1920, height: 1080 }], fontSize: argv[5] === 'ttys022' ? 12 : 0, profile: argv[5] === 'ttys022' ? 'Homebrew' : '' }))
       if (argv[4] === HAS_TAB_SCRIPT) return ok(TABS.has(argv[5] ?? '') && !world.noTab.has(argv[5] ?? '') ? 'yes\n' : '\n')
       if (argv[4] !== BACKGROUND_SCRIPT) return { exitCode: 1, stdout: '', stderr: 'unexpected script' }
       // Terminal.app's tab on ttys022 has the Novel profile's background; the others another
@@ -1027,7 +1028,8 @@ describe('pane', () => {
     await ui.press({ key: 'open codex-1cdaec1d-0ec7-4f0a-811f-5c29c9bcb3b7' })
     expect(osa()).toEqual([['focus', 'ttys004'], ['open', 'claude attach a1b2c3d4'], ['focus', 'ttys045']])
     // the background one in a window of 60% of the screen in use, centred, a little smaller than this tab's font (12: 10), never the profile's small one
-    expect(JSON.parse(runs.find(r => r[5] === 'claude attach a1b2c3d4')![6]!)).toEqual({ x: 512, y: 312, width: 1536, height: 846, fontSize: 10 })
+    // (in the profile of the tab it is opened from, never Terminal's default one)
+    expect(JSON.parse(runs.find(r => r[5] === 'claude attach a1b2c3d4')![6]!)).toEqual({ x: 512, y: 312, width: 1536, height: 846, fontSize: 10, profile: 'Homebrew' })
     // this session, and a thread with no terminal, are not pressed to open
     expect(await ui.find({ key: 'open claude-104' })).toBeUndefined()
     expect(await ui.find({ key: 'open codex-b' })).toBeUndefined()
@@ -3283,7 +3285,7 @@ describe('the ops screen', () => {
     // for the accounts the pane shows: here all of them
     expect(opened?.[5]).toMatch(/^node --no-warnings '\/.*\/ops\/ops\.mjs' --account '\*'$/)
     // the whole screen in use; this tab (ttys022) is in 12 points, and so is it
-    expect(JSON.parse(opened![6]!)).toEqual({ x: 0, y: 30, width: 2560, height: 1410, fontSize: 12 })
+    expect(JSON.parse(opened![6]!)).toEqual({ x: 0, y: 30, width: 2560, height: 1410, fontSize: 12, profile: 'Homebrew' })
     await ui.unmount()
   })
 
@@ -3720,9 +3722,14 @@ describe('workspace windows open where they were', () => {
     // a screen whose free part is not in whole points: the window's place is
     expect(agentPlacement({ x: 0, y: 37.5, width: 1512.4, height: 944.6 }, 12)).toEqual({ x: 303, y: 226, width: 907, height: 567, fontSize: 10 })
     // SCREEN_SCRIPT's answer: screens of no size or not numbers dropped; none, or not its answer at all: nothing
-    expect(screensFrom(JSON.stringify({ screens: [main, { x: 0, y: 0, width: 0, height: 900 }, { x: 'a', y: 0, width: 10, height: 10 }], fontSize: 13 }))).toEqual({ screens: [main], fontSize: 13 })
+    expect(screensFrom(JSON.stringify({ screens: [main, { x: 0, y: 0, width: 0, height: 900 }, { x: 'a', y: 0, width: 10, height: 10 }], fontSize: 13, profile: 'Homebrew' }))).toEqual({ screens: [main], fontSize: 13, profile: 'Homebrew' })
     expect([screensFrom(JSON.stringify({ screens: [], fontSize: 13 })), screensFrom('nope'), screensFrom('')]).toEqual([undefined, undefined, undefined])
-    expect(screensFrom(JSON.stringify({ screens: [main] }))).toEqual({ screens: [main], fontSize: 0 })
+    expect(screensFrom(JSON.stringify({ screens: [main] }))).toEqual({ screens: [main], fontSize: 0, profile: '' })
+    // a profile that is not a name is none: not a string, too long, with control characters
+    expect([7, 'x'.repeat(101), 'a\u001b[31m'].map(profile => screensFrom(JSON.stringify({ screens: [main], profile }))?.profile)).toEqual(['', '', ''])
+    // the window opened in the profile of the tab it is opened from; none known, Terminal's own choice
+    expect(agentPlacement(main, 12, 'Homebrew').profile).toBe('Homebrew')
+    expect('profile' in agentPlacement(main, 12)).toBe(false)
   })
 
   test('a workspace\'s window opens at 60% of the screen it was on when hidden (else the one in use), a little smaller than this tab\'s font, never its old size and font', async ($, on) => {
@@ -3734,7 +3741,8 @@ describe('workspace windows open where they were', () => {
     // never hidden: the screen, and half the font of this session's tab (ttys022: 12, so 6)
     await $.command.run({ ...SESSIONS, command: 'workspace', args: 'open practice-rbac' })
     expect(runs.find(r => r[4] === SCREEN_SCRIPT)?.[5]).toBe('ttys022')
-    const placed = { x: 512, y: 312, width: 1536, height: 846, fontSize: 10 }
+    // (in this tab's profile, never Terminal's default one)
+    const placed = { x: 512, y: 312, width: 1536, height: 846, fontSize: 10, profile: 'Homebrew' }
     expect(opens().at(-1)).toEqual(placed)
     // hidden before, at another size and font (as a window of a version before was): 60% there, in this tab's font
     world.started.clear()
@@ -3750,7 +3758,7 @@ describe('workspace windows open where they were', () => {
     world.started.clear()
     files.set(placementPath(HOME, 'ws-practice-rbac'), JSON.stringify({ x: 2700, y: 100, width: 1500, height: 900, fontSize: 13 }))
     await $.command.run({ ...SESSIONS, command: 'workspace', args: 'open practice-rbac' })
-    expect(opens().at(-1)).toEqual({ x: 2944, y: 216, width: 1152, height: 648, fontSize: 10 })
+    expect(opens().at(-1)).toEqual({ x: 2944, y: 216, width: 1152, height: 648, fontSize: 10, profile: 'Homebrew' })
     // a kept file that is not a placement is not used
     world.started.clear()
     files.set(placementPath(HOME, 'ws-practice-rbac'), '{"x": "far"}')

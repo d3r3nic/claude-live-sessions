@@ -1044,7 +1044,7 @@ async function openOps($: EngineInterface) {
     if ((await osascript(FOCUS_SCRIPT, tty)).stdout.trim() === 'shown') return
   }
   const seen = await screens($, osascript)
-  const place = seen === undefined ? undefined : { ...seen.screens[0]!, fontSize: seen.fontSize }
+  const place = seen === undefined ? undefined : { ...seen.screens[0]!, fontSize: seen.fontSize, ...(seen.profile === '' ? {} : { profile: seen.profile }) }
   const command = `node --no-warnings ${shellQuote(file)} --account ${shellQuote(account)}`
   const opened = await osascript(OPEN_SCRIPT, command, ...(place === undefined ? [] : [JSON.stringify(place)]))
   if (opened.stdout.trim() !== 'opened') await toast($, `The ops screen did not open (${firstLine(opened.stderr) || `exit ${opened.exitCode}`}). Run: ${command}`, { timeoutMs: 15_000 })
@@ -1088,7 +1088,7 @@ async function openSession($: EngineInterface, target: NonNullable<Item['target'
   // 60% of the screen in use, in this tab's font: never the profile's small default window
   const seen = await screens($, (script, ...args) =>
     $.process.run(['/usr/bin/osascript', '-l', 'JavaScript', '-e', script, ...args], { timeoutMs: 10_000 }).catch(() => ({ stdout: '' })))
-  const place = seen === undefined ? undefined : agentPlacement(seen.screens[0]!, seen.fontSize)
+  const place = seen === undefined ? undefined : agentPlacement(seen.screens[0]!, seen.fontSize, seen.profile)
   await $.process.run(['/usr/bin/osascript', '-l', 'JavaScript', '-e', OPEN_SCRIPT, command, ...(place === undefined ? [] : [JSON.stringify(place)])], { timeoutMs: 10_000 })
 }
 
