@@ -2,7 +2,7 @@
 
 What each version changed, newest first. Each links its pull request, which holds the details, the checks and the reviews. After updating, run `/reload-plugins` in your sessions.
 
-## 0.29.1 — 2026-10-13
+## 0.29.1 — 2026-10-13 ([#39](https://github.com/d3r3nic/claude-live-sessions/pull/39))
 - **After a restart, hand-offs pass again without you:** a resumed agent takes the next hand-off once its pane shows it at its prompt, without first finishing a turn of its own. Claude: idle 3 s by its own status, not at its resume question (from a summary or in full), which you answer; Codex: its prompt's footer showing, none of its start-up questions (trust, a model switch, an import, sign-in), not at work. Before, every reopened workspace held its first hand-off each way until you typed to the other agent.
 
 ## 0.29.0 — 2026-10-13 ([#38](https://github.com/d3r3nic/claude-live-sessions/pull/38))
