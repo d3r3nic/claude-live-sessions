@@ -3,7 +3,8 @@
 What each version changed, newest first. Each links its pull request, which holds the details, the checks and the reviews. After updating, run `/reload-plugins` in your sessions.
 
 ## 0.25.0 — 2026-10-12 ([#32](https://github.com/d3r3nic/claude-live-sessions/pull/32))
-- **Background work counts as work.** A Claude session whose turn is over while a command, monitor or agent it started in the background still runs is `background` (◐), never idle or `done`, in /sessions and the Ops screen; the work is listed under it (`↳ monitor  Wait for CI on PR 826 · 4m`), in the event log as `BG WORK`, and counted in the header and status line.
+- **Background work counts as work.** A Claude session whose turn is over while a command or monitor it started in the background still runs is `background` (◐), never idle or `done`, in /sessions and the Ops screen, in the event log as `BG WORK`, and counted in the header and status line. Each session's background commands, monitors and agents are listed under it (`↳ monitor  Wait for CI on PR 826 · 4m`) until they end, expire or are stopped.
+- **Ops screen:** an agent waiting on you at a permission prompt or dialog shows `◆ waiting` in red, never idle or done.
 - **Ops screen, compact view** (the default; `COMPACT` in the toolbar, key `v`, kept): each workspace a small tile, as many a row as the window holds, coloured and marked by what it does; `[📁]` opens its window, `[»]` or a click on it shows all its details over the screen (esc closes). `COMPACT` off is the detailed view as before.
 
 ## 0.24.0 — 2026-10-12 ([#31](https://github.com/d3r3nic/claude-live-sessions/pull/31))

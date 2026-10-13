@@ -385,6 +385,8 @@ function frame(snap, now, cols, rows, tick, note = '', modal = undefined) {
     // when its agents last finished
     const isWorking = ws.items.some(i => i.state === 'working')
     const isBackground = ws.items.some(i => i.state === 'background')
+    // an agent of it waits on the owner (a permission prompt, a dialog): Claude Code's own `waiting`
+    const isWaiting = ws.items.some(i => i.state === 'waiting')
     return {
       ws,
       relay: raw?.relay,
@@ -392,7 +394,10 @@ function frame(snap, now, cols, rows, tick, note = '', modal = undefined) {
       needs,
       isWorking,
       isBackground,
-      isBright: isWorking || isBackground || needs,
+      isWaiting,
+      // every agent of it idle: then, and only then, done
+      isQuiet: ws.items.every(i => i.state === 'idle'),
+      isBright: isWorking || isBackground || isWaiting || needs,
       claude: ws.items.find(i => i.tool === 'claude'),
       codex: ws.items.find(i => i.tool === 'codex'),
       doneAt: Math.max(0, ...ws.items.map(i => (Number.isFinite(i.lastActive) ? i.lastActive : 0))),
@@ -419,34 +424,47 @@ function frame(snap, now, cols, rows, tick, note = '', modal = undefined) {
       ...(tasks.length > shown.length ? [`${' '.repeat(9)}${rgb(G.lo, `↳ ${tasks.length - shown.length} more`)}`] : []),
     ]
   }
+  /**
+   * How an agent's state is drawn: its mark, its word and its colour. Working, background work it started, waiting on
+   * the owner (red: a permission prompt or a dialog), idle; any other state the registry says (stalled) as its word.
+   */
+  const stateLook = (n, state) =>
+    state === 'working'
+      ? ['●', 'working', G.amber]
+      : state === 'background'
+        ? ['◐', 'background', G.cyan]
+        : state === 'idle'
+          ? ['○', 'idle', n.isBright ? G.mid : G.lo]
+          : ['◆', clean(state).slice(0, 10), state === 'waiting' ? G.red : G.mid]
   /** A workspace in full: its name and tags, a row for each agent (and its background work), the relay, the alert. */
   const nodeRows = n => {
-    const { ws, relay, only, needs, isWorking, isBackground, isBright } = n
+    const { ws, relay, only, needs, isWorking, isBackground, isWaiting, isBright } = n
     const rows = []
     const name = bold(`▓▒░ ${clean(ws.name)} ░▒▓`)
     const head = needs
       ? rgb(tick % 6 < 3 ? G.red : G.hi, name)
       : isWorking
         ? `${rgb(G.amber, bold('● WORKING'))}  ${rgb(G.amber, name)}`
-        : isBackground
-          ? `${rgb(G.cyan, bold('◐ BACKGROUND'))}  ${rgb(G.cyan, name)}`
-          : rgb(G.mid, name)
+        : isWaiting
+          ? `${rgb(G.red, bold('◆ WAITING'))}  ${rgb(G.red, name)}`
+          : isBackground
+            ? `${rgb(G.cyan, bold('◐ BACKGROUND'))}  ${rgb(G.cyan, name)}`
+            : rgb(G.mid, name)
     // the account is the screen's, in its header; each workspace's only when every account is shown
     const tags = [
       ...(account === c.ALL_ACCOUNTS ? [clean(ws.env) || 'default'] : []),
       ...(ws.isRunning ? [] : ['stopped']),
-      ...(ws.isRunning && !isWorking && !isBackground && n.doneAt > 0 ? [`done ${c.ago(now - n.doneAt)} ago`] : []),
+      ...(ws.isRunning && n.isQuiet && n.doneAt > 0 ? [`done ${c.ago(now - n.doneAt)} ago`] : []),
     ]
     rows.push(`${head}${tags.length === 0 ? '' : `  ${rgb(G.lo, tags.join(' · '))}`}`)
     // an agent a line: what it does, and how large its context is; under it, its background work
     const agent = (tool, item) => {
       const label = rgb(isBright ? G.hi : G.lo, pad(`[${tool.toUpperCase()}]`, 8))
       if (item === undefined) return [`${label} ${rgb(G.dim, 'offline')}`]
+      const [mark, word, color] = stateLook(n, item.state)
       const state = item.state === 'working'
         ? `${rgb(G.amber, '● working')} ${rgb(G.amber, '▁▂▃▅▇▅▃▂'.slice(tick % 8, (tick % 8) + 3).padEnd(3, '▁'))}`
-        : item.state === 'background'
-          ? rgb(G.cyan, pad('◐ background', 13))
-          : rgb(isBright ? G.mid : G.lo, pad('○ idle', 13))
+        : rgb(color, pad(`${mark} ${word}`, 13))
       const context = contextShown(n, item)
       return [context === undefined ? `${label} ${state}` : `${label} ${state}  ${rgb(G.lo, 'context')} ${context}`, ...taskRows(item)]
     }
@@ -475,17 +493,23 @@ function frame(snap, now, cols, rows, tick, note = '', modal = undefined) {
     return rows
   }
   /**
-   * A workspace as a tile `w` cells wide, five rows: its name in its border, coloured by what it does (red: it needs
-   * the owner, amber: working, cyan: background work, dim: stopped) and marked at its right (⚠ ● ◐ ■, or since when it
-   * is idle); a row for each agent, what it does and its context; the relay's mode and last hand-off, and its two
-   * buttons: 📁 opens its window, » its details.
+   * A workspace as a tile `w` cells wide, five rows: its name in its border, coloured by what it does (red, blinking:
+   * the relay needs the owner; amber: working; red: an agent waits on the owner; cyan: background work; dim: stopped)
+   * and marked at its right (⚠ ● ◆ ◐ ■, or since when it is idle); a row for each agent, what it does and its context;
+   * the relay's mode and last hand-off, and its two buttons: 📁 opens its window, » its details.
    */
   const tileOf = (n, w) => {
     const blink = tick % 6 < 3
-    const edge = n.needs ? (blink ? G.red : G.hi) : n.isWorking ? G.amber : n.isBackground ? G.cyan : n.ws.isRunning ? G.lo : G.dim
+    const edge = n.needs ? (blink ? G.red : G.hi) : n.isWorking ? G.amber : n.isWaiting ? G.red : n.isBackground ? G.cyan : n.ws.isRunning ? G.lo : G.dim
     const mark = n.needs
       ? rgb(blink ? G.red : G.hi, '⚠')
-      : n.isWorking ? rgb(G.amber, '●') : n.isBackground ? rgb(G.cyan, '◐') : !n.ws.isRunning ? rgb(G.dim, '■') : n.doneAt > 0 ? rgb(G.lo, c.ago(now - n.doneAt)) : ''
+      : n.isWorking
+        ? rgb(G.amber, '●')
+        : n.isWaiting
+          ? rgb(G.red, '◆')
+          : n.isBackground
+            ? rgb(G.cyan, '◐')
+            : !n.ws.isRunning ? rgb(G.dim, '■') : !n.isQuiet ? rgb(G.mid, '◆') : n.doneAt > 0 ? rgb(G.lo, c.ago(now - n.doneAt)) : ''
     const markCells = mark === '' ? 0 : width(mark) + 2
     const name = cut(clean(n.ws.name), Math.max(1, w - 7 - markCells))
     const top = `${rgb(edge, '╭─ ')}${rgb(n.isBright ? G.hi : G.mid, bold(name))}${rgb(edge, ` ${'─'.repeat(Math.max(1, w - 6 - width(name) - markCells))}`)}${mark === '' ? '' : ` ${mark} `}${rgb(edge, '─╮')}`
@@ -499,9 +523,7 @@ function frame(snap, now, cols, rows, tick, note = '', modal = undefined) {
     }
     const agent = (tool, item) => {
       if (item === undefined) return inside(`${rgb(G.dim, '·')} ${rgb(G.dim, pad(tool, 6))} ${rgb(G.dim, 'offline')}`)
-      const [icon, word, color] = item.state === 'working'
-        ? ['●', 'working', G.amber]
-        : item.state === 'background' ? ['◐', 'background', G.cyan] : ['○', 'idle', n.isBright ? G.mid : G.lo]
+      const [icon, word, color] = stateLook(n, item.state)
       return inside(`${rgb(color, icon)} ${rgb(n.isBright ? G.hi : G.mid, pad(tool, 6))} ${rgb(color, word)}`, contextShown(n, item) ?? '')
     }
     const relayRow = () => {
@@ -554,13 +576,15 @@ function frame(snap, now, cols, rows, tick, note = '', modal = undefined) {
   const details = modal === undefined ? undefined : nodes.find(n => n.isOpenable && n.ws.key === modal)
   const overlay = n => {
     const dir = clean(n.ws.dir)
-    const content = [rgb(G.lo, HOME !== '' && dir.startsWith(`${HOME}/`) ? `~${dir.slice(HOME.length)}` : dir), '', ...nodeRows(n)]
+    // what it does first: on a small window what is cut is its folder
+    const content = [...nodeRows(n), '', rgb(G.lo, HOME !== '' && dir.startsWith(`${HOME}/`) ? `~${dir.slice(HOME.length)}` : dir)]
     const open = '[📁 open window]'
     const close = '[✕ close]'
     const buttons = `${rgb(G.hi, bold(open))}   ${rgb(G.hi, close)}`
     const bw = Math.min(inner - 2, Math.max(64, ...content.map(l => width(l) + 4)))
-    // its rows: as many as the screen holds below the header, the rest cut
-    const fits = Math.max(0, rows - 6 - 4)
+    // its rows: as many as the screen holds below the header (below the first row, on a small window), the rest cut
+    const below = rows >= 24 ? 3 : 1
+    const fits = Math.max(0, rows - 1 - below - 4)
     const body = content.slice(0, fits)
     const boxRow = s => `${rgb(G.hi, '║')} ${pad(clip(hide(s), bw - 4), bw - 4)} ${rgb(G.hi, '║')}`
     const title = cut(clean(n.ws.name), bw - 7)
@@ -572,7 +596,7 @@ function frame(snap, now, cols, rows, tick, note = '', modal = undefined) {
       rgb(G.hi, `╚${'═'.repeat(bw - 2)}╝`),
     ]
     const x = Math.floor((cols - bw) / 2)
-    const top = Math.max(3, Math.min(Math.floor((rows - box.length) / 2), rows - 1 - box.length))
+    const top = Math.max(below, Math.min(Math.floor((rows - box.length) / 2), rows - 1 - box.length))
     // behind it, everything dimmed, and a click there closes it
     for (let y = 0; y < out.length; y++) {
       const plain = strip(out[y])
@@ -801,8 +825,25 @@ if (process.argv.includes('--frame')) {
     })
   }
   process.stdin.setRawMode?.(true)
+  // a lone esc, held a moment: the start of a mouse report or key sequence read apart from its rest is joined to it;
+  // alone still after that, it closes a workspace's details
+  let heldEsc = false
+  let escTimer
   process.stdin.on('data', d => {
-    const text = d.toString()
+    const read = d.toString()
+    if (escTimer !== undefined) clearTimeout(escTimer)
+    escTimer = undefined
+    const text = heldEsc ? `\x1b${read}` : read
+    heldEsc = false
+    if (text === '\x1b') {
+      heldEsc = true
+      escTimer = setTimeout(() => {
+        heldEsc = false
+        escTimer = undefined
+        modal = undefined
+      }, 80)
+      return
+    }
     // a left click (SGR mouse: button 0, pressed) on a row that opens something
     for (const m of text.matchAll(/\x1b\[<(\d+);(\d+);(\d+)([Mm])/g)) {
       if (m[1] !== '0' || m[4] !== 'M') continue
@@ -828,8 +869,6 @@ if (process.argv.includes('--frame')) {
       nextTheme()
       process.stdout.write(bgOn() + '\x1b[2J')
     }
-    // esc alone (not the start of a mouse report or any other sequence) closes a workspace's details
-    if (keys === '\x1b') modal = undefined
     // a toolbar key typed alone, never one inside pasted text
     for (const [key, what] of [['g', 'grid'], ['e', 'events'], ['n', 'names'], ['v', 'view']]) {
       if (keys !== key) continue
@@ -882,8 +921,8 @@ if (process.argv.includes('--frame')) {
       shown = cols < 40 || rows < 8
         ? { lines: [...Array(rows)].map((_, r) => bgOn() + clip(r === 0 ? rgb(G.mid, ' window too small for ops') : '', cols) + `${ESC}49m`), targets: [] }
         : frame(seenAs(loaded.snap), Date.now(), cols, rows, tick, note, modal)
-      // details asked for a workspace no longer shown are closed
-      modal = shown.modal
+      // details asked for a workspace no longer shown are closed (a window too small to draw keeps them for later)
+      if (cols >= 40 && rows >= 8) modal = shown.modal
     } catch (error) {
       shown = { lines: [bgOn() + clip(rgb(G.red, ` cannot draw: ${hide(clean(String(error).split('\n')[0]))}`), cols) + `${ESC}49m`], targets: [] }
     }

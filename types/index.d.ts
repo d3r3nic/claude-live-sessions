@@ -34,9 +34,10 @@ export type ClaudeSession = {
 
 /**
  * Background work a Claude session started and has not seen end: a command run in the background (or moved there when
- * it ran past its time), a monitor, an agent. `what` is the call's description, cut short ('' without one).
+ * it ran past its time), a monitor, an agent. `what` is the call's description, cut short ('' without one); `endsBy`,
+ * for a monitor that is not persistent, when it expires.
  */
-export type BackgroundTask = { kind: 'shell' | 'monitor' | 'agent'; id: string; since: number; what: string }
+export type BackgroundTask = { kind: 'shell' | 'monitor' | 'agent'; id: string; since: number; what: string; endsBy?: number }
 
 /**
  * A session's context at its last request: its size in tokens, and its window when the records say; or, compacted

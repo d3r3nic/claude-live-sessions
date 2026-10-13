@@ -6,10 +6,15 @@
 #   tasks.pl SINCE FILE [SINCE FILE]...
 #     For each file: `==> FILE`, then a line for each task started at or after SINCE (ms since the epoch: when the
 #     session's process started, which ends every task it had before), oldest first:
-#       T \t KIND \t ID \t STARTED_MS \t WHAT
-#     KIND is `shell`, `monitor` or `agent`. WHAT is the call's description, its white space made single spaces, at most
-#     120 characters; '' without one. A task ends at its notification with any status but `running` (completed,
-#     failed, killed, stopped), or when TaskStop stopped it. Records of a subagent's own (sidechain) are not the session's.
+#       T \t KIND \t ID \t STARTED_MS \t ENDS_BY_MS \t WHAT
+#     KIND is `shell`, `monitor` or `agent`. ENDS_BY_MS is when a monitor that is not persistent expires (its start and
+#     its timeout), '' for the rest. WHAT is the call's description, its white space made single spaces, at most 120
+#     characters; '' without one. A task ends at its notification with any status but `running` (completed, failed,
+#     killed, stopped), a monitor too at the notice of its expiry (an event `[Monitor expired …]` or `[Monitor timed
+#     out …]`, with no status), and any when TaskStop stopped it. A notification counts only as Claude Code queues or
+#     hands it on (a string that starts with it: a queued operation's content, a queued command's prompt, a prompt's
+#     text), never as quoted in a tool's output or an agent's reply. Records of a subagent's own (sidechain) are not the
+#     session's.
 use strict;
 use warnings;
 use JSON::PP;
@@ -69,13 +74,18 @@ sub tasks {
     # (a key and value written as such, unescaped, are the record's own: inside any text they are escaped)
     next if index($line, '"isSidechain":true') >= 0;
     # a notification as Claude Code queues or hands it on, read from the line as it is (records holding them can be
-    # large, and only its tags are wanted); one an agent wrote out in its reply is not one
+    # large, and only its tags are wanted): a string value that starts with it; one an agent wrote out in its reply, or
+    # a tool's output that quotes one, is not one
     if ($isNotice && index($line, '"type":"assistant"') < 0) {
-      while ($line =~ /<task-notification>(.*?)<\/task-notification>/g) {
-        my $body = $1;
-        my ($id) = $body =~ /<task-id>([^<]+)<\/task-id>/;
-        my ($status) = $body =~ /<status>([A-Za-z_]+)<\/status>/;
-        $ended{$id} = 1 if defined $id && defined $status && $status ne 'running';
+      while ($line =~ /"(?:content|prompt|text)":"(<task-notification>(?:[^"\\]|\\.)*)"/g) {
+        my $carried = $1;
+        while ($carried =~ /<task-notification>(.*?)<\/task-notification>/g) {
+          my $body = $1;
+          my ($id) = $body =~ /<task-id>([^<]+)<\/task-id>/;
+          my ($status) = $body =~ /<status>([A-Za-z_]+)<\/status>/;
+          my $isExpired = $body =~ /<event>\[Monitor (?:expired|timed out)\b/;
+          $ended{$id} = 1 if defined $id && ((defined $status && $status ne 'running') || $isExpired);
+        }
       }
     }
     next unless $isResult;
@@ -86,19 +96,21 @@ sub tasks {
       $ended{$u->{task_id}} = 1;
       next;
     }
-    my ($kind, $id, $what);
+    my ($kind, $id, $what, $timeout);
     if (defined text($u->{backgroundTaskId})) {
       ($kind, $id) = ('shell', $u->{backgroundTaskId});
     } elsif ($u->{isAsync} && (text($u->{status}) // '') eq 'async_launched' && defined text($u->{agentId})) {
       ($kind, $id, $what) = ('agent', $u->{agentId}, said($u->{description}));
     } elsif (defined text($u->{taskId}) && exists $u->{timeoutMs}) {
       ($kind, $id) = ('monitor', $u->{taskId});
+      # one that is not persistent expires at its timeout
+      $timeout = $u->{timeoutMs} if !$u->{persistent} && defined text($u->{timeoutMs}) && $u->{timeoutMs} =~ /^\d+$/;
     } else {
       next;
     }
     my $at = ms($r->{timestamp});
     next unless defined $at && $at >= $since && !exists $task{$id};
-    $task{$id} = { kind => $kind, at => $at, what => $what, use => use_of($r) };
+    $task{$id} = { kind => $kind, at => $at, what => $what, use => use_of($r), ends => defined $timeout ? $at + $timeout : '' };
   }
   my @open = sort { $task{$a}{at} <=> $task{$b}{at} || $a cmp $b } grep { !$ended{$_} } keys %task;
   # what each still-open shell or monitor call said it does, from the call itself
@@ -123,6 +135,6 @@ sub tasks {
   for my $id (@open) {
     my $t = $task{$id};
     (my $shown = $id) =~ s/[\t\n\r]/ /g;
-    print join("\t", 'T', $t->{kind}, $shown, $t->{at}, $t->{what} // ''), "\n";
+    print join("\t", 'T', $t->{kind}, $shown, $t->{at}, $t->{ends}, $t->{what} // ''), "\n";
   }
 }

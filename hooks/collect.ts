@@ -782,21 +782,24 @@ export function parseTasks(stdout: string): Map<string, BackgroundTask[]> {
       tasks.set(line.slice(4), list)
       continue
     }
-    const [mark, kind = '', id = '', since = '', what = ''] = line.split('\t')
+    const [mark, kind = '', id = '', since = '', endsBy = '', what = ''] = line.split('\t')
     if (list === undefined || mark !== 'T' || !TASK_KINDS.has(kind) || id === '' || !/^\d+$/.test(since)) continue
-    list.push({ kind: kind as BackgroundTask['kind'], id, since: Number(since), what })
+    list.push({ kind: kind as BackgroundTask['kind'], id, since: Number(since), what, ...(/^\d+$/.test(endsBy) ? { endsBy: Number(endsBy) } : {}) })
   }
   return tasks
 }
 
+/** A monitor past its expiry this long is taken as ended, whether or not the notice of it was read. */
+export const EXPIRY_GRACE_MS = 60_000
+
 /**
- * The background work a session has going, as its registry's state allows (Claude Code's own word on it, so a task whose
- * end no record tells is never shown for long): none while it is idle, no agent while it is `shell` (a running agent
- * keeps it `busy`); all of them while it works or waits on the person.
+ * The background work a session has going, as its registry's state allows (Claude Code's own word on it): none while it
+ * is idle, no agent while it is `shell` (a running agent keeps it `busy`); all of them while it works or waits on the
+ * person; never a monitor past its expiry.
  */
-export function tasksNow(status: string, tasks: readonly BackgroundTask[]): BackgroundTask[] {
+export function tasksNow(status: string, tasks: readonly BackgroundTask[], now: number): BackgroundTask[] {
   if (status === 'idle') return []
-  return status === 'shell' ? tasks.filter(t => t.kind !== 'agent') : [...tasks]
+  return tasks.filter(t => (status !== 'shell' || t.kind !== 'agent') && (t.endsBy === undefined || now < t.endsBy + EXPIRY_GRACE_MS))
 }
 
 /**
@@ -1130,8 +1133,9 @@ export function viewOf(
   // at work (its own turn, or background work it started) always shown
   const shown = items.filter(i => o.windowMs === 0 || i.state === 'working' || i.state === 'background' || o.now - i.lastActive <= o.windowMs)
 
-  // working first, then waiting on background work, then a state that wants the person, then idle; most recent first within each
-  const rank = (i: Item) => (i.state === 'working' ? 3 : i.state === 'background' ? 2 : i.state === 'idle' ? 0 : 1)
+  // working first, then a state that wants the person, then waiting on background work, then idle; most recent first
+  // within each
+  const rank = (i: Item) => (i.state === 'working' ? 3 : i.state === 'background' ? 1 : i.state === 'idle' ? 0 : 2)
   const byActivity = (a: Item, b: Item) => rank(b) - rank(a) || b.lastActive - a.lastActive
   const lead = (list: readonly Item[]) => [...list].sort(byActivity)[0]
 

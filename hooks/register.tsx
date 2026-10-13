@@ -450,7 +450,7 @@ async function collect($: EngineInterface, home: string, now: number): Promise<S
   const busyRows = claudeRows.filter(s => s.status !== 'idle' && (s.startedAt ?? 0) > 0)
   const tasks = await tasksOf($, busyRows.map(s => ({ file: fileOf.get(`claude-${s.pid}`)!, since: s.startedAt!, status: s.status })), now)
   const tasksFor = (s: ClaudeSession) => {
-    const going = tasksNow(s.status, busyRows.includes(s) ? (tasks.get(fileOf.get(`claude-${s.pid}`)!) ?? []) : [])
+    const going = tasksNow(s.status, busyRows.includes(s) ? (tasks.get(fileOf.get(`claude-${s.pid}`)!) ?? []) : [], now)
     return going.length === 0 ? {} : { tasks: going }
   }
   const claude = claudeRows.map(s => ({ ...s, cwd: workDir(s.cwd, recentOf(`claude-${s.pid}`), known), ...contextOf(`claude-${s.pid}`), ...tasksFor(s) }))

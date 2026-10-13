@@ -4500,27 +4500,33 @@ describe('background work', () => {
   test('read from its transcript, as its registry\'s state allows; a session at background work is at work, never done', () => {
     const read = parseTasks([
       '==> /a.jsonl',
-      `T\tmonitor\tb1\t${NOW - 600_000}\tWait for CI`,
-      `T\tagent\ta2\t${NOW - 500_000}\tReview it`,
-      `T\tshell\tb3\t${NOW - 120_000}\t`,
+      `T\tmonitor\tb1\t${NOW - 600_000}\t${NOW + 1_200_000}\tWait for CI`,
+      `T\tagent\ta2\t${NOW - 500_000}\t\tReview it`,
+      `T\tshell\tb3\t${NOW - 120_000}\t\t`,
+      // a monitor whose expiry passed over a minute ago, though no notice of it was read
+      `T\tmonitor\tb5\t${NOW - 2_000_000}\t${NOW - 200_000}\tExpired watch`,
       // not one: a kind it does not know, no id, no time
-      `T\tworkflow\tw4\t${NOW}\tx`,
-      `T\tshell\t\t${NOW}\tx`,
-      'T\tshell\tb6\tsoon\tx',
+      `T\tworkflow\tw4\t${NOW}\t\tx`,
+      `T\tshell\t\t${NOW}\t\tx`,
+      'T\tshell\tb6\tsoon\t\tx',
       '==> /b.jsonl',
       '',
     ].join('\n'))
     const all = [
-      { kind: 'monitor', id: 'b1', since: NOW - 600_000, what: 'Wait for CI' },
+      { kind: 'monitor', id: 'b1', since: NOW - 600_000, what: 'Wait for CI', endsBy: NOW + 1_200_000 },
       { kind: 'agent', id: 'a2', since: NOW - 500_000, what: 'Review it' },
       { kind: 'shell', id: 'b3', since: NOW - 120_000, what: '' },
     ]
-    expect(read).toEqual(new Map<string, unknown>([['/a.jsonl', all], ['/b.jsonl', []]]))
-    // idle: none running (Claude Code's own word); `shell`: commands and monitors only (a running agent keeps it busy)
-    expect(tasksNow('idle', read.get('/a.jsonl')!)).toEqual([])
-    expect(tasksNow('shell', read.get('/a.jsonl')!).map(t => t.id)).toEqual(['b1', 'b3'])
-    expect(tasksNow('busy', read.get('/a.jsonl')!)).toEqual(all)
-    expect(tasksNow('waiting', read.get('/a.jsonl')!)).toEqual(all)
+    const expired = { kind: 'monitor' as const, id: 'b5', since: NOW - 2_000_000, what: 'Expired watch', endsBy: NOW - 200_000 }
+    expect(read).toEqual(new Map<string, unknown>([['/a.jsonl', [...all, expired]], ['/b.jsonl', []]]))
+    // idle: none running (Claude Code's own word); `shell`: commands and monitors only (a running agent keeps it busy);
+    // never a monitor past its expiry (a minute's grace)
+    expect(tasksNow('idle', read.get('/a.jsonl')!, NOW)).toEqual([])
+    expect(tasksNow('shell', read.get('/a.jsonl')!, NOW).map(t => t.id)).toEqual(['b1', 'b3'])
+    expect(tasksNow('busy', read.get('/a.jsonl')!, NOW)).toEqual(all)
+    expect(tasksNow('waiting', read.get('/a.jsonl')!, NOW)).toEqual(all)
+    expect(tasksNow('busy', [expired], NOW - 150_000).map(t => t.id)).toEqual(['b5'])
+    expect(tasksNow('busy', [expired], NOW - 140_000)).toEqual([])
     expect(claudeState(session(1, 'shell'), NOW)).toBe('background')
     const snap: Snapshot = {
       claude: [session(1, 'shell', { tasks: read.get('/a.jsonl')!.slice(0, 1) }), session(2, 'busy', { since: NOW - 5_000 }), session(3, 'idle')],
@@ -4535,10 +4541,10 @@ describe('background work', () => {
     expect(statusSummary(snap)).toBe('Claude 3 (1 working, 1 background) · Codex 0 (0 working) · /sessions')
     expect(statusSummary({ ...snap, claude: [session(3, 'idle')] })).toBe('Claude 1 (0 working) · Codex 0 (0 working) · /sessions')
     // active in the last hour only: the one at background work listed though its turn ended 3 hours ago, after the
-    // working one, its work with it; the idle one of 3 hours ago left out
-    const items = viewOf(snap, { home: HOME, now: NOW, windowMs: 3_600_000, selfId: '' }).repos.flatMap(r => r.trees.flatMap(t => t.items))
-    expect(items.map(i => [i.key, i.state])).toEqual([['claude-2', 'working'], ['claude-1', 'background']])
-    expect(items[1]!.tasks).toEqual(all.slice(0, 1))
+    // working one and one waiting on the person, its work with it; the idle one of 3 hours ago left out
+    const items = viewOf({ ...snap, claude: [...snap.claude, session(4, 'waiting', { since: NOW - 60_000 })] }, { home: HOME, now: NOW, windowMs: 3_600_000, selfId: '' }).repos.flatMap(r => r.trees.flatMap(t => t.items))
+    expect(items.map(i => [i.key, i.state])).toEqual([['claude-2', 'working'], ['claude-4', 'waiting'], ['claude-1', 'background']])
+    expect(items[2]!.tasks).toEqual(all.slice(0, 1))
     expect(items[0]!.tasks).toBeUndefined()
   })
 
@@ -4553,15 +4559,15 @@ describe('background work', () => {
     const worker = '/Users/u/.claude-work/projects/-Users-u/session-104.jsonl'
     const web = '/Users/u/.claude/projects/-Users-u-dev-web-app/session-101.jsonl'
     world.tasks[worker] = [
-      `T\tmonitor\tbmon\t${NOW - 600_000}\tWait for CI on PR 7`,
+      `T\tmonitor\tbmon\t${NOW - 600_000}\t${NOW + 1_200_000}\tWait for CI on PR 7`,
       // an agent its registry says is over (it would be busy)
-      `T\tagent\tagone\t${NOW - 500_000}\tAn agent long over`,
-      `T\tshell\tbsh1\t${NOW - 120_000}\t`,
-      `T\tshell\tbsh2\t${NOW - 60_000}\tBuild it`,
-      `T\tshell\tbsh3\t${NOW - 30_000}\tTest it`,
+      `T\tagent\tagone\t${NOW - 500_000}\t\tAn agent long over`,
+      `T\tshell\tbsh1\t${NOW - 120_000}\t\t`,
+      `T\tshell\tbsh2\t${NOW - 60_000}\t\tBuild it`,
+      `T\tshell\tbsh3\t${NOW - 30_000}\t\tTest it`,
       '',
     ].join('\n')
-    world.tasks[web] = `T\tagent\taweb\t${NOW - 180_000}\tReview the change\n`
+    world.tasks[web] = `T\tagent\taweb\t${NOW - 180_000}\t\tReview the change\n`
     await $.session.start(START)
     await $.command.run(SESSIONS)
     const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })

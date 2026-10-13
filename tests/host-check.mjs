@@ -1072,8 +1072,10 @@ except ChildProcessError: pass
 
 // tasks.pl with the real perl, on Claude Code's records: the background work a session started (a command run in the
 // background or moved there, a monitor, an agent) and no record says has ended, oldest first, each with what its call
-// said it does; ended by its notification (any status but running) or a TaskStop; never one started before its process,
-// a subagent's own, one ended only in text an agent wrote, or a key inside text; a line still being written left out
+// said it does and, for a monitor that is not persistent, when it expires; ended by its notification (any status but
+// running; a monitor's notice that it expired), handed on queued or as a prompt, or a TaskStop; never one started
+// before its process, a subagent's own, one ended only in text an agent or a tool's output wrote, or a key inside text;
+// a line still being written left out
 {
   const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'live-sessions-tasks-')))
   try {
@@ -1082,7 +1084,7 @@ except ChildProcessError: pass
     const at = s => new Date(t0 + s * 1000).toISOString()
     const call = (id, name, input, s, extra = {}) => JSON.stringify({ parentUuid: null, isSidechain: false, type: 'assistant', timestamp: at(s), message: { role: 'assistant', content: [{ type: 'tool_use', id, name, input }] }, ...extra })
     const result = (use, toolUseResult, s, extra = {}) => JSON.stringify({ parentUuid: null, isSidechain: false, type: 'user', timestamp: at(s), message: { role: 'user', content: [{ tool_use_id: use, type: 'tool_result', content: 'started' }] }, toolUseResult, ...extra })
-    const notice = (id, status, s) => JSON.stringify({ type: 'queue-operation', operation: 'enqueue', timestamp: at(s), sessionId: 'x', content: `<task-notification>\n<task-id>${id}</task-id>\n<tool-use-id>t</tool-use-id>\n${status === undefined ? '<event>build: success</event>' : `<status>${status}</status>`}\n<summary>s</summary>\n</task-notification>` })
+    const notice = (id, status, s, event = 'build: success') => JSON.stringify({ type: 'queue-operation', operation: 'enqueue', timestamp: at(s), sessionId: 'x', content: `<task-notification>\n<task-id>${id}</task-id>\n<tool-use-id>t</tool-use-id>\n${status === undefined ? `<summary>Monitor event: "w"</summary>\n<event>${event}</event>` : `<status>${status}</status>\n<summary>s</summary>`}\n</task-notification>` })
     const file = join(scratch, 'a.jsonl')
     writeFileSync(file, [
       // before its process started: never counted, though nothing ended it
@@ -1100,6 +1102,20 @@ except ChildProcessError: pass
       call('u3', 'Monitor', { command: 'y', description: 'Done watch' }, 40),
       result('u3', { taskId: 'bdone', timeoutMs: 60000, persistent: false }, 41),
       notice('bdone', 'completed', 50),
+      // monitors that expired: the notice of it is an event, with no status (Claude Code 2.1.296's wordings)
+      call('u3e', 'Monitor', { command: 'y', description: 'Expired watch' }, 42),
+      result('u3e', { taskId: 'bexp', timeoutMs: 60000, persistent: false }, 43),
+      notice('bexp', undefined, 103, '[Monitor expired after 1m with 1 event delivered. Re-arm it if you still need the watch.]'),
+      call('u3t', 'Monitor', { command: 'y', description: 'Timed watch' }, 44),
+      result('u3t', { taskId: 'btimed', timeoutMs: 60000, persistent: false }, 45),
+      notice('btimed', undefined, 105, '[Monitor timed out — re-arm if needed.]'),
+      // a persistent monitor: no expiry
+      call('u3p', 'Monitor', { command: 'y', description: 'Persistent watch', persistent: true }, 46),
+      result('u3p', { taskId: 'bpersist', timeoutMs: 3600000, persistent: true }, 47),
+      // a notification handed on as a prompt's text ends its task
+      call('u3s', 'Bash', { command: 'z', description: 'Handed on', run_in_background: true }, 48),
+      result('u3s', { stdout: '', backgroundTaskId: 'bhanded' }, 49),
+      JSON.stringify({ type: 'user', timestamp: at(55), message: { role: 'user', content: '<task-notification>\n<task-id>bhanded</task-id>\n<status>completed</status>\n</task-notification>' } }),
       // an agent, its description in its result
       call('u4', 'Agent', { description: 'Review it', prompt: 'p', run_in_background: true }, 60),
       result('u4', { isAsync: true, status: 'async_launched', agentId: 'aagent', description: 'Review it now', prompt: 'p' }, 61),
@@ -1123,6 +1139,8 @@ except ChildProcessError: pass
       JSON.stringify({ type: 'assistant', timestamp: at(240), message: { role: 'assistant', content: [{ type: 'text', text: 'Saw <task-notification><task-id>bsh1</task-id><status>completed</status></task-notification>' }] } }),
       // the key inside a tool's text output: no task
       result('u10', { stdout: '{"backgroundTaskId":"bfake"}' }, 250),
+      // a tool's output quoting a notification that would end the command (a file read, a search): it does not
+      JSON.stringify({ type: 'user', timestamp: at(252), message: { role: 'user', content: [{ tool_use_id: 'u12', type: 'tool_result', content: 'log: <task-notification>\n<task-id>bsh1</task-id>\n<status>completed</status>\n</task-notification>' }] }, toolUseResult: { stdout: '<task-notification><task-id>bsh1</task-id><status>completed</status></task-notification>' } }),
       // a line still being written
       '{"type":"user","timestamp":"' + at(260) + '","toolUseResult":{"backgroundTaskId":"bhalf"',
     ].join('\n'))
@@ -1131,10 +1149,11 @@ except ChildProcessError: pass
     const out = spawnSync('/usr/bin/perl', [pl, String(t0), file, String(t0), other, String(t0), join(scratch, 'missing.jsonl')], { encoding: 'utf8' })
     const tasks = c.parseTasks(out.stdout)
     const ms = s => t0 + s * 1000
-    check('tasks.pl: the background work still going, oldest first, said as its call said; ended by a notification or a TaskStop; never one before its process, a subagent\'s, or a key in text',
+    check('tasks.pl: the background work still going, oldest first, said as its call said, a monitor with its expiry; ended by a notification, an expiry or a TaskStop; never one before its process, a subagent\'s, quoted, or a key in text',
       out.status === 0 && JSON.stringify(tasks.get(file)) === JSON.stringify([
         { kind: 'shell', id: 'bsh1', since: ms(11), what: 'Run the CI harness' },
-        { kind: 'monitor', id: 'bmon', since: ms(21), what: 'Wait for CI on PR 8' },
+        { kind: 'monitor', id: 'bmon', since: ms(21), what: 'Wait for CI on PR 8', endsBy: ms(21) + 1800000 },
+        { kind: 'monitor', id: 'bpersist', since: ms(47), what: 'Persistent watch' },
         { kind: 'agent', id: 'aagent', since: ms(61), what: 'Review it now' },
         { kind: 'shell', id: 'bmoved', since: ms(220), what: 'Long build' },
       ]) && JSON.stringify(tasks.get(other)) === JSON.stringify([{ kind: 'shell', id: 'bq', since: ms(6), what: '' }]) && JSON.stringify(tasks.get(join(scratch, 'missing.jsonl'))) === '[]',
@@ -1516,7 +1535,20 @@ except ChildProcessError: pass
         /\|O\| ◐ BACKGROUND  ▓▒░ Ops X 要確認 ✅ é ░▒▓/.test(detailed[node]) && /\[CLAUDE\] ◐ background +context 208k/.test(detailed[node + 1]) &&
         detailed[node + 2].includes('↳ monitor  Wait for CI on PR 8 · 4m') && detailed[node + 3].includes('↳ shell · 1m') && !detailed[node].includes('done'),
         JSON.stringify(detailed.slice(node, node + 4).map(l => l.trim().slice(0, 80))))
+      // an agent waiting on the owner (a permission prompt, a dialog): said so in red, in its tile and in full, never idle
+      // or done
+      const waitingFile = join(scratch, 'compact-waiting.json')
+      writeFileSync(waitingFile, snapshot({ claude: [{ ...claudeIn, status: 'waiting', tasks: undefined }] }))
+      const waitingFull = show({ LIVE_SESSIONS_SNAPSHOT: waitingFile, ROWS: '40' }).split('\n')
       rmSync(join(prefsDir(compactHome), 'ops.json'))
+      const waitingTiles = show({ LIVE_SESSIONS_SNAPSHOT: waitingFile }).split('\n')
+      const waitingAt = waitingTiles.findIndex(l => l.includes('╭─ Ops X'))
+      const waitingNode = waitingFull.findIndex(l => l.includes('▓▒░ Ops X'))
+      check('ops: an agent waiting on the owner says so, in its tile and in full, its workspace marked; never idle or done',
+        /╭─ Ops X 要確認 ✅ é ─+ ◆ ─╮/.test(waitingTiles[waitingAt]) && /│ ◆ CLAUDE waiting +208k │/.test(waitingTiles[waitingAt + 1]) &&
+        /\|O\| ◆ WAITING  ▓▒░ Ops X/.test(waitingFull[waitingNode]) && /\[CLAUDE\] ◆ waiting +context 208k/.test(waitingFull[waitingNode + 1]) &&
+        !waitingFull[waitingNode].includes('done') && ![...waitingTiles, ...waitingFull].some(l => /CLAUDE\]? +○ idle|○ CLAUDE idle/.test(l)),
+        JSON.stringify([waitingTiles[waitingAt + 1]?.trim().slice(0, 50), waitingFull[waitingNode]?.trim().slice(0, 60), waitingFull[waitingNode + 1]?.trim().slice(0, 60)]))
       // live: a click on a tile shows its details, esc closes them; one on its 📁 opens its window; v shows each in full,
       // kept; an agent whose turn ended with background work still running is logged BG WORK, not IDLE
       const workingIn = { ...claudeIn, status: 'busy', since: now - 5_000, tasks: undefined }
