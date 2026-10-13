@@ -2,7 +2,7 @@
 
 What each version changed, newest first. Each links its pull request, which holds the details, the checks and the reviews. After updating, run `/reload-plugins` in your sessions.
 
-## 0.26.0 — 2026-10-12
+## 0.26.0 — 2026-10-12 ([#33](https://github.com/d3r3nic/claude-live-sessions/pull/33))
 - **New workspace for work already under way:** the form's **repository** field takes any path in a repository, a branch's worktree or a file in one, typed or pasted (as an editor names a file, too). Its repository becomes the project and its branch is chosen to go on with. Searching finds the branches' worktrees by their folder's name, and `New workspace here` on a branch's row goes on with that branch. A new branch for the purpose (the default) is the clean start.
 
 ## 0.25.0 — 2026-10-12 ([#32](https://github.com/d3r3nic/claude-live-sessions/pull/32))
