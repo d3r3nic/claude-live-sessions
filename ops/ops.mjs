@@ -432,13 +432,14 @@ function frame(snap, now, cols, rows, tick, note = '', modal = undefined) {
    * How an agent's state is drawn: its mark, its word and its colour. Working, background work it started, waiting on
    * the owner (red: a permission prompt or a dialog), idle; any other state the registry says (stalled) as its word.
    */
+  // an agent idle beside one at work says nothing (its mark dim, for the rows to line up): the workspace is at work
   const stateLook = (n, state) =>
     state === 'working'
       ? ['●', 'working', G.amber]
       : state === 'background'
         ? ['◐', 'background', G.cyan]
         : state === 'idle'
-          ? ['○', 'idle', n.isBright ? G.mid : G.lo]
+          ? n.isWorking ? ['○', '', G.dim] : ['○', 'idle', n.isBright ? G.mid : G.lo]
           : ['◆', clean(state).slice(0, 10), state === 'waiting' ? G.red : G.mid]
   /** A workspace in full: its name and tags, a row for each agent (and its background work), the relay, the alert. */
   const nodeRows = n => {
@@ -517,7 +518,8 @@ function frame(snap, now, cols, rows, tick, note = '', modal = undefined) {
             : !n.ws.isRunning ? rgb(G.dim, '■') : !n.isQuiet ? rgb(G.mid, '◆') : n.doneAt > 0 ? rgb(G.lo, c.ago(now - n.doneAt)) : ''
     const markCells = mark === '' ? 0 : width(mark) + 2
     const name = cut(clean(n.ws.name), Math.max(1, w - 7 - markCells))
-    const top = `${rgb(edge, '╭─ ')}${rgb(n.isBright ? G.hi : G.mid, bold(name))}${rgb(edge, ` ${'─'.repeat(Math.max(1, w - 6 - width(name) - markCells))}`)}${mark === '' ? '' : ` ${mark} `}${rgb(edge, '─╮')}`
+    // its name in amber while an agent works, as its border
+    const top = `${rgb(edge, '╭─ ')}${rgb(n.isWorking ? G.amber : n.isBright ? G.hi : G.mid, bold(name))}${rgb(edge, ` ${'─'.repeat(Math.max(1, w - 6 - width(name) - markCells))}`)}${mark === '' ? '' : ` ${mark} `}${rgb(edge, '─╮')}`
     // a row inside the border: what it says at its left, and at its right
     const room = w - 4
     const inside = (left, right = '') => {

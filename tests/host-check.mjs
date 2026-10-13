@@ -1245,8 +1245,8 @@ except ChildProcessError: pass
   const socket = `live-sessions-ops-${process.pid}`
   const t = (...args) => spawnSync('tmux', ['-L', socket, '-f', '/dev/null', ...args], { encoding: 'utf8' })
   try {
-    t('new-session', '-d', '-s', 'ws-opsx', '-n', 'peers', 'sleep 60')
-    t('split-window', '-h', '-t', '=ws-opsx:peers', 'sleep 60')
+    t('new-session', '-d', '-s', 'ws-opsx', '-n', 'peers', 'sleep 600')
+    t('split-window', '-h', '-t', '=ws-opsx:peers', 'sleep 600')
     t('set-option', '-t', 'ws-opsx', '@live-sessions-workspace', '1')
     const [left, right] = t('list-panes', '-t', '=ws-opsx:peers', '-F', '#{pane_id}').stdout.trim().split('\n')
     const now = Date.now()
@@ -1565,6 +1565,28 @@ except ChildProcessError: pass
         /╭─ Ops X 要確認 ✅ é ─+ ◐ ─╮/.test(tiles[first]) && /│ ◐ CLAUDE background +208k │/.test(tiles[first + 1]) && /│ · CODEX +offline +│/.test(tiles[first + 2]) &&
         /│ ⇄ off +\[📁\] \[■\] \[»\] │/.test(relayRow) && tiles[1].includes('BACKGROUND 1') && !tiles.some(l => /done \d/.test(l)),
         JSON.stringify(tiles.slice(first, first + 4).map(l => l.slice(0, 44))))
+      // one agent working: the other, idle, says nothing (its mark dim), and the workspace's name is amber, as its
+      // border; both working, both say so; neither, each says idle and the name is not amber
+      {
+        const lookFile = join(scratch, 'compact-look.json')
+        const claudeAs = (status, since) => ({ ...claudeIn, status, since, tasks: undefined })
+        const codexAs = updatedAt => ({ key: 'cx', title: 'T', cwd: scratch, profile: 'codex', surface: 'terminal', tty: 'ttys991', updatedAt, lastActive: updatedAt, agents: 0, context: { tokens: 20000, window: 258400 } })
+        const look = (claude, codex) => {
+          writeFileSync(lookFile, snapshot({ claude: [claude], codex: [codex] }))
+          const plain = show({ LIVE_SESSIONS_SNAPSHOT: lookFile }).split('\n')
+          const colored = show({ LIVE_SESSIONS_SNAPSHOT: lookFile }, []).split('\n')
+          const at = plain.findIndex(l => l.includes('╭─ Ops X'))
+          return { rows: plain.slice(at, at + 3), isAmber: (colored[at] ?? '').includes('\x1b[38;2;255;176;0m\x1b[1mOps X') }
+        }
+        const oneWorking = look(claudeAs('busy', now - 5_000), codexAs(now - 600_000))
+        const bothWorking = look(claudeAs('busy', now - 5_000), codexAs(now))
+        const neither = look(claudeAs('idle', now - 600_000), codexAs(now - 600_000))
+        check('ops, compact: an agent idle beside one at work says nothing; both working both say so; neither, both idle; the name amber while one works',
+          /│ ● CLAUDE working/.test(oneWorking.rows[1]) && /│ ○ CODEX +20k │/.test(oneWorking.rows[2]) && !oneWorking.rows[2].includes('idle') && oneWorking.isAmber &&
+          /│ ● CLAUDE working/.test(bothWorking.rows[1]) && /│ ● CODEX +working/.test(bothWorking.rows[2]) && bothWorking.isAmber &&
+          /│ ○ CLAUDE idle/.test(neither.rows[1]) && /│ ○ CODEX +idle/.test(neither.rows[2]) && !neither.isAmber,
+          JSON.stringify([oneWorking, bothWorking, neither].map(x => [...x.rows.slice(1).map(r => r.trim().slice(0, 40)), x.isAmber])))
+      }
       // a click on the tile's 📁 opens it, on its ■ closes it (while it runs); anywhere else on it shows its details; a
       // stopped one has no ■; a forged id is no tile to press
       const folderAt = columnOf(relayRow, '[📁]')
