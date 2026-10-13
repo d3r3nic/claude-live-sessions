@@ -365,8 +365,9 @@ export const AGENT_WINDOW_SHARE = 0.6
 /**
  * A window of agents this plugin opens (a workspace's, a session opened in the background's): 60% of the screen's free
  * part (what the menu bar and Dock leave) across and down, centred, a little smaller than the font of the window it is
- * opened from (openedFontSize), in that window's profile (its colours: never Terminal's default profile, which may be
- * another); never a profile's small default window, nor the size and font it had before.
+ * opened from (openedFontSize), in that window's profile (its colours, not Terminal's default profile, which may be
+ * another; that one when the profile is not known); never a profile's small default window, nor the size and font it
+ * had before.
  */
 export function agentPlacement(screen: Screen, fontSize: number, profile = ''): Placement {
   const width = Math.round(screen.width * AGENT_WINDOW_SHARE)

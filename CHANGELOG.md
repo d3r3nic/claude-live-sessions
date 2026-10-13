@@ -2,7 +2,7 @@
 
 What each version changed, newest first. Each links its pull request, which holds the details, the checks and the reviews. After updating, run `/reload-plugins` in your sessions.
 
-## 0.28.1 — 2026-10-13
+## 0.28.1 — 2026-10-13 ([#36](https://github.com/d3r3nic/claude-live-sessions/pull/36))
 - **Windows the plugin opens take the colours of the tab you open them from** (its Terminal profile): workspace windows, background sessions' windows and the Ops screen, and the windows the Ops screen opens. Before, they took Terminal's default profile, which on a Mac whose default is a light one put light windows (and a light strip at the Ops screen's right edge) beside dark tabs. An Ops screen already open keeps its window: close it and press `Ops screen` once.
 
 ## 0.28.0 — 2026-10-13 ([#35](https://github.com/d3r3nic/claude-live-sessions/pull/35))

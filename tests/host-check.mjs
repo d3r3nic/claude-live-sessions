@@ -421,9 +421,9 @@ except ChildProcessError: pass
   check('hide: the window-closing script closes only a lone tab back at its shell, saying where it was', JSON.stringify(cases) === JSON.stringify([['none', ''], ['none', ''], ['shared', ''], ['busy', ''], ['closed {"x":1,"y":2,"width":1300,"height":900,"fontSize":13}', 'w']]), JSON.stringify(cases))
   // the opening script, run as written against a stand-in Terminal: a placement sets the new tab's font, then
   // its window's place and size; none leaves them; a placement that fails leaves the window open all the same
-  const openWith = (arg, failBounds = false) => {
+  const openWith = (arg, failBounds = false, failProfile = false) => {
     const did = []
-    const tab = { tty: () => '/dev/ttys060', set fontSize(v) { did.push(`font ${v}`) }, set currentSettings(v) { did.push(`profile ${v.name}`) } }
+    const tab = { tty: () => '/dev/ttys060', set fontSize(v) { did.push(`font ${v}`) }, set currentSettings(v) { if (failProfile) throw new Error('no'); did.push(`profile ${v.name}`) } }
     const win = { tabs: () => [tab], set bounds(v) { if (failBounds) throw new Error('no'); did.push(`bounds ${v.x},${v.y},${v.width},${v.height}`) } }
     // Terminal's profiles: Homebrew is one; any other name is none
     const settingsSets = { byName: name => ({ name, exists: () => name === 'Homebrew' }) }
@@ -438,9 +438,11 @@ except ChildProcessError: pass
   const opens = [
     openWith(JSON.stringify({ x: 5, y: 6, width: 700, height: 500, fontSize: 11, profile: 'Homebrew' })), openWith(JSON.stringify({ x: 5, y: 6, width: 700, height: 500, fontSize: 11, profile: 'Gone' })),
     openWith(undefined), openWith(JSON.stringify({ x: 5, y: 6, width: 700, height: 500, fontSize: 0 }), true), openWith('not json'),
+    // a profile Terminal refuses: the font and place still applied
+    openWith(JSON.stringify({ x: 5, y: 6, width: 700, height: 500, fontSize: 11, profile: 'Homebrew' }), false, true),
   ]
   check('open: a placement sets the profile of the tab it is opened from (one Terminal has), then the font, then the place; none leaves them; a failing one still opens',
-    JSON.stringify(opens) === JSON.stringify(['opened: profile Homebrew; font 11; bounds 5,6,700,500; activate', 'opened: font 11; bounds 5,6,700,500; activate', 'opened: activate', 'opened: activate', 'opened: activate']), JSON.stringify(opens))
+    JSON.stringify(opens) === JSON.stringify(['opened: profile Homebrew; font 11; bounds 5,6,700,500; activate', 'opened: font 11; bounds 5,6,700,500; activate', 'opened: activate', 'opened: activate', 'opened: activate', 'opened: font 11; bounds 5,6,700,500; activate']), JSON.stringify(opens))
   // the screen script against stand-in screens: the menu bar's screen 2560×1440 at (0,0), an external 1920×1080
   // above its right half, in use; Terminal's places are from the menu bar screen's top left
   const nsScreen = (x, y, w, h, free) => ({ frame: { origin: { x, y }, size: { width: w, height: h } }, visibleFrame: { origin: { x: free.x, y: free.y }, size: { width: free.w, height: free.h } } })

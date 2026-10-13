@@ -3726,7 +3726,8 @@ describe('workspace windows open where they were', () => {
     expect([screensFrom(JSON.stringify({ screens: [], fontSize: 13 })), screensFrom('nope'), screensFrom('')]).toEqual([undefined, undefined, undefined])
     expect(screensFrom(JSON.stringify({ screens: [main] }))).toEqual({ screens: [main], fontSize: 0, profile: '' })
     // a profile that is not a name is none: not a string, too long, with control characters
-    expect([7, 'x'.repeat(101), 'a\u001b[31m'].map(profile => screensFrom(JSON.stringify({ screens: [main], profile }))?.profile)).toEqual(['', '', ''])
+    expect([7, 'x'.repeat(101), `a${String.fromCodePoint(27)}[31m`, `a${String.fromCodePoint(127)}`].map(profile => screensFrom(JSON.stringify({ screens: [main], profile }))?.profile)).toEqual(['', '', '', ''])
+    expect(screensFrom(JSON.stringify({ screens: [main], profile: 'x'.repeat(100) }))?.profile).toBe('x'.repeat(100))
     // the window opened in the profile of the tab it is opened from; none known, Terminal's own choice
     expect(agentPlacement(main, 12, 'Homebrew').profile).toBe('Homebrew')
     expect('profile' in agentPlacement(main, 12)).toBe(false)

@@ -42,10 +42,16 @@ try {
   // shell starts would be cut at 1024 bytes); the file holds the command line
   const openFile = join(WORK, 'open.sh')
   writeFileSync(openFile, `${w.openCommand(ws, HOME, { socket })}\n`)
-  // placed as the mod places it; the default profile's own font is read first, to see it is left as it was
-  const profileFont = () => spawnSync('/usr/bin/osascript', ['-l', 'JavaScript', '-e', "Application('Terminal').defaultSettings().fontSize()"], { encoding: 'utf8' }).stdout.trim()
+  // placed as the mod places it, in a profile other than the default (as the tab it is opened from may have); the
+  // default profile's own font and that profile's are read first, to see both are left as they were
+  const osa = script => spawnSync('/usr/bin/osascript', ['-l', 'JavaScript', '-e', script], { encoding: 'utf8' }).stdout.trim()
+  const profileFont = () => osa("Application('Terminal').defaultSettings().fontSize()")
+  const other = osa("const t = Application('Terminal'); t.settingsSets().map(s => s.name()).find(n => n !== t.defaultSettings().name()) || ''")
+  const otherFont = () => (other === '' ? '' : osa(`Application('Terminal').settingsSets.byName(${JSON.stringify(other)}).fontSize()`))
   const fontBefore = profileFont()
-  const place = { x: 60, y: 80, width: 1100, height: 700, fontSize: 11 }
+  const otherBefore = otherFont()
+  const where = { x: 60, y: 80, width: 1100, height: 700, fontSize: 11 }
+  const place = { ...where, ...(other === '' ? {} : { profile: other }) }
   execFileSync('/usr/bin/osascript', ['-l', 'JavaScript', '-e', c.OPEN_SCRIPT, `/bin/sh '${openFile}'`, JSON.stringify(place)])
   let running = {}
   for (let i = 0; i < 40; i++) {
@@ -57,9 +63,10 @@ try {
   const clients = w.parseClients(tmux('list-clients', '-F', w.CLIENTS_FORMAT).stdout)[session] ?? []
   check('a Terminal window is attached to it', clients.length === 1, clients.join(','))
   check('its tmux session is marked as this workspace\'s', tmux('show-options', '-t', session, '-qv', w.OWNER_OPTION).stdout.trim() === String(ws.createdAt))
-  const seen = spawnSync('/usr/bin/osascript', ['-l', 'JavaScript', '-e', `function run(a) { const t = Application('Terminal'); for (const x of t.windows()) for (const y of x.tabs()) if (y.tty() === '/dev/' + a[0]) { const b = x.bounds(); return JSON.stringify({ x: b.x, y: b.y, width: b.width, height: b.height, fontSize: y.fontSize() }) } return '' }`, clients[0] ?? 'none'], { encoding: 'utf8' }).stdout.trim()
-  check('placed: where it was asked, in the font it was asked', seen === JSON.stringify(place), seen)
-  check('placed: the Terminal profile\'s own font is left as it was', profileFont() === fontBefore && fontBefore !== '', `${fontBefore} → ${profileFont()}`)
+  const seen = spawnSync('/usr/bin/osascript', ['-l', 'JavaScript', '-e', `function run(a) { const t = Application('Terminal'); for (const x of t.windows()) for (const y of x.tabs()) if (y.tty() === '/dev/' + a[0]) { const b = x.bounds(); return JSON.stringify({ x: b.x, y: b.y, width: b.width, height: b.height, fontSize: y.fontSize(), profile: y.currentSettings().name() }) } return '' }`, clients[0] ?? 'none'], { encoding: 'utf8' }).stdout.trim()
+  const seenPlace = (() => { try { return JSON.parse(seen) } catch { return {} } })()
+  check('placed: where it was asked, in the font and profile it was asked', JSON.stringify({ ...where, profile: other || seenPlace.profile }) === seen, `${seen} (asked: ${JSON.stringify(place)})`)
+  check('placed: the default profile\'s own font and that profile\'s are left as they were', profileFont() === fontBefore && fontBefore !== '' && otherFont() === otherBefore, `${fontBefore} → ${profileFont()}; ${other}: ${otherBefore} → ${otherFont()}`)
   // Hide: the mod's own hide.sh, as a click on the bar runs it inside this tmux server (TMUX names the server)
   const hideFile = join(WORK, 'hide.sh')
   writeFileSync(hideFile, w.HIDE_SCRIPT)
@@ -72,7 +79,7 @@ try {
   check('hidden: its window closed, the terminal detached', hidden === 'closed' && stillAttached.length === 0 && tabLeft === '', `${hidden}, tab left: ${tabLeft || 'none'}`)
   const keptFile = join(WORK, 'windows', `${session}.json`)
   const keptPlace = existsSync(keptFile) ? readFileSync(keptFile, 'utf8').trim() : ''
-  check('hidden: where its window was is kept for its next opening', keptPlace === JSON.stringify(place), keptPlace)
+  check('hidden: where its window was is kept for its next opening', keptPlace === JSON.stringify(where), keptPlace)
   check('hidden: both agents keep running', /\bclaude\b/.test(after.claude ?? '') && /\bcodex\b/.test(after.codex ?? ''))
   // a window that did not close is closed here, after its client is detached
   if (tabLeft !== '') execFileSync('/usr/bin/osascript', ['-l', 'JavaScript', '-e', `function run(a) { const t = Application('Terminal'); for (const x of t.windows()) if (x.tabs().some(y => y.tty() === '/dev/' + a[0])) x.close() }`, clients[0]])
