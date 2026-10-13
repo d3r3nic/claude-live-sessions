@@ -483,23 +483,33 @@ export function parsePanes(stdout: string): Record<string, { session: string; wi
 export const isOwnPane = (ws: Pick<Workspace, 'id' | 'createdAt'>, p: { session: string; owner?: string }) =>
   p.session === tmuxName(ws) && (p.owner === undefined || p.owner === String(ws.createdAt))
 
-/** `tmux list-panes -s -t =<session> -F LEFTOVER_FORMAT`: each pane's start command, what is in front of it, its process. */
-export const LEFTOVER_FORMAT = '#{pane_pid}\t#{pane_current_command}\t#{pane_start_command}'
+/** `tmux list-panes -s -t =<session> -F PANE_STATE_FORMAT`: each pane's terminal, its process, what is in front, its start command. */
+export const PANE_STATE_FORMAT = '#{pane_tty}\t#{pane_pid}\t#{pane_current_command}\t#{pane_start_command}'
+export type PaneState = { tty: string; pid: number; command: string; start: string }
+/** The panes PANE_STATE_FORMAT lists (tty without `/dev/`; a pid that is not one, NaN). */
+export function paneStates(listed: string): PaneState[] {
+  return listed.split('\n').filter(line => line.trim() !== '').map(line => {
+    const [tty = '', pid = '', command = '', start = ''] = line.split('\t')
+    return { tty: tty.replace(/^\/dev\//, ''), pid: /^\d+$/.test(pid) ? Number(pid) : NaN, command, start }
+  })
+}
 const SHELLS = new Set(['sh', 'bash', 'zsh', 'fish', 'dash', 'ksh', 'tcsh', 'csh'])
+/** Whether a program in front of a pane is a shell (a login shell's name may start with `-`). */
+export const isShellCommand = (command: string) => SHELLS.has(command.replace(/^-/, ''))
+/** Whether nothing runs in a pane: a shell in front, and no process under it (`parents`: ps -ax -o ppid=). */
+export const isQuietPane = (p: PaneState, parents: ReadonlySet<number>) => Number.isInteger(p.pid) && !parents.has(p.pid) && isShellCommand(p.command)
 
 /**
  * Whether a tmux session under a workspace's name holds only empty shells, as
  * a session restore (tmux-resurrect, after a restart) brings one back: no
- * owner mark (`owner`), and every pane (`listed`, LEFTOVER_FORMAT) started
- * with no command, a login shell in front, and no process under it
- * (`parents`: the parent pid of each process there is). Nothing runs there,
- * so it may be ended and the workspace started again.
+ * owner mark (`owner`), and every pane (`listed`, PANE_STATE_FORMAT) started
+ * with no command, with nothing running in it (isQuietPane). Nothing runs
+ * there, so it may be ended and the workspace started again.
  */
 export function isLeftover(owner: string, listed: string, parents: ReadonlySet<number>): boolean {
   if (owner !== '') return false
-  const panes = listed.split('\n').filter(line => line.trim() !== '').map(line => line.split('\t'))
-  return panes.length > 0 && panes.every(([pid = '', command = '', start]) =>
-    /^\d+$/.test(pid) && !parents.has(Number(pid)) && SHELLS.has(command.replace(/^-/, '')) && start === '')
+  const panes = paneStates(listed)
+  return panes.length > 0 && panes.every(p => p.start === '' && isQuietPane(p, parents))
 }
 
 /** `ps -ax -o ppid=`: the processes that have a process under them. */

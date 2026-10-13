@@ -108,7 +108,9 @@ import {
   parsePanes,
   isOwnPane,
   isLeftover,
-  LEFTOVER_FORMAT,
+  isQuietPane,
+  paneStates,
+  PANE_STATE_FORMAT,
   parentsFrom,
   requestFrom,
   answerFrom,
@@ -192,7 +194,7 @@ const world = {
   placeFails: false,
   /** What `tmux list-panes -a` and `tmux list-clients` print; empty: no tmux server. */
   tmuxPanes: '',
-  /** What `tmux list-panes -s -t =<session> -F LEFTOVER_FORMAT` prints, and `ps -ax -o ppid=` (a pid a line). */
+  /** What `tmux list-panes -s -t =<session> -F PANE_STATE_FORMAT` prints, and `ps -ax -o ppid=` (a pid a line). */
   leftover: '',
   parents: '1\n',
   /** The tmux sessions ended (`kill-session -t`). */
@@ -1772,14 +1774,18 @@ describe('workspaces', () => {
     const parents = parentsFrom('    1\n  300\n\n')
     expect([...parents]).toEqual([1, 300])
     // two login shells, started with no command, nothing under them, no mark: as tmux-resurrect restores one
-    expect(isLeftover('', '5661\t-zsh\t\n5707\tzsh\t\n', parents)).toBe(true)
+    expect(isLeftover('', '/dev/ttys090\t5661\t-zsh\t\n/dev/ttys091\t5707\tzsh\t\n', parents)).toBe(true)
     // a mark, a pane started with a command, a program in front, a process under a shell, nothing listed: not
-    expect(isLeftover(String(NOW), '5661\tzsh\t\n', parents)).toBe(false)
-    expect(isLeftover('', '5661\tbash\t"/bin/sh -c \'claude\'"\n', parents)).toBe(false)
-    expect(isLeftover('', '5661\tnode\t\n', parents)).toBe(false)
-    expect(isLeftover('', '300\tzsh\t\n', parents)).toBe(false)
+    expect(isLeftover(String(NOW), '/dev/ttys090\t5661\tzsh\t\n', parents)).toBe(false)
+    expect(isLeftover('', '/dev/ttys090\t5661\tbash\t"/bin/sh -c \'claude\'"\n', parents)).toBe(false)
+    expect(isLeftover('', '/dev/ttys090\t5661\tnode\t\n', parents)).toBe(false)
+    expect(isLeftover('', '/dev/ttys090\t300\tzsh\t\n', parents)).toBe(false)
     expect(isLeftover('', '', parents)).toBe(false)
-    expect(isLeftover('', 'x\tzsh\t\n', parents)).toBe(false)
+    expect(isLeftover('', '/dev/ttys090\tx\tzsh\t\n', parents)).toBe(false)
+    // each pane's state, and whether nothing runs in it
+    expect(paneStates('/dev/ttys004\t9004\tclaude\t"/bin/sh -c x"\n\n')).toEqual([{ tty: 'ttys004', pid: 9004, command: 'claude', start: '"/bin/sh -c x"' }])
+    expect(['zsh', '-zsh', 'claude', 'node'].map(command => isQuietPane({ tty: 't', pid: 5661, command, start: 'x' }, parents))).toEqual([true, true, false, false])
+    expect(isQuietPane({ tty: 't', pid: 300, command: 'zsh', start: '' }, parents)).toBe(false)
     // each pane says its session's mark ('' for none); a line that does not say it has none to tell
     expect(parsePanes(`ws-a\tpeers\t/dev/ttys001\t%1\tclaude\t${NOW}\nws-a\tpeers\t/dev/ttys002\t%2\t\t\nold\tzsh\t/dev/ttys003\t%3\t`)).toEqual({
       ttys001: { session: 'ws-a', window: 'claude', pane: '%1', owner: String(NOW) },
@@ -1807,7 +1813,7 @@ describe('workspaces', () => {
     const { files, runs } = engine(on, machine, { termProgram: 'Apple_Terminal' })
     files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [practice] }))
     world.tmuxPanes = 'ws-practice-rbac\tpeers\t/dev/ttys090\t%9\t\t\nws-practice-rbac\tpeers\t/dev/ttys091\t%10\t\t\n'
-    world.leftover = '5661\t-zsh\t\n5707\tzsh\t\n'
+    world.leftover = '/dev/ttys090\t5661\t-zsh\t\n/dev/ttys091\t5707\tzsh\t\n'
     await $.session.start(START)
     // listed as not running: what runs under its name is not its own
     await $.command.run(SESSIONS)
@@ -1821,7 +1827,7 @@ describe('workspaces', () => {
     world.parents = '1\n300\n'
     expect(await run('open practice-rbac')).toBe('Opened ws-practice-rbac in a new Terminal window.')
     expect(world.killed).toEqual(['=ws-practice-rbac'])
-    expect(runs.find(r => r[0] === 'tmux' && r[1] === 'list-panes' && r[2] === '-s')).toEqual(['tmux', 'list-panes', '-s', '-t', '=ws-practice-rbac', '-F', LEFTOVER_FORMAT])
+    expect(runs.find(r => r[0] === 'tmux' && r[1] === 'list-panes' && r[2] === '-s')).toEqual(['tmux', 'list-panes', '-s', '-t', '=ws-practice-rbac', '-F', PANE_STATE_FORMAT])
     expect(runs.some(r => r[0] === '/bin/ps' && r[1] === '-ax' && r.includes('ppid='))).toBe(true)
   })
 
@@ -1832,6 +1838,8 @@ describe('workspaces', () => {
     world.tmuxPanes = `ws-practice-rbac\tpeers\t/dev/ttys004\t%1\tclaude\t${NOW}\nws-practice-rbac\tpeers\t/dev/ttys000\t%2\tcodex\t${NOW}\n`
     world.tmuxOwner = String(NOW)
     world.tmuxClients = 'ws-practice-rbac\t/dev/ttys001\n'
+    // its panes as tmux lists them: Claude and Codex in front of each
+    world.leftover = '/dev/ttys004\t9004\tclaude\t"/bin/sh -c x"\n/dev/ttys000\t9000\tnode\t"/bin/sh -c y"\n'
     await $.session.start(START)
     const run = async (args: string) => (await $.command.run({ ...SESSIONS, command: 'workspace', args })).text
     // Claude mid-turn: nothing closed, nothing ended
@@ -1857,31 +1865,64 @@ describe('workspaces', () => {
     expect([kept.threads.claude.id, kept.threads.codex.id]).toEqual(['session-101', HELD])
     expect(await run('close practice-rbac')).toBe('Practice RBAC is closed already; Open starts it again, going on with its conversations.')
     world.tmuxClients = ''
+    world.leftover = ''
     expect(await run('open practice-rbac')).toBe('Opened ws-practice-rbac in a new Terminal window.')
     expect(files.get(openScriptPath(HOME, 'practice-rbac'))).toContain('--resume session-101')
     expect(files.get(openScriptPath(HOME, 'practice-rbac'))).toContain(`-- ${HELD}`)
   })
 
-  test('close never ends what it could not open again: a conversation not kept for the workspace, an agent that will not exit', async ($, on) => {
-    const { files } = engine(on, machine, { termProgram: 'Apple_Terminal' })
-    // its panes run the default accounts' sessions, but it is the work environment's: neither is kept for it
+  test('close never ends what it could not open again, nor anything it cannot check', async ($, on) => {
+    const { files, runs } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    // its panes run the default accounts' sessions, but it is the work environment's
     files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [practice] }))
     world.tmuxPanes = `ws-practice-rbac\tpeers\t/dev/ttys004\t%1\tclaude\t${NOW}\nws-practice-rbac\tpeers\t/dev/ttys000\t%2\tcodex\t${NOW}\n`
     world.tmuxOwner = String(NOW)
+    world.leftover = '/dev/ttys004\t9004\tclaude\t"/bin/sh -c x"\n/dev/ttys000\t9000\tnode\t"/bin/sh -c y"\n'
     files.set('/Users/u/.claude/sessions/101.json', JSON.stringify({ ...JSON.parse(files.get('/Users/u/.claude/sessions/101.json')!), status: 'idle', statusUpdatedAt: NOW - 60_000 }))
     await $.session.start(START)
     const run = async (args: string) => (await $.command.run({ ...SESSIONS, command: 'workspace', args })).text
-    expect(await run('close practice-rbac')).toBe('Not closed: the conversation Claude runs is not kept for the workspace yet; try again in a moment.')
-    // kept, but Codex would not exit: Claude closed, the session left running for another close
+    expect(await run('close practice-rbac')).toBe('Not closed: the Claude in its pane runs under another account than the workspace\'s; close it there yourself.')
     files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, env: '' }] }))
+    // something it cannot check in a third pane (a program of the owner's, an agent just started): nothing is ended
+    world.leftover += '/dev/ttys099\t9099\tvim\t\n'
+    expect(await run('close practice-rbac')).toBe('Not closed: vim runs in one of its panes, and close cannot check it; end it there, or try again in a moment.')
+    // a shell with nothing under it is nothing to check
+    world.leftover = world.leftover.replace('\tvim\t', '\tzsh\t')
+    // which conversation Codex runs no longer certain (the rollout it holds open, read fresh, is another)
+    const before = world.lsof
+    world.whileTurnsRead = () => {}
+    world.lsof = (before ?? LSOF).replaceAll(HELD, RESUMED_A)
+    expect(await run('close practice-rbac')).toMatch(/^Not closed: which conversation Codex runs is (not known for certain yet|no longer certain); try again in a moment\.$/)
+    world.lsof = before
+    expect(world.stopped).toEqual([])
+    // Codex would not exit: Claude closed, the session left running for another close
     world.stop.ttys000 = 'stuck'
-    expect(await run('close practice-rbac')).toBe('Not closed: Codex did not exit in 20 s. Claude closed meanwhile, its conversation kept; close the workspace again once Codex can be.')
+    expect(await run('close practice-rbac')).toBe('Not closed: Codex did not close in ttys000. Claude closed meanwhile, its conversation kept; close the workspace again once Codex can be.')
     expect(world.killed).toEqual([])
     // a session not started for it is left as it is
     world.tmuxOwner = '12345'
     world.tmuxPanes = 'ws-practice-rbac\tpeers\t/dev/ttys090\t%9\t\t12345\n'
     expect(await run('close practice-rbac')).toBe('Not closed: tmux session ws-practice-rbac was not started for this workspace.')
     expect(world.killed).toEqual([])
+    void runs
+  })
+
+  test('the workspace\'s own Claude never closes it (it would close itself first), and is not offered Close', async ($, on) => {
+    const { files } = engine(on, machine, { termProgram: 'Apple_Terminal', selfId: 'session-101' })
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, env: '' }] }))
+    world.tmuxPanes = `ws-practice-rbac\tpeers\t/dev/ttys004\t%1\tclaude\t${NOW}\nws-practice-rbac\tpeers\t/dev/ttys000\t%2\tcodex\t${NOW}\n`
+    world.tmuxOwner = String(NOW)
+    world.leftover = '/dev/ttys004\t9004\tclaude\t"/bin/sh -c x"\n/dev/ttys000\t9000\tnode\t"/bin/sh -c y"\n'
+    files.set('/Users/u/.claude/sessions/101.json', JSON.stringify({ ...JSON.parse(files.get('/Users/u/.claude/sessions/101.json')!), status: 'idle', statusUpdatedAt: NOW - 60_000 }))
+    await $.session.start(START)
+    expect((await $.command.run({ ...SESSIONS, command: 'workspace', args: 'close practice-rbac' })).text)
+      .toBe('Not closed: this is the workspace\'s own Claude, which would close itself first; close it from another session or the Ops screen.')
+    expect(world.stopped).toEqual([])
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    await reveal(ui, 'ws:practice-rbac')
+    expect(await ui.find({ key: 'wsclose practice-rbac' })).toBeUndefined()
+    await ui.unmount()
   })
 
   test('Close in the pane asks for a second press, then closes it', async ($, on) => {
@@ -1889,6 +1930,7 @@ describe('workspaces', () => {
     files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, env: '' }] }))
     world.tmuxPanes = `ws-practice-rbac\tpeers\t/dev/ttys004\t%1\tclaude\t${NOW}\nws-practice-rbac\tpeers\t/dev/ttys000\t%2\tcodex\t${NOW}\n`
     world.tmuxOwner = String(NOW)
+    world.leftover = '/dev/ttys004\t9004\tclaude\t"/bin/sh -c x"\n/dev/ttys000\t9000\tnode\t"/bin/sh -c y"\n'
     files.set('/Users/u/.claude/sessions/101.json', JSON.stringify({ ...JSON.parse(files.get('/Users/u/.claude/sessions/101.json')!), status: 'idle', statusUpdatedAt: NOW - 60_000 }))
     await $.session.start(START)
     await $.command.run(SESSIONS)
@@ -1910,8 +1952,8 @@ describe('workspaces', () => {
     const { files, clock } = engine(on, machine, { termProgram: 'Apple_Terminal' })
     files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [practice] }))
     const dir = requestsDir(HOME)
-    files.set(`${dir}/abcdef0123.json`, JSON.stringify({ action: 'open', id: 'practice-rbac', at: NOW }))
     files.set(`${dir}/close00000.json`, JSON.stringify({ action: 'close', id: 'practice-rbac', at: NOW }))
+    files.set(`${dir}/abcdef0123.json`, JSON.stringify({ action: 'open', id: 'practice-rbac', at: NOW }))
     // given up on by the screen, a workspace that is gone, one that is not a request
     files.set(`${dir}/stale00000.json`, JSON.stringify({ action: 'open', id: 'practice-rbac', at: NOW - REQUEST_MAX_AGE_MS - 1 }))
     files.set(`${dir}/gone000000.json`, JSON.stringify({ action: 'open', id: 'gone', at: NOW }))
@@ -1920,8 +1962,7 @@ describe('workspaces', () => {
     await clock.advance(4_000)
     const answer = (nonce: string) => JSON.parse(files.get(`${dir}/${nonce}.done`) ?? 'null')
     expect(answer('abcdef0123')).toEqual({ text: 'Opened ws-practice-rbac in a new Terminal window.', isDone: true })
-    // (taken in turn: the window the first one opened made its session, with no agent running in it yet)
-    expect(answer('close00000')).toEqual({ text: 'Closed Practice RBAC (no agent was running in it); Open starts it again, going on with its conversations.', isDone: true })
+    expect(answer('close00000')).toEqual({ text: 'Practice RBAC is closed already; Open starts it again, going on with its conversations.', isDone: true })
     expect(answer('stale00000')).toBeNull()
     expect(answer('gone000000')).toEqual({ text: 'Not done: that workspace is gone.', isDone: false })
     expect(answer('broken0000')).toEqual({ text: 'Not done: the request could not be read.', isDone: false })

@@ -524,7 +524,7 @@ except ChildProcessError: pass
     t('send-keys', '-t', '=ws-busy:0.1', 'sleep 30 &', 'Enter')
     await new Promise(r => setTimeout(r, 1000))
     const parents = w.parentsFrom(spawnSync('/bin/ps', ['-ax', '-o', 'ppid='], { encoding: 'utf8' }).stdout)
-    const left = name => w.isLeftover(t('show-options', '-t', name, '-qv', w.OWNER_OPTION).stdout.trim(), t('list-panes', '-s', '-t', `=${name}`, '-F', w.LEFTOVER_FORMAT).stdout, parents)
+    const left = name => w.isLeftover(t('show-options', '-t', name, '-qv', w.OWNER_OPTION).stdout.trim(), t('list-panes', '-s', '-t', `=${name}`, '-F', w.PANE_STATE_FORMAT).stdout, parents)
     check('leftover: empty shells a restore brought back are told apart; shells with a process under one, and a workspace\'s own session, are not', left('ws-left') && !left('ws-busy') && !left('ws-own'), `${left('ws-left')} ${left('ws-busy')} ${left('ws-own')}`)
     const panes = Object.values(w.parsePanes(t('list-panes', '-a', '-F', w.PANES_FORMAT).stdout))
     check('leftover: each pane listed with its session\'s mark (none: \'\')', panes.some(p => p.session === 'ws-own' && p.owner === '1234') && panes.filter(p => p.session === 'ws-left').length === 2 && panes.filter(p => p.session === 'ws-left').every(p => p.owner === ''), JSON.stringify(panes.map(p => [p.session, p.owner])))
