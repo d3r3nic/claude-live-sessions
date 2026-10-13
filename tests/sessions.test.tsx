@@ -35,6 +35,7 @@ import {
   claudeState,
   statusSummary,
   parseBackground,
+  isDarkBackground,
   placeFrom,
   sortClaude,
   viewOf,
@@ -1024,6 +1025,21 @@ describe('pane', () => {
     expect(working.length).toBeGreaterThan(0)
     expect([...idle, ...working].every(b => b.props.backgroundColor === undefined)).toBe(true)
     await ui.unmount()
+  })
+
+  test('on a dark tab Claude and Codex take lighter colors, readable there', async ($, on) => {
+    // this session's tab (WEB CONSOLE, ttys004) has a dark background (#1e1e1e)
+    engine(on, machine, { termProgram: 'Apple_Terminal', selfId: 'session-101' })
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    for (let i = 0; i < 10; i++) await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(90) })
+    const texts = await ui.findAll({ type: 'Text' })
+    expect(texts.filter(t => t.text === 'codex').length).toBeGreaterThan(0)
+    expect(texts.filter(t => t.text === 'codex').every(t => t.props.color === '#6aa5ff')).toBe(true)
+    expect(texts.filter(t => t.text === 'claude').every(t => t.props.color === '#e8875f')).toBe(true)
+    await ui.unmount()
+    expect([isDarkBackground('#000000'), isDarkBackground('#1e1e1e'), isDarkBackground('#dfdbc3'), isDarkBackground('#ffffff'), isDarkBackground(undefined), isDarkBackground('black')]).toEqual([true, true, false, false, false, false])
   })
 
   test('in Terminal.app a press brings the session up: its tab to the front, a background one attached', async ($, on) => {

@@ -84,6 +84,7 @@ import {
   ago,
   claudeFromRegistry,
   claudeState,
+  isDarkBackground,
   codexProcFrom,
   codexSessions,
   codexTerminals,
@@ -174,8 +175,9 @@ const snapshot = atom({ plugin: 'live-sessions', key: 'snapshot' } as const, EMP
  * the terminal's palette makes of it, and gray text on it may not read.
  */
 const background = atom({ plugin: 'live-sessions', key: 'background' } as const, '')
-/** Each tool's own color, readable on the terminal's background. */
+/** Each tool's own color: dark enough to read on a light background, and lighter on a dark one. */
 const TOOL_COLOR = { claude: '#c15f3c', codex: '#1f5fd0' } as const
+const TOOL_COLOR_ON_DARK = { claude: '#e8875f', codex: '#6aa5ff' } as const
 /** A session's background work listed under its row: the oldest this many, then how many more. */
 const TASKS_SHOWN = 3
 
@@ -2292,6 +2294,7 @@ export const register: Register = on => {
     const now = await $.clock.now()
     const selfId = await $.session.id()
     const paint = (await read($, background)) || undefined
+    const toolColor = isDarkBackground(paint) ? TOOL_COLOR_ON_DARK : TOOL_COLOR
     // the names kept off the screens, while ABC-XYZ hides them: out of every text drawn, a row's title before it is cut
     // (as the file says now: a pane coming back into view never draws them from an older look)
     await read($, hiding)
@@ -2410,7 +2413,7 @@ export const register: Register = on => {
       const isBackground = i.state === 'background'
       const isIdle = i.state === 'idle'
       const color = isWorking ? 'warning' : isBackground ? 'suggestion' : isIdle ? undefined : 'permission'
-      const tool = TOOL_COLOR[i.tool]
+      const tool = toolColor[i.tool]
       const title = hideNames(i.tags.length > 0 ? `${i.title} (${i.tags.join(', ')})` : i.title, names)
       const target = canOpen ? i.target : undefined
       return (
@@ -2561,7 +2564,7 @@ export const register: Register = on => {
         const limit = used.accounts[a]?.limits[tool][usedIn]
         const label = `${tool === 'claude' ? 'Claude' : 'Codex'} · ${accountName(a)} · since ${clock.said(rank.since, true)}${limit === undefined ? ' · its limit not read yet' : ` · ${Math.round(limit.used)}% of the ${usedIn} limit used`}`
         return [
-          <Text key={`usage ${a} ${tool}`} color={TOOL_COLOR[tool]} wrap="truncate-end">{`  ${label}`}</Text>,
+          <Text key={`usage ${a} ${tool}`} color={toolColor[tool]} wrap="truncate-end">{`  ${label}`}</Text>,
           ...rank.rows.map(r => (
             <Box key={`usage ${a} ${tool} ${r.key}`} flexDirection="row" width={width}>
               <Box flexGrow={1} flexShrink={1} marginLeft={4}>
