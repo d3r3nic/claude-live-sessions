@@ -119,35 +119,41 @@ export const promptPath = (home: string, id: string, tool: 'claude' | 'codex') =
  * from the workspace, when there is one, and removes it so a restart never
  * sends it again; it goes after `--`, so an option taking several values
  * (Claude's --add-dir) never takes it. Codex starts without its update
- * offer, whose default answer on Enter installs a new version, and in the
- * sandbox it uses for a trusted project (workspace-write), which lets it
- * write in the worktrees folder too; its approvals stay as configured.
- * An agent with a conversation to resume (`threads`) resumes it, from the
- * folder it ran in, with the flags that keep its permissions.
+ * offer, whose default answer on Enter installs a new version. Every agent
+ * starts with its permission checks bypassed, the owner's choice for their
+ * workspaces (`BYPASS`): Claude asks before nothing, and Codex runs with no
+ * sandbox and no approvals (so it needs no --add-dir for the worktrees
+ * folder). An agent with a conversation to resume (`threads`) resumes it,
+ * from the folder it ran in, bypassed the same way, whatever mode it ran in
+ * before.
  */
 function paneScript(tool: 'claude' | 'codex', ws: Pick<Workspace, 'id' | 'env' | 'checkout' | 'threads' | 'only'>, home: string, bin?: string): string {
   // (an id from the workspaces file reaches the line only as threadFrom read it: letters, digits, dashes)
   const thread = ws.threads?.[tool]
   const addDir = ws.checkout === undefined ? '' : ` --add-dir ${shellWord(`${ws.checkout}-worktrees`)}`
   const prompt = shellWord(promptPath(home, ws.id, tool))
-  const flags = (thread?.flags ?? []).map(f => ` ${shellWord(f)}`).join('')
+  const flags = ` ${BYPASS[tool]}`
   const start = agentStart(tool, ws.env, home, bin)
   // Claude's way of working, in its system prompt (before --add-dir, which takes every value up to `--`)
   const lean = tool === 'claude' ? ` --append-system-prompt ${shellWord(leanWork(ws.only === undefined))}` : ''
   const agent =
     thread === undefined
-      ? `${start}${tool === 'codex' ? ` ${UPDATE_OFF} --sandbox workspace-write` : lean}${addDir} \${p:+--} \${p:+"$p"}`
+      ? tool === 'codex'
+        ? `${start} ${UPDATE_OFF}${flags} \${p:+--} \${p:+"$p"}`
+        : `${start}${flags}${lean}${addDir} \${p:+--} \${p:+"$p"}`
       : tool === 'claude'
         // a Claude conversation is kept under the folder it started in: resumed from there, unless a live Claude
         // session has it open (its registry entry, its process there): then it says so and leaves a shell
         ? `open=; for f in ${shellWord(`${home}/.claude${ws.env === '' ? '' : `-${ws.env}`}`)}/sessions/*.json; do grep -q '"sessionId":"${thread.id}"' "$f" 2>/dev/null && kill -0 "$(basename "$f" .json)" 2>/dev/null && open=1; done; ` +
           `if [ -n "$open" ]; then echo 'This conversation is open in another Claude session; close it there, then open the workspace again.'; ` +
           `else cd ${shellWord(thread.dir)} && ${start} --resume ${thread.id}${flags}${lean}${addDir} \${p:+--} \${p:+"$p"}; fi`
-        : `${start} resume ${UPDATE_OFF}${thread.flags?.includes('--sandbox') === true ? '' : ' --sandbox workspace-write'}${flags}${addDir} -C ${shellWord(thread.dir)} -- ${thread.id} \${p:+"$p"}`
+        : `${start} resume ${UPDATE_OFF}${flags} -C ${shellWord(thread.dir)} -- ${thread.id} \${p:+"$p"}`
   const run = `p=$(cat ${prompt} 2>/dev/null) && rm -f ${prompt}; ${agent}`
   return `/bin/sh -c ${shellWord(`${run}; exec "$SHELL" -l`)}`
 }
 const UPDATE_OFF = '-c check_for_update_on_startup=false'
+/** How every workspace agent starts, fresh or resumed: its permission checks bypassed (Claude), or its approvals and sandbox (Codex). */
+export const BYPASS = { claude: '--dangerously-skip-permissions', codex: '--dangerously-bypass-approvals-and-sandbox' } as const
 
 /** The tmux pane option that says which agent a pane is for. */
 export const AGENT_OPTION = '@live-sessions-agent'

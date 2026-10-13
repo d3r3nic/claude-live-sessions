@@ -61,7 +61,8 @@ import { afterOwner, afterStep, claudeKeep, COMPACT_FROM, cueOf, cutBytes, event
 import type { Side } from '../hooks/relay'
 import { branchOf, checkDue, checkFrom, driftRequest, isDueAfterCompaction, parseVerdict, recordFolderOf, RECORDS_SCRIPT } from '../hooks/drift'
 import { accountOfFile, applyScan, claudeCost, claudeLimits, clockSaid, codexUnits, currentLimits, EMPTY_USAGE, limitSaid, markKey, mergeLimits, offsetOf, OFFSETS_SCRIPT, parseContexts, priceOf, rankUsage, scanInput, sharedLimitsFrom, usageFrom, USAGE_FILES_SCRIPT, USAGE_KEEP_MS, wholeFiles } from '../hooks/usage'
-import { bringable, codexDir, codexFlags, CODEX_MODE_SCRIPT, CODEX_TASK_SCRIPT, codexTaskState, envOfProfile, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, threadFrom, toggled, withThreads } from '../hooks/bring'
+import { bringable, codexDir, CODEX_MODE_SCRIPT, CODEX_TASK_SCRIPT, codexTaskState, envOfProfile, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, threadFrom, toggled, withThreads } from '../hooks/bring'
+import { BYPASS } from '../hooks/workspaces'
 import {
   absoluteDir,
   agentStart,
@@ -1543,13 +1544,17 @@ describe('workspaces', () => {
     expect(cmd).not.toContain('-g')
     // its agents may work in the worktrees folder beside the checkout; Claude takes the first prompt once
     const withCheckout = openCommand({ ...practice, checkout: '/Users/u/dev/web-app' }, HOME)
-    expect(withCheckout.match(/--add-dir/g)).toHaveLength(2)
+    // Claude's alone: Codex, with no sandbox, needs no folder added
+    expect(withCheckout.match(/--add-dir/g)).toHaveLength(1)
     expect(withCheckout).toContain('/Users/u/dev/web-app-worktrees')
     expect(withCheckout).toContain('Application Support/live-sessions/prompts/practice-rbac-claude.txt')
     expect(withCheckout).toContain('Application Support/live-sessions/prompts/practice-rbac-codex.txt')
     expect(cmd).not.toContain('--add-dir')
     // Codex starts without its update offer, whose default answer on Enter installs a new version
-    expect(cmd).toContain('codex -c check_for_update_on_startup=false --sandbox workspace-write')
+    expect(cmd).toContain('codex -c check_for_update_on_startup=false --dangerously-bypass-approvals-and-sandbox')
+    // every agent starts bypassed: Claude asks before nothing, Codex runs with no approvals and no sandbox
+    expect(cmd).toContain(' claude --dangerously-skip-permissions --append-system-prompt')
+    expect(cmd).not.toMatch(/--sandbox |--ask-for-approval|--permission-mode/)
     expect(openCommand({ ...practice, env: '', dir: "/Users/u/it's" }, HOME, { attach: false })).toContain(`-c '/Users/u/it'\\''s'`)
     expect(openCommand(practice, HOME, { attach: false })).not.toContain('attach')
     // tmux would expand #{...} in -c: a literal # goes in doubled
@@ -2432,31 +2437,22 @@ describe('bringing running sessions into a workspace', () => {
     expect(bringable({ ...snap, places: {} }, { now: NOW, selfId: '' }, ['/m', '/w/feat']).map(b => b.member)).toEqual(['claude:s-7'])
   })
 
-  test('helpers: environments by profile, one session of each agent, Codex flags and folder, saved threads read safely', async () => {
+  test('helpers: environments by profile, one session of each agent, Codex\'s folder, saved threads read safely', async () => {
     expect([envOfProfile('claude', 'claude'), envOfProfile('claude', 'claude-work'), envOfProfile('codex', 'codex-work'), envOfProfile('claude', 'codex'), envOfProfile('claude', 'claude-default')])
       .toEqual(['', 'work', 'work', undefined, undefined])
     expect(toggled([], 'claude:a')).toEqual(['claude:a'])
     expect(toggled(['claude:a', 'codex:x'], 'claude:b')).toEqual(['codex:x', 'claude:b'])
     expect(toggled(['claude:a', 'codex:x'], 'codex:x')).toEqual(['claude:a'])
-    // full access stays full access; anything else writes in the workspace; approvals kept where `codex resume` takes them
-    expect(codexFlags('danger-full-access\tnever\t/x\n')).toEqual(['--sandbox', 'danger-full-access', '--ask-for-approval', 'never'])
-    expect(codexFlags('read-only\ton-request\t/x\n')).toEqual(['--sandbox', 'workspace-write', '--ask-for-approval', 'on-request'])
-    expect(codexFlags('workspace-write\tuntrusted\t/x')).toEqual(['--sandbox', 'workspace-write'])
-    expect(codexFlags('')).toEqual(['--sandbox', 'workspace-write'])
     expect([codexDir('a\tb\t/Users/u/dev/web-app\n'), codexDir('a\tb\trelative'), codexDir('a\tb\t/x\u0007y'), codexDir('')]).toEqual(['/Users/u/dev/web-app', undefined, undefined, undefined])
     // a Codex turn by its whole rollout: under way, between turns, or unknown
     expect(['"type":"task_started"\n', '"type":"task_complete"\n', '"type":"turn_aborted"', ''].map(codexTaskState)).toEqual(['busy', 'done', 'done', undefined])
-    // saved threads: ids that cannot pass for an option, flags whole as the plugin writes them
-    expect(threadFrom('claude', { id: 'session-1', dir: '/a', flags: ['--permission-mode', 'plan'], since: 5 })).toEqual({ id: 'session-1', dir: '/a', flags: ['--permission-mode', 'plan'], since: 5 })
-    expect(threadFrom('claude', { id: 'session-1', dir: '/a', flags: [] })).toEqual({ id: 'session-1', dir: '/a' })
-    for (const bad of [
-      { id: 'x;rm', dir: '/a' }, { id: '--dangerously-skip-permissions', dir: '/a' }, { id: 'x', dir: 'a' }, { id: 'x', dir: '/a\nb' },
-      { id: 'x', dir: '/a', flags: ['--dangerously-bypass-approvals-and-sandbox'] }, { id: 'x', dir: '/a', flags: ['plan'] },
-      { id: 'x', dir: '/a', flags: ['--permission-mode'] }, { id: 'x', dir: '/a', flags: 'plan' }, null, 'x',
-    ]) expect(threadFrom('claude', bad)).toBeUndefined()
-    expect(threadFrom('codex', { id: 'x', dir: '/a', flags: ['--sandbox', 'danger-full-access', '--ask-for-approval', 'never'] })?.flags).toEqual(['--sandbox', 'danger-full-access', '--ask-for-approval', 'never'])
-    for (const flags of [['never'], ['--sandbox', 'read-only'], ['--sandbox', 'workspace-write', '--ask-for-approval', 'untrusted'], ['--ask-for-approval', 'never']]) {
-      expect(threadFrom('codex', { id: 'x', dir: '/a', flags })).toBeUndefined()
+    // saved threads: ids that cannot pass for an option; the permission flags versions before 0.27 kept, any of them,
+    // let go (every agent resumes bypassed), the thread kept
+    expect(threadFrom('claude', { id: 'session-1', dir: '/a', flags: ['--permission-mode', 'plan'], since: 5 })).toEqual({ id: 'session-1', dir: '/a', since: 5 })
+    expect(threadFrom('codex', { id: 'x', dir: '/a', flags: ['--sandbox', 'danger-full-access', '--ask-for-approval', 'never'] })).toEqual({ id: 'x', dir: '/a' })
+    expect(threadFrom('claude', { id: 'x', dir: '/a', flags: 'rm -rf' })).toEqual({ id: 'x', dir: '/a' })
+    for (const bad of [{ id: 'x;rm', dir: '/a' }, { id: '--dangerously-skip-permissions', dir: '/a' }, { id: 'x', dir: 'a' }, { id: 'x', dir: '/a\nb' }, null, 'x']) {
+      expect(threadFrom('claude', bad)).toBeUndefined()
     }
     // a workspace keeps its readable threads; one it cannot read is dropped, never the workspace
     const listed = workspacesFrom({ workspaces: [{ ...practice, threads: { claude: { id: 'session-1', dir: '/a' }, codex: { id: 'x;y', dir: '/b' } } }, { ...practice, id: 'b', threads: { codex: 'nope' } }] })
@@ -2472,30 +2468,33 @@ describe('bringing running sessions into a workspace', () => {
     expect(withThreads(list, 'a', {}).map(w => w.threads)).toEqual([undefined, { claude: t('c2') }, undefined])
   })
 
-  test('a pane started with a conversation resumes it, from where it ran, with its flags, unless Claude has it open elsewhere', async () => {
+  test('a pane started with a conversation resumes it, from where it ran, bypassed (whatever mode it ran in), unless Claude has it open elsewhere', async () => {
     // a fragment of a pane's script as the command line holds it: quoted once in the pane's script, once more in tmux's command
     const nested = (fragment: string) => fragment.replace(/'/g, `'\\''`).replace(/'/g, `'\\''`)
     const ws = {
       ...practice, env: '', checkout: '/Users/u/dev/web-app',
       threads: {
-        claude: { id: 'session-101', dir: '/Users/u/dev/web-app/src', flags: ['--permission-mode', 'plan'] },
-        codex: { id: RESUMED_A, dir: '/Users/u/dev/web-app', flags: ['--sandbox', 'danger-full-access', '--ask-for-approval', 'never'] },
+        claude: { id: 'session-101', dir: '/Users/u/dev/web-app/src' },
+        codex: { id: RESUMED_A, dir: '/Users/u/dev/web-app' },
       },
     }
     const line = openCommand(ws, HOME)
     expect(line).toContain(nested(`open=; for f in '/Users/u/.claude'/sessions/*.json; do grep -q '"sessionId":"session-101"' "$f" 2>/dev/null && kill -0 "$(basename "$f" .json)" 2>/dev/null && open=1; done; `))
     expect(line).toContain(nested(`if [ -n "$open" ]; then echo 'This conversation is open in another Claude session; close it there, then open the workspace again.'; else cd '/Users/u/dev/web-app/src' && env `))
-    expect(line).toContain(nested(` claude --resume session-101 '--permission-mode' 'plan' --append-system-prompt '${leanWork(true)}' --add-dir '/Users/u/dev/web-app-worktrees' \${p:+--} \${p:+"$p"}; fi; exec`))
-    expect(line).toContain(nested(` codex resume -c check_for_update_on_startup=false '--sandbox' 'danger-full-access' '--ask-for-approval' 'never' --add-dir '/Users/u/dev/web-app-worktrees' -C '/Users/u/dev/web-app' -- ${RESUMED_A} \${p:+"$p"}; exec`))
+    expect(line).toContain(nested(` claude --resume session-101 --dangerously-skip-permissions --append-system-prompt '${leanWork(true)}' --add-dir '/Users/u/dev/web-app-worktrees' \${p:+--} \${p:+"$p"}; fi; exec`))
+    // Codex with no sandbox needs no folder added
+    expect(line).toContain(nested(` codex resume -c check_for_update_on_startup=false --dangerously-bypass-approvals-and-sandbox -C '/Users/u/dev/web-app' -- ${RESUMED_A} \${p:+"$p"}; exec`))
+    expect(line).not.toMatch(/--sandbox|--ask-for-approval|--permission-mode/)
     // a named environment's Claude registry
     expect(openCommand({ ...ws, env: 'work' }, HOME)).toContain(nested(`for f in '/Users/u/.claude-work'/sessions/*.json;`))
-    // no sandbox kept: the workspace's own; an agent with no conversation starts new
+    // an agent with no conversation starts new, bypassed too
     const plain = openCommand({ ...ws, threads: { codex: { id: RESUMED_A, dir: '/Users/u/dev/web-app' } } }, HOME)
-    expect(plain).toContain(nested(` codex resume -c check_for_update_on_startup=false --sandbox workspace-write --add-dir '/Users/u/dev/web-app-worktrees' -C '/Users/u/dev/web-app' -- ${RESUMED_A} `))
-    expect(plain).toContain(nested(` claude --append-system-prompt '${leanWork(true)}' --add-dir '/Users/u/dev/web-app-worktrees' \${p:+--}`))
+    expect(plain).toContain(nested(` codex resume -c check_for_update_on_startup=false --dangerously-bypass-approvals-and-sandbox -C '/Users/u/dev/web-app' -- ${RESUMED_A} `))
+    expect(plain).toContain(nested(` claude --dangerously-skip-permissions --append-system-prompt '${leanWork(true)}' --add-dir '/Users/u/dev/web-app-worktrees' \${p:+--}`))
+    expect(BYPASS).toEqual({ claude: '--dangerously-skip-permissions', codex: '--dangerously-bypass-approvals-and-sandbox' })
     // Codex has it in its first prompt, never as a flag; a Claude alone has it without the hand-overs
     expect(line.match(/--append-system-prompt/g)).toHaveLength(1)
-    expect(openCommand({ ...ws, threads: undefined, only: 'claude' }, HOME)).toContain(nested(` claude --append-system-prompt '${leanWork(false)}' --add-dir`))
+    expect(openCommand({ ...ws, threads: undefined, only: 'claude' }, HOME)).toContain(nested(` claude --dangerously-skip-permissions --append-system-prompt '${leanWork(false)}' --add-dir`))
   })
 
   test('how the agents work: fewer, fuller requests and less output, never fewer checks; a pair hands over at milestones', async () => {
@@ -2528,17 +2527,17 @@ describe('bringing running sessions into a workspace', () => {
   })
 
   test('the conversations a workspace\'s panes run are kept: an interactive Claude or a Codex known for certain, of its environment', async () => {
-    const ws = { id: 'practice-rbac', env: '', threads: { claude: { id: 'session-1', dir: '/a', flags: ['--permission-mode', 'plan'], since: 7 } } }
+    const ws = { id: 'practice-rbac', env: '', threads: { claude: { id: 'session-1', dir: '/a', since: 7 } } }
     const panes = { ttys004: { session: 'ws-practice-rbac', window: 'claude', pane: '%1' }, ttys045: { session: 'ws-practice-rbac', window: 'codex', pane: '%2' }, ttys009: { session: 'other', window: 'claude', pane: '%3' } }
     const claudeRow = (fields: Partial<ClaudeSession>): ClaudeSession => ({ pid: 1, sessionId: 'session-1', jobId: '', name: 'x', cwd: '/a', startCwd: '/a', status: 'idle', kind: 'interactive', profile: 'claude', tty: 'ttys004', isForeground: true, since: NOW, ...fields })
     const codexRow = (fields: Partial<CodexSession>): CodexSession => ({ key: RESUMED_A, title: 't', cwd: '/b', profile: 'codex', surface: 'terminal', tty: 'ttys045', updatedAt: NOW, lastActive: NOW, agents: 0, pid: 207, match: 'held', ...fields })
     const snap = (claude: ClaudeSession[], codex: CodexSession[]) => ({ tmux: { panes, clients: {} }, claude, codex })
-    // the same Claude conversation keeps its flags and when it joined; Codex's is learnt; another tmux session's pane is not this one's
+    // the same Claude conversation keeps when it joined; Codex's is learnt; another tmux session's pane is not this one's
     expect(seenThreads([ws], snap([claudeRow({}), claudeRow({ tty: 'ttys009', sessionId: 'session-9' })], [codexRow({})])))
       .toEqual(new Map([['practice-rbac', { claude: ws.threads.claude, codex: { id: RESUMED_A, dir: '/b' } }]]))
     // nothing new: nothing to write
     expect(seenThreads([{ ...ws, threads: { ...ws.threads, codex: { id: RESUMED_A, dir: '/b' } } }], snap([claudeRow({})], [codexRow({})])).size).toBe(0)
-    // another conversation in its pane (/clear, or a new claude run there): kept without the old one's flags or join time
+    // another conversation in its pane (/clear, or a new claude run there): kept without the old one's join time
     expect(seenThreads([ws], snap([claudeRow({ sessionId: 'session-2' })], [])).get('practice-rbac')).toEqual({ claude: { id: 'session-2', dir: '/a' } })
     // an exec run in Codex's pane is never its conversation
     expect(seenThreads([ws], snap([], [codexRow({ isExec: true })])).size).toBe(0)
@@ -2619,16 +2618,17 @@ describe('bringing running sessions into a workspace', () => {
     // the conversation goes on in the new workspace alone: the old one no longer keeps it
     expect(old.threads).toEqual({ codex: { id: 'x-old', dir: '/a' } })
     expect(saved.threads).toEqual({
-      claude: { id: 'session-101', dir: '/Users/u/dev/web-app', flags: ['--dangerously-skip-permissions'], since: saved.createdAt },
-      codex: { id: HELD, dir: '/Users/u/dev/web-app', flags: ['--sandbox', 'workspace-write', '--ask-for-approval', 'on-request'], since: saved.createdAt },
+      claude: { id: 'session-101', dir: '/Users/u/dev/web-app', since: saved.createdAt },
+      codex: { id: HELD, dir: '/Users/u/dev/web-app', since: saved.createdAt },
     })
     expect(files.get(promptPath(HOME, 'console', 'claude'))).toBe(joinPrompt(saved, 'claude'))
     expect(files.get(promptPath(HOME, 'console', 'codex'))).toBe(joinPrompt(saved, 'codex'))
     expect(files.get(openScriptPath(HOME, 'console'))).toBe(`${openCommand(saved, HOME)}\n`)
-    // every check ran before anything was closed, and each was checked again just before its own close
+    // every check ran before anything was closed, and each was checked again just before its own close; Claude's
+    // permission mode is no longer read (it resumes bypassed), Codex's folder is
     const order = runs.filter(r => r[2] === MODE_SCRIPT || r[2] === CODEX_MODE_SCRIPT || r[2] === CODEX_TASK_SCRIPT || r[2] === STOP_SCRIPT)
-      .map(r => (r[2] === STOP_SCRIPT ? 'stop' : r[2] === CODEX_TASK_SCRIPT ? 'turn' : 'mode'))
-    expect(order).toEqual(['mode', 'turn', 'mode', 'stop', 'turn', 'stop'])
+      .map(r => (r[2] === STOP_SCRIPT ? 'stop' : r[2] === CODEX_TASK_SCRIPT ? 'turn' : r[2] === MODE_SCRIPT ? 'mode' : 'folder'))
+    expect(order).toEqual(['turn', 'folder', 'stop', 'turn', 'stop'])
     await ui.unmount()
   })
 
@@ -2678,7 +2678,7 @@ describe('bringing running sessions into a workspace', () => {
     await ui.press({ key: 'form:create' })
     expect(world.stopped).toEqual([])
     const saved = JSON.parse(files.get(WORKSPACES)!).workspaces[0]
-    expect(saved.threads).toEqual({ codex: { id: RESUMED_A, dir: '/Users/u/dev/web-app', flags: ['--sandbox', 'workspace-write', '--ask-for-approval', 'on-request'], since: saved.createdAt } })
+    expect(saved.threads).toEqual({ codex: { id: RESUMED_A, dir: '/Users/u/dev/web-app', since: saved.createdAt } })
     await ui.unmount()
   })
 
@@ -3498,7 +3498,7 @@ describe('a workspace of one agent', () => {
     const codex = openCommand({ ...practice, checkout: '/Users/u/dev/web-app', only: 'codex' }, HOME)
     const firstPane = codex.slice(codex.indexOf('-n peers '), codex.indexOf('\\; set-option -p @live-sessions-agent'))
     expect(firstPane).toContain('practice-rbac-codex.txt')
-    expect(firstPane).toContain('codex -c check_for_update_on_startup=false --sandbox workspace-write')
+    expect(firstPane).toContain('codex -c check_for_update_on_startup=false --dangerously-bypass-approvals-and-sandbox')
     expect(codex).toContain("\\; set-option -p @live-sessions-agent codex \\; set-option -t 'ws-practice-rbac' @live-sessions-workspace")
     expect(codex).not.toContain('split-window')
     expect(codex).not.toContain('practice-rbac-claude.txt')

@@ -9,7 +9,7 @@ import type { RelayEvent, Side, Step } from './relay'
 import { branchOf, checkDue, DRIFT_EVERY, driftRequest, isDueAfterCompaction, parseVerdict, recordFolderOf, RECORDS_SCRIPT } from './drift'
 import { hiddenNames, hideInTree, hideNames, hidingFrom, namesPath, namesProblem, NO_HIDING, turned } from './names'
 import type { Hiding } from './names'
-import { bringable, codexDir, envOfProfile, codexFlags, CODEX_MODE_SCRIPT, CODEX_TASK_SCRIPT, codexTaskState, JOB_COMMANDS, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, toggled, withThreads } from './bring'
+import { bringable, codexDir, envOfProfile, CODEX_MODE_SCRIPT, CODEX_TASK_SCRIPT, codexTaskState, JOB_COMMANDS, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, toggled, withThreads } from './bring'
 import {
   agentsOf,
   CHECKOUT_SCRIPT,
@@ -1181,8 +1181,8 @@ type Bring = { tool: 'claude' | 'codex'; label: string; runs?: { tty: string; pi
  * The sessions to bring into a new workspace, each checked as it runs now:
  * one of each agent at most, of the workspace's repository, in a terminal,
  * between turns, under the workspace's environment, and (Codex) its
- * conversation known for certain; with the conversation it resumes there and
- * the flags that keep its permissions.
+ * conversation known for certain; with the conversation it resumes there
+ * (bypassed, as every workspace agent).
  */
 async function checkBring($: EngineInterface, home: string, snap: Snapshot, members: readonly string[], env: string, dir: string | readonly string[]): Promise<{ bring: Bring[] } | { error: string }> {
   const bring: Bring[] = []
@@ -1200,10 +1200,8 @@ async function checkBring($: EngineInterface, home: string, snap: Snapshot, memb
       const s = snap.claude.find(c => c.sessionId === id)!
       const live = await liveClaude($, home, s.pid, s.profile, id)
       if (typeof live === 'string') return { error: `${offer.label} ${live}` }
-      const mode = await $.process.run(['/bin/sh', '-c', MODE_SCRIPT, 'sh', transcriptPath(`${home}/.${s.profile}`, live.startCwd, id)], { timeoutMs: 10_000 })
-      const flags = modeFlags(mode.stdout)
-      if (flags === undefined) return { error: `${offer.label}'s permission mode is not one this knows` }
-      bring.push({ tool, label: offer.label, runs: { tty: live.tty, pid: s.pid }, profile: s.profile, thread: { id, dir: live.startCwd, ...(flags.length > 0 ? { flags } : {}) } })
+      // (it goes on bypassed, as every workspace agent: the mode it ran in is not kept)
+      bring.push({ tool, label: offer.label, runs: { tty: live.tty, pid: s.pid }, profile: s.profile, thread: { id, dir: live.startCwd } })
     } else {
       const s = snap.codex.find(c => c.key === id && (offer.isClosed === true ? c.surface === 'cli' : c.surface === 'terminal'))!
       const codexHome = `${home}/.${s.profile}`
@@ -1222,7 +1220,7 @@ async function checkBring($: EngineInterface, home: string, snap: Snapshot, memb
       const mode = (await $.process.run(['/bin/sh', '-c', CODEX_MODE_SCRIPT, 'sh', rollout], { timeoutMs: 10_000 })).stdout
       const folder = codexDir(mode) ?? s.cwd
       if (!folder.startsWith('/')) return { error: `${offer.label}'s folder is not known` }
-      bring.push({ tool, label: offer.label, ...(offer.isClosed === true ? {} : { runs: { tty: s.tty, pid: s.pid! } }), profile: s.profile, rollout, thread: { id, dir: folder, flags: codexFlags(mode) } })
+      bring.push({ tool, label: offer.label, ...(offer.isClosed === true ? {} : { runs: { tty: s.tty, pid: s.pid! } }), profile: s.profile, rollout, thread: { id, dir: folder } })
     }
   }
   return { bring }

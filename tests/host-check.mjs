@@ -270,8 +270,8 @@ if (process.argv.includes('--slow')) {
     check('workspace: Claude under its environment\'s config directory', file('claude.env').includes(`CLAUDE_CONFIG_DIR=${fakeHome}/.claude-checkenv`))
     check('workspace: Codex under its environment\'s home', file('codex.env').includes(`CODEX_HOME=${fakeHome}/.codex-checkenv`))
     check('workspace: no Claude Code session markers reach the agents', !/^(CLAUDECODE|CLAUDE_CODE_CHILD_SESSION)=/m.test(file('claude.env') + file('codex.env')))
-    check('workspace: both may work in the worktrees folder; Codex without its update offer, in workspace-write', file('codex.args') === '-c\ncheck_for_update_on_startup=false\n--sandbox\nworkspace-write\n--add-dir\n/x/app-worktrees\n--\nSay you are ready.\n', JSON.stringify(file('codex.args')))
-    check('workspace: Claude takes how to work as one argument, and the first prompt as it is, as one argument after --, running nothing in it', file('claude.args') === `--append-system-prompt\n${w.leanWork(true)}\n--add-dir\n/x/app-worktrees\n--\n${prompt}\n` && !existsSync(`${scratch}/RAN`), JSON.stringify(file('claude.args').slice(0, 60)))
+    check('workspace: Codex without its update offer, with no approvals and no sandbox (so no folder to add)', file('codex.args') === '-c\ncheck_for_update_on_startup=false\n--dangerously-bypass-approvals-and-sandbox\n--\nSay you are ready.\n', JSON.stringify(file('codex.args')))
+    check('workspace: Claude bypassed, may work in the worktrees folder, takes how to work as one argument, and the first prompt as it is, as one argument after --, running nothing in it', file('claude.args') === `--dangerously-skip-permissions\n--append-system-prompt\n${w.leanWork(true)}\n--add-dir\n/x/app-worktrees\n--\n${prompt}\n` && !existsSync(`${scratch}/RAN`), JSON.stringify(file('claude.args').slice(0, 60)))
     check('workspace: each first prompt is taken once', !existsSync(w.promptPath(fakeHome, 'check', 'claude')) && !existsSync(w.promptPath(fakeHome, 'check', 'codex')))
     check('workspace: marked as started for this workspace', spawnSync('tmux', ['-L', socket, '-f', '/dev/null', 'show-options', '-t', 'ws-check', '-qv', w.OWNER_OPTION], { encoding: 'utf8' }).stdout.trim() === '1234')
     // used by hand: the mouse on in this session, and each side's border naming its agent
@@ -472,7 +472,7 @@ except ChildProcessError: pass
     for (let i = 0; i < 30 && !(existsSync(`${scratch}/d-claude.args`) && existsSync(`${scratch}/d-codex.args`)); i++) await new Promise(r => setTimeout(r, 200))
     check('workspace: a default one runs under no other account, whatever the tmux server holds', !/^(CLAUDE_CONFIG_DIR|CODEX_HOME)=/m.test(file('d-claude.env') + file('d-codex.env')) && file('d-claude.env') !== '')
     check('workspace: a folder with # in its name is the folder it starts in', file('d-claude.pwd').trim().endsWith('C#{session_name}'), file('d-claude.pwd').trim().split('/').pop())
-    check('workspace: no checkout, no first prompt: nothing more on the command line than how Claude works', file('d-claude.args') === `--append-system-prompt\n${w.leanWork(true)}\n` && file('d-codex.args') === '-c\ncheck_for_update_on_startup=false\n--sandbox\nworkspace-write\n')
+    check('workspace: no checkout, no first prompt: nothing more on the command line than bypassed and how Claude works', file('d-claude.args') === `--dangerously-skip-permissions\n--append-system-prompt\n${w.leanWork(true)}\n` && file('d-codex.args') === '-c\ncheck_for_update_on_startup=false\n--dangerously-bypass-approvals-and-sandbox\n')
     // opened again while it runs: nothing new is created
     spawnSync(process.env.SHELL ?? '/bin/zsh', ['-c', line], { encoding: 'utf8' })
     const again = Object.values(w.parsePanes(spawnSync('tmux', ['-L', socket, '-f', '/dev/null', 'list-panes', '-a', '-F', w.PANES_FORMAT], { encoding: 'utf8' }).stdout)).length
@@ -489,7 +489,7 @@ except ChildProcessError: pass
     await new Promise(r => setTimeout(r, 500))
     const said = spawnSync('tmux', ['-L', socket, '-f', '/dev/null', 'capture-pane', '-p', '-J', '-t', '=ws-check-3:peers.0'], { encoding: 'utf8' }).stdout
     check('workspace: Claude\'s conversation open in a live session is not resumed again; it says so', !existsSync(`${scratch}/3-claude.args`) && said.includes('This conversation is open in another Claude session'), said.trim().split('\n')[0])
-    check('workspace: a conversation no live session has is resumed, from where it started', file('4-claude.args').startsWith('--resume\nfree-conv\n') && file('4-claude.pwd').trim().endsWith('C#{session_name}'), file('4-claude.args').split('\n').slice(0, 2).join(' '))
+    check('workspace: a conversation no live session has is resumed, from where it started, bypassed', file('4-claude.args').startsWith('--resume\nfree-conv\n--dangerously-skip-permissions\n') && file('4-claude.pwd').trim().endsWith('C#{session_name}'), file('4-claude.args').split('\n').slice(0, 3).join(' '))
   } finally {
     // a check that throws still ends the private server
     spawnSync('tmux', ['-L', socket, '-f', '/dev/null', 'kill-server'])
@@ -934,7 +934,7 @@ except ChildProcessError: pass
     const none = spawnSync('/bin/sh', ['-c', b.ROLLOUT_SCRIPT, 'sh', join(scratch, 'codex-home'), 'not-there'], { encoding: 'utf8' }).stdout.trim()
     check('bring: Codex\'s rollout found by its conversation\'s id; none for another', found === rollout && none === '', found)
     const mode = spawnSync('/bin/sh', ['-c', b.CODEX_MODE_SCRIPT, 'sh', rollout], { encoding: 'utf8' }).stdout
-    check('bring: how Codex last ran, from its own last turn_context', JSON.stringify(b.codexFlags(mode)) === JSON.stringify(['--sandbox', 'danger-full-access', '--ask-for-approval', 'on-request']) && b.codexDir(mode) === '/Users/u/dev/web-app', JSON.stringify(mode))
+    check('bring: where Codex last ran, from its own last turn_context', b.codexDir(mode) === '/Users/u/dev/web-app', JSON.stringify(mode))
   } finally {
     // a check that throws still ends the private server
     tmux('kill-server')

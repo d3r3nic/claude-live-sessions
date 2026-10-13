@@ -134,43 +134,17 @@ export function codexDir(stdout: string): string | undefined {
   return dir.startsWith('/') && !/[\u0000-\u001f\u007f]/.test(dir) ? dir : undefined
 }
 
-/** The approval policies `codex resume --ask-for-approval` takes (0.160). */
-const APPROVALS = new Set(['on-request', 'never'])
-const SANDBOXES = new Set(['workspace-write', 'danger-full-access'])
-/** The modes `claude --permission-mode` takes, as a session records them. */
-const MODES = new Set(['acceptEdits', 'auto', 'manual', 'dontAsk', 'plan'])
-
 /**
- * The flags that resume a Codex conversation as it ran, from
- * CODEX_MODE_SCRIPT's answer: full access stays full access; any other
- * sandbox writes in the workspace (`workspace-write`, as a new workspace's
- * Codex does, which its worktrees folder needs); its approval policy, when
- * it is one Codex takes.
+ * A thread as saved, if it is one: a hand-edited or later one is dropped, never run. The permission flags versions
+ * before 0.27 kept with it are let go: every workspace agent now resumes bypassed (workspaces.ts BYPASS).
  */
-export function codexFlags(stdout: string): string[] {
-  const [sandbox = '', approval = ''] = stdout.trim().split('\t')
-  return [
-    '--sandbox', sandbox === 'danger-full-access' ? 'danger-full-access' : 'workspace-write',
-    ...(APPROVALS.has(approval) ? ['--ask-for-approval', approval] : []),
-  ]
-}
-
-/** Flags as the plugin writes them, whole: Claude's permission mode; Codex's sandbox, then its approvals. */
-function isFlags(tool: Tool, f: readonly unknown[]): boolean {
-  if (tool === 'claude') {
-    return f.length === 0 || (f.length === 1 && f[0] === '--dangerously-skip-permissions') || (f.length === 2 && f[0] === '--permission-mode' && MODES.has(String(f[1])))
-  }
-  return f[0] === '--sandbox' && SANDBOXES.has(String(f[1])) && (f.length === 2 || (f.length === 4 && f[2] === '--ask-for-approval' && APPROVALS.has(String(f[3]))))
-}
-
-/** A thread as saved, if it is one: a hand-edited or later one is dropped, never run. */
 export function threadFrom(tool: Tool, raw: unknown): Thread | undefined {
+  void tool
   const o = raw as Partial<Thread> | null
   if (typeof o !== 'object' || o === null || typeof o.id !== 'string' || !SAFE_ID.test(o.id) || typeof o.dir !== 'string' || !o.dir.startsWith('/')) return undefined
   if (/[\u0000-\u001f\u007f]/.test(o.dir)) return undefined
-  if (o.flags !== undefined && !(Array.isArray(o.flags) && o.flags.every(f => typeof f === 'string') && isFlags(tool, o.flags))) return undefined
   const since = typeof o.since === 'number' && Number.isFinite(o.since) ? o.since : undefined
-  return { id: o.id, dir: o.dir, ...(o.flags === undefined || o.flags.length === 0 ? {} : { flags: [...o.flags] }), ...(since === undefined ? {} : { since }) }
+  return { id: o.id, dir: o.dir, ...(since === undefined ? {} : { since }) }
 }
 
 /**
@@ -251,11 +225,11 @@ export function seenThreads(
       let seen: Thread | undefined
       if (tool === 'claude') {
         const s = snap.claude.find(c => c.tty === tty && c.kind === 'interactive' && SAFE_ID.test(c.sessionId) && c.startCwd.startsWith('/') && envOfProfile('claude', c.profile) === ws.env)
-        // its flags and when it joined go with the same conversation only: one started anew in the pane has its own
-        seen = s === undefined ? undefined : { id: s.sessionId, dir: s.startCwd, ...(kept?.id === s.sessionId && kept.flags !== undefined ? { flags: kept.flags } : {}), ...(kept?.id === s.sessionId && kept.since !== undefined ? { since: kept.since } : {}) }
+        // when it joined goes with the same conversation only: one started anew in the pane has its own
+        seen = s === undefined ? undefined : { id: s.sessionId, dir: s.startCwd, ...(kept?.id === s.sessionId && kept.since !== undefined ? { since: kept.since } : {}) }
       } else {
         const s = snap.codex.find(c => c.tty === tty && isKnownCodex(snap, c) && envOfProfile('codex', c.profile) === ws.env)
-        seen = s === undefined ? undefined : { id: s.key, dir: s.cwd, ...(kept?.id === s.key && kept.flags !== undefined ? { flags: kept.flags } : {}), ...(kept?.id === s.key && kept.since !== undefined ? { since: kept.since } : {}) }
+        seen = s === undefined ? undefined : { id: s.key, dir: s.cwd, ...(kept?.id === s.key && kept.since !== undefined ? { since: kept.since } : {}) }
       }
       if (seen === undefined || (kept?.id === seen.id && kept.dir === seen.dir)) continue
       now[tool] = seen

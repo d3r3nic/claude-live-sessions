@@ -133,10 +133,10 @@ export type Workspace = {
 }
 
 /**
- * A conversation to resume: its id, the folder it runs from, the flags that keep its permissions, and, for one
- * brought in from where it ran, when it joined the workspace (the relay types into it only after a turn since).
+ * A conversation to resume: its id, the folder it runs from, and, for one brought in from where it ran, when it joined
+ * the workspace (the relay types into it only after a turn since). It resumes bypassed, as every workspace agent.
  */
-export type Thread = { id: string; dir: string; flags?: string[]; since?: number }
+export type Thread = { id: string; dir: string; since?: number }
 
 export type Relay = {
   mode: 'auto' | 'notify' | 'off'
