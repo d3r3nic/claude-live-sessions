@@ -214,6 +214,8 @@ const world = {
   tmuxOwner: '',
   /** OPEN_SCRIPT fails (Terminal automation not allowed). */
   openFails: false,
+  /** Done as OPEN_SCRIPT opens a window (a session beginning a turn meanwhile). */
+  onOpen: () => {},
   /** A file that turns unreadable right after it is read once (another writer). */
   spoilsAfterRead: '',
   /** A file that is there but cannot be read (too large, no permission). */
@@ -300,6 +302,7 @@ const resetWorld = () => {
   world.tmuxClients = ''
   world.tmuxOwner = ''
   world.openFails = false
+  world.onOpen = () => {}
   world.spoilsAfterRead = ''
   world.unreadable = ''
   world.turns = {}
@@ -493,6 +496,7 @@ function machine(argv: readonly string[], env: unknown): Run {
       if (argv[4] === FOCUS_SCRIPT) return ok(TABS.has(argv[5] ?? '') && !world.noTab.has(argv[5] ?? '') ? 'shown\n' : '\n')
       if (argv[4] === OPEN_SCRIPT) {
         if (world.openFails) return { exitCode: 1, stdout: '', stderr: 'execution error: Not authorized to send Apple events to Terminal. (-1743)\n' }
+        world.onOpen()
         // the window it opens makes the workspace's tmux session
         const id = /\/open\/([a-z0-9-]+)\.sh'$/.exec(argv[5] ?? '')?.[1]
         // the window runs the open file's command line: the session it makes, with its owner mark
@@ -3049,8 +3053,10 @@ describe('bringing running sessions into a workspace', () => {
     expect(members('/Users/u/dev/web-app', undefined, { ...snap, codex: [closed, { ...row, updatedAt: NOW - 600_000, startedAt: NOW - 3600_000 }] })).not.toContain('codex:closed-1')
     // ...never one written in the last minute (it may be open somewhere still)
     expect(members('/Users/u/dev/web-app', undefined, { ...snap, codex: [{ ...closed, updatedAt: NOW - 30_000 }] })).not.toContain('codex:closed-1')
-    // this session itself never; another repository's never; one in a workspace's panes never
-    expect(members(undefined, 'session-101')).not.toContain('claude:session-101')
+    // this session itself, said so (it closes once the workspace has opened); another repository's never; one in a
+    // workspace's panes never
+    expect(listed(undefined, 'session-101').find(b => b.member === 'claude:session-101')).toMatchObject({ label: 'Claude · WEB CONSOLE (this session)', isSelf: true })
+    expect(listed().find(b => b.member === 'claude:session-101')?.isSelf).toBeUndefined()
     expect(members('/Users/u/dev/api')).not.toContain('claude:session-101')
     const inWs = { ...snap, workspaces: [practice], tmux: { panes: { ttys004: { session: 'ws-practice-rbac', window: 'claude', pane: '%1' } }, clients: {} } }
     expect(members(undefined, '', inWs)).not.toContain('claude:session-101')
@@ -3117,6 +3123,62 @@ describe('bringing running sessions into a workspace', () => {
       .map(r => (r[2] === STOP_SCRIPT ? 'stop' : r[2] === CODEX_TASK_SCRIPT ? 'turn' : r[2] === MODE_SCRIPT ? 'mode' : 'folder'))
     expect(order).toEqual(['turn', 'folder', 'stop', 'turn', 'stop'])
     await ui.unmount()
+  })
+
+  test('this session brings itself in: the workspace opens first, its Claude waiting for this session to close; then this session closes', async ($, on) => {
+    const { files, runs, toasts } = engine(on, machine, { termProgram: 'Apple_Terminal', selfId: 'session-101' })
+    files.set('/Users/u/.claude/sessions/101.json', JSON.stringify({ ...JSON.parse(files.get('/Users/u/.claude/sessions/101.json')!), status: 'idle', statusUpdatedAt: NOW - 60_000 }))
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    await reveal(ui, 'item:claude-101')
+    expect((await ui.find({ key: 'bring claude-101' }))?.props.label).toBe('New workspace with it (n)')
+    await ui.press({ key: 'bring claude-101' })
+    expect((await ui.find({ key: 'form:bring claude:session-101' }))?.props.label).toBe('[x] Claude · WEB CONSOLE (this session)')
+    await ui.input({ key: 'form:name', text: 'Console', kind: 'change' })
+    await ui.press({ key: 'form:create' })
+    // opened while this session still ran the conversation (never refused for it), and only then closed: that process
+    expect(world.stopped).toEqual(['ttys004 claude 101'])
+    const opened = runs.findIndex(r => r[0] === '/usr/bin/osascript' && r[4] === OPEN_SCRIPT)
+    const stopped = runs.findIndex(r => r[2] === STOP_SCRIPT)
+    expect(opened).toBeGreaterThan(-1)
+    expect(stopped).toBeGreaterThan(opened)
+    const [saved] = JSON.parse(files.get(WORKSPACES)!).workspaces
+    expect(saved.threads.claude.id).toBe('session-101')
+    // its Claude waits for this very process (its registry entry, naming this conversation) to be gone, then resumes
+    const line = files.get(openScriptPath(HOME, 'console'))!
+    const nested = (fragment: string) => fragment.replace(/'/g, `'\\''`).replace(/'/g, `'\\''`)
+    expect(line).toContain(nested(`w=; while kill -0 101 2>/dev/null && grep -q '"sessionId":"session-101"' '/Users/u/.claude/sessions/101.json' 2>/dev/null; do `))
+    expect(line.indexOf('while kill -0 101')).toBeLessThan(line.indexOf('--resume session-101'))
+    expect(toasts.at(-1)).toMatch(/^Created Console .* Opened ws-console in a new Terminal window\.$/)
+    await ui.unmount()
+  })
+
+  test('this session brought in, but it began a turn, or the window did not open: it is not closed, and says how to go on', async ($, on) => {
+    const { files, toasts } = engine(on, machine, { termProgram: 'Apple_Terminal', selfId: 'session-101' })
+    const registry = '/Users/u/.claude/sessions/101.json'
+    const idle = JSON.stringify({ ...JSON.parse(files.get(registry)!), status: 'idle', statusUpdatedAt: NOW - 60_000 })
+    files.set(registry, idle)
+    await $.session.start(START)
+    const run = async (args: string) => (await $.command.run({ ...SESSIONS, command: 'workspace', args })).text
+    // a workspace of Codex alone takes this session as its Claude; it begins a turn as the window opens
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, env: '', only: 'codex' }] }))
+    world.onOpen = () => files.set(registry, JSON.stringify({ ...JSON.parse(idle), status: 'busy', statusUpdatedAt: NOW }))
+    expect(await run('add Practice RBAC claude session-101')).toBe('Added Claude to Practice RBAC: Claude · WEB CONSOLE (this session) goes on there in its own conversation, beside Codex. Opened ws-practice-rbac in a new Terminal window. This session is working: close it (/exit) once its turn is done; the workspace\'s Claude goes on with its conversation then.')
+    expect(world.stopped).toEqual([])
+    expect(files.get(openScriptPath(HOME, 'practice-rbac'))).toContain('while kill -0 101 ')
+    // a window that does not open: not closed; the workspace keeps the conversation, and opens once this session has closed
+    files.set(registry, idle)
+    world.onOpen = () => {}
+    world.openFails = true
+    world.started.clear()
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, env: '', only: 'codex' }] }))
+    expect(await run('add Practice RBAC claude session-101')).toMatch(/^Added Claude to Practice RBAC, but it was not opened: Not opened \(.*\)\. Run: .* Close this session \(\/exit\), then open the workspace: its Claude goes on with this conversation\.$/)
+    expect(world.stopped).toEqual([])
+    expect(JSON.parse(files.get(WORKSPACES)!).workspaces[0].threads.claude.id).toBe('session-101')
+    world.openFails = false
+    expect(await run('open Practice RBAC')).toBe('Not opened: its agents go on with their own conversations, and Claude\'s runs in ttys004. Close it there first.')
+    void toasts
   })
 
   test('the only Codex terminal of its account is brought in once Codex\'s own records show no other conversation since it started', async ($, on) => {
@@ -4418,7 +4480,7 @@ describe('a workspace of one agent', () => {
     await $.session.start(START)
     const run = async (args: string) => (await $.command.run({ ...SESSIONS, command: 'workspace', args })).text
     // a session of the other agent, or one at work, is refused before anything closes
-    expect(await run('add Practice RBAC codex session-104')).toMatch(/^Not added: that Codex terminal cannot be brought in: it has ended, runs in the background or in a workspace already, or is this session\.$/)
+    expect(await run('add Practice RBAC codex session-104')).toMatch(/^Not added: that Codex terminal cannot be brought in: it has ended, or runs in the background or in a workspace already\.$/)
     world.codexTask = '"type":"task_started"\n'
     expect(await run(`add Practice RBAC codex ${HELD}`)).toBe('Not added: Codex · Execute research is working: bring it in once its turn is done.')
     expect([world.stopped, world.killed]).toEqual([[], []])

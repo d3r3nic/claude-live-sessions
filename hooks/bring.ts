@@ -26,6 +26,8 @@ export type Bringable = {
   blocked?: string
   /** A Codex conversation open in no terminal (closed by the owner): resumed, nothing to close. */
   isClosed?: boolean
+  /** This session itself: it closes once the workspace has opened, whose Claude waits for it to and then goes on with it. */
+  isSelf?: boolean
 }
 
 /**
@@ -52,7 +54,7 @@ export function isKnownCodex(snap: Pick<Snapshot, 'codex'>, s: CodexSession): bo
 
 /**
  * The running sessions a new workspace can bring in: a Claude session in a
- * terminal (not in the background, not this one) or a Codex terminal whose
+ * terminal (not in the background; this one too) or a Codex terminal whose
  * conversation is known, neither already in a workspace's panes; with
  * `dir`, only those of the repository it is in (any of its worktrees): `dir`
  * may name the repository's folders (its main checkout and its worktrees,
@@ -69,9 +71,10 @@ export function bringable(snap: Snapshot, o: { now: number; selfId: string }, di
   const found: (Bringable & { at: number })[] = []
   for (const s of snap.claude) {
     const env = envOfProfile('claude', s.profile)
-    if (s.sessionId === o.selfId || s.kind !== 'interactive' || !/^ttys\d+$/.test(s.tty) || !SAFE_ID.test(s.sessionId)) continue
+    if (s.kind !== 'interactive' || !/^ttys\d+$/.test(s.tty) || !SAFE_ID.test(s.sessionId)) continue
     if (env === undefined || !s.startCwd.startsWith('/') || inWorkspace(s.tty) || !inRepo(s.cwd)) continue
-    found.push({ member: `claude:${s.sessionId}`, tool: 'claude', label: `Claude · ${s.name}`, env, isIdle: claudeState(s, o.now) === 'idle', at: s.since })
+    const isSelf = s.sessionId === o.selfId
+    found.push({ member: `claude:${s.sessionId}`, tool: 'claude', label: `Claude · ${s.name}${isSelf ? ' (this session)' : ''}`, env, isIdle: claudeState(s, o.now) === 'idle', at: s.since, ...(isSelf ? { isSelf } : {}) })
   }
   for (const s of snap.codex) {
     const env = envOfProfile('codex', s.profile)

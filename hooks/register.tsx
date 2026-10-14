@@ -986,9 +986,12 @@ async function codexLetsGo($: EngineInterface, id: string, what: string): Promis
 /**
  * Brings a workspace up: the Terminal tab already attached to its tmux
  * session to the front, else a new window that creates the session (if it
- * is not running) and attaches. `window` is selected first.
+ * is not running) and attaches. `window` is selected first. `waitFor`: this
+ * session's process, when the workspace's Claude goes on with this session's
+ * conversation (brought in from here): it runs it still, and the Claude pane
+ * waits for it to close.
  */
-async function openWorkspace($: EngineInterface, ws: Workspace, at?: { window: string; pane?: string }): Promise<{ isOpen: boolean; text: string }> {
+async function openWorkspace($: EngineInterface, ws: Workspace, at?: { window: string; pane?: string }, o: { waitFor?: number } = {}): Promise<{ isOpen: boolean; text: string }> {
   const home = (await $.env.get('HOME')) ?? ''
   const name = tmuxName(ws)
   const tmux = (args: string[]) =>
@@ -1027,7 +1030,7 @@ async function openWorkspace($: EngineInterface, ws: Workspace, at?: { window: s
     const now = await $.clock.now()
     // only the agents it runs: a conversation kept for one it does not run is never resumed
     const runs = agentsOf(ws)
-    const claude = ws.threads.claude === undefined || !runs.includes('claude') ? undefined : snap.claude.find(s => s.sessionId === ws.threads!.claude!.id)
+    const claude = ws.threads.claude === undefined || !runs.includes('claude') ? undefined : snap.claude.find(s => s.sessionId === ws.threads!.claude!.id && s.pid !== o.waitFor)
     // a Codex conversation open in a terminal, or written a moment ago anywhere (the desktop app, an exec run)
     const codex = ws.threads.codex === undefined || !runs.includes('codex') ? undefined : snap.codex.find(s => s.key === ws.threads!.codex!.id && (s.surface === 'terminal' || now - s.updatedAt < WORKING_MS))
     // and one any Codex holds open (a terminal, its shared server, the desktop app), however it was started
@@ -1048,13 +1051,13 @@ async function openWorkspace($: EngineInterface, ws: Workspace, at?: { window: s
   const file = openScriptPath(home, ws.id)
   // its window's background that of this tab, whose profile it takes (as Terminal reports it; none when not known)
   const tabBackground = (await read($, background)) || undefined
-  await $.fs.write(file, `${openCommand(ws, home, { background: tabBackground })}\n`)
+  await $.fs.write(file, `${openCommand(ws, home, { background: tabBackground, waitFor: o.waitFor })}\n`)
   const command = `/bin/sh ${shellQuote(file)}`
   const term = await $.env.get('TERM_PROGRAM')
   if (term === 'tmux') {
     // from inside tmux: create it if need be, then switch this terminal to it
     const made = await $.process
-      .run(['/bin/sh', '-c', openCommand(ws, home, { attach: false, background: tabBackground })], { timeoutMs: 20_000 })
+      .run(['/bin/sh', '-c', openCommand(ws, home, { attach: false, background: tabBackground, waitFor: o.waitFor })], { timeoutMs: 20_000 })
       .catch((error: unknown) => ({ exitCode: -1, stdout: '', stderr: message(error) }))
     if (made.exitCode === 0 && !wasRunning) await prepareWhenMade($, home, ws)
     const switched = made.exitCode === 0 ? await tmux(['switch-client', '-t', `=${name}`]) : made
@@ -1362,7 +1365,9 @@ async function makeWorkspace($: EngineInterface, w: NewWorkspace): Promise<{ isC
   }
   await refresh($, 0)
   const label = `${made.name} (${made.env || 'default'}, ${made.dir})`
-  const opened = await openWorkspace($, made)
+  // this session, brought in: it runs its conversation until the workspace has opened, whose Claude waits for it
+  const self = checked.bring.find(b => b.isSelf === true && made.threads?.claude?.id === b.thread.id)
+  const opened = await openWorkspace($, made, undefined, self?.runs === undefined ? {} : { waitFor: self.runs.pid })
   const goOn = checked.bring.filter(b => made.threads?.[b.tool] !== undefined).map(b => b.label)
   const alone = made.only === undefined ? undefined : made.only === 'claude' ? 'Claude' : 'Codex'
   const onBranch = made.branch === undefined ? '' : `, going on with ${made.branch}`
@@ -1373,11 +1378,13 @@ async function makeWorkspace($: EngineInterface, w: NewWorkspace): Promise<{ isC
     : `Claude and Codex start side by side in tmux session ${tmuxName(made)}; Claude gets peer coding ready for it${onBranch}, and the relay passes each hand-over to the other.`) +
     (goOn.length > 0 ? ` ${goOn.join(' and ')} went on there, each in its own conversation${made.threads?.claude === undefined ? '' : ' (if Claude asks how to resume a large conversation, from a summary or in full, answer it in its pane)'}.` : '') +
     (notBrought.length > 0 ? ` Not brought in: ${notBrought.join('; ')}.` : '')
+  // (closed, this session reads nothing more: what follows is said only when it does not close)
+  const closing = self === undefined ? '' : await selfAfterOpen($, home, self, opened.isOpen)
   return {
     isCreated: true,
     text: opened.isOpen
-      ? `Created ${label}. ${start} Closing its window leaves them running; /workspace open ${made.id} brings it back. ${opened.text}`
-      : `Created ${label}, but it was not opened: ${opened.text}`,
+      ? `Created ${label}. ${start} Closing its window leaves them running; /workspace open ${made.id} brings it back. ${opened.text}${closing}`
+      : `Created ${label}, but it was not opened: ${opened.text}${closing}`,
   }
 }
 
@@ -1481,24 +1488,31 @@ async function addTo($: EngineInterface, ws: Workspace, tool: 'claude' | 'codex'
     }
     await unmark()
     await refresh($, 0)
-    const opened = await openWorkspace($, made)
+    // this session, brought in: as when making a workspace with it
+    const self = brought?.isSelf === true && isBrought ? brought : undefined
+    const opened = await openWorkspace($, made, undefined, self?.runs === undefined ? {} : { waitFor: self.runs.pid })
+    const closing = self === undefined ? '' : await selfAfterOpen($, home, self, opened.isOpen)
     const who = `${isBrought ? `${brought!.label} goes on there in its own conversation` : `${NAME[tool]} starts new there`}, beside ${NAME[there]}`
     const how = purpose === '' ? '' : '; Claude gets peer coding ready, and the relay passes each hand-over'
     return {
       isAdded: true,
-      text: opened.isOpen ? `Added ${NAME[tool]} to ${made.name}: ${who}${how}. ${opened.text}` : `Added ${NAME[tool]} to ${made.name}, but it was not opened: ${opened.text}`,
+      text: opened.isOpen ? `Added ${NAME[tool]} to ${made.name}: ${who}${how}. ${opened.text}${closing}` : `Added ${NAME[tool]} to ${made.name}, but it was not opened: ${opened.text}${closing}`,
     }
   } finally {
     await unmark()
   }
 }
 
-/** A session to bring in: where it runs (none for a conversation already closed), and the conversation it resumes. */
-type Bring = { tool: 'claude' | 'codex'; label: string; runs?: { tty: string; pid: number }; profile: string; rollout?: string; thread: Thread }
+/**
+ * A session to bring in: where it runs (none for a conversation already closed), and the conversation it resumes;
+ * `isSelf`, this session, which closes only once the workspace has opened (its Claude waits for it to).
+ */
+type Bring = { tool: 'claude' | 'codex'; label: string; runs?: { tty: string; pid: number }; profile: string; rollout?: string; thread: Thread; isSelf?: boolean }
 
 /**
  * Closes a session being brought in where it runs, checked again just before (one that began a turn since is left
- * running), so its conversation goes on in the workspace alone: the conversation, or why not. A Codex conversation must
+ * running), so its conversation goes on in the workspace alone: the conversation, or why not. This session is only
+ * checked: it closes once the workspace has opened (selfAfterOpen). A Codex conversation must
  * then be open in no Codex at all (a terminal's shared server lets it go a moment after the terminal closes), or it is
  * not resumed: it would run twice.
  */
@@ -1515,8 +1529,8 @@ async function takeOver($: EngineInterface, home: string, b: Bring): Promise<{ t
   const live = b.tool === 'claude' && b.runs !== undefined ? await liveClaude($, home, b.runs.pid, b.profile, b.thread.id) : undefined
   const busy = typeof live === 'string' ? live : b.rollout === undefined ? undefined : await codexBusy($, b.rollout)
   if (busy !== undefined) return { why: `it ${busy}; it was left as it was` }
-  // a conversation closed already has nothing to close
-  if (b.runs !== undefined) {
+  // a conversation closed already has nothing to close; this session closes once the workspace has opened (closeSelf)
+  if (b.runs !== undefined && b.isSelf !== true) {
     const out = await $.process
       .run(['/bin/sh', '-c', STOP_SCRIPT, 'sh', b.runs.tty, JOB_COMMANDS[b.tool], String(b.runs.pid)], { timeoutMs: 30_000 })
       .catch(() => ({ stdout: 'failed' }))
@@ -1530,6 +1544,22 @@ async function takeOver($: EngineInterface, home: string, b: Bring): Promise<{ t
     }
   }
   return { thread: b.thread }
+}
+
+/**
+ * This session, brought into a workspace: once the workspace has opened (its Claude waiting for this session to
+ * close), it closes, checked again just before as any session brought in (one that began a turn since is left
+ * running); its conversation then goes on there. What to say when it does not close (when it does, nothing reads it).
+ */
+async function selfAfterOpen($: EngineInterface, home: string, b: Bring, isOpen: boolean): Promise<string> {
+  const then = 'the workspace\'s Claude goes on with its conversation then'
+  if (!isOpen || b.runs === undefined) return ` Close this session (/exit), then open the workspace: its Claude goes on with this conversation.`
+  const live = await liveClaude($, home, b.runs.pid, b.profile, b.thread.id, 'close it (/exit)')
+  if (typeof live === 'string') return ` This session ${live}; ${then}.`
+  const out = await $.process
+    .run(['/bin/sh', '-c', STOP_SCRIPT, 'sh', b.runs.tty, JOB_COMMANDS.claude, String(b.runs.pid)], { timeoutMs: 30_000 })
+    .catch(() => ({ stdout: 'failed' }))
+  return out.stdout.trim() === 'stopped' ? '' : ` This session did not close: close it (/exit); ${then}.`
 }
 
 /**
@@ -1548,7 +1578,7 @@ async function checkBring($: EngineInterface, home: string, snap: Snapshot, memb
     if ((tool !== 'claude' && tool !== 'codex') || bring.some(b => b.tool === tool)) return { error: `"${member}" is not one session of each agent` }
     const name = tool === 'claude' ? 'that Claude session' : 'that Codex terminal'
     const offer = offered.find(b => b.member === member)
-    if (offer === undefined) return { error: `${name} cannot be brought in: it has ended, ${dir === undefined ? '' : 'works in another repository, '}runs in the background or in a workspace already, or is this session` }
+    if (offer === undefined) return { error: `${name} cannot be brought in: it has ended, ${dir === undefined ? '' : 'works in another repository, '}or runs in the background or in a workspace already` }
     if (offer.blocked !== undefined) return { error: `${offer.label} cannot be brought in: ${offer.blocked}` }
     if (offer.env !== env) return { error: `${offer.label} runs under the ${offer.env || 'default'} environment; choose that one` }
     if (tool === 'claude') {
@@ -1556,7 +1586,7 @@ async function checkBring($: EngineInterface, home: string, snap: Snapshot, memb
       const live = await liveClaude($, home, s.pid, s.profile, id)
       if (typeof live === 'string') return { error: `${offer.label} ${live}` }
       // (it goes on bypassed, as every workspace agent: the mode it ran in is not kept)
-      bring.push({ tool, label: offer.label, runs: { tty: live.tty, pid: s.pid }, profile: s.profile, thread: { id, dir: live.startCwd } })
+      bring.push({ tool, label: offer.label, runs: { tty: live.tty, pid: s.pid }, profile: s.profile, thread: { id, dir: live.startCwd }, ...(offer.isSelf === true ? { isSelf: true } : {}) })
     } else {
       const s = snap.codex.find(c => c.key === id && (offer.isClosed === true ? c.surface === 'cli' : c.surface === 'terminal'))!
       const codexHome = `${home}/.${s.profile}`

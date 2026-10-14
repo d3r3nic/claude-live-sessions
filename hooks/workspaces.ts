@@ -172,7 +172,7 @@ export const promptPath = (home: string, id: string, tool: 'claude' | 'codex') =
  * from the folder it ran in, bypassed the same way, whatever mode it ran in
  * before.
  */
-function paneScript(tool: 'claude' | 'codex', ws: Pick<Workspace, 'id' | 'env' | 'checkout' | 'threads' | 'only'>, home: string, bin?: string): string {
+function paneScript(tool: 'claude' | 'codex', ws: Pick<Workspace, 'id' | 'env' | 'checkout' | 'threads' | 'only'>, home: string, bin?: string, waitFor?: number): string {
   // (an id from the workspaces file reaches the line only as threadFrom read it: letters, digits, dashes)
   const thread = ws.threads?.[tool]
   const addDir = ws.checkout === undefined ? '' : ` --add-dir ${shellWord(`${ws.checkout}-worktrees`)}`
@@ -181,6 +181,8 @@ function paneScript(tool: 'claude' | 'codex', ws: Pick<Workspace, 'id' | 'env' |
   const start = agentStart(tool, ws.env, home, bin)
   // Claude's way of working, in its system prompt (before --add-dir, which takes every value up to `--`)
   const lean = tool === 'claude' ? ` --append-system-prompt ${shellWord(leanWork(ws.only === undefined))}` : ''
+  // Claude's folder: its registry of running sessions has a file per process (its pid's) while it runs
+  const claudeHome = `${home}/.claude${ws.env === '' ? '' : `-${ws.env}`}`
   const agent =
     thread === undefined
       ? tool === 'codex'
@@ -188,8 +190,12 @@ function paneScript(tool: 'claude' | 'codex', ws: Pick<Workspace, 'id' | 'env' |
         : `${start}${flags}${lean}${addDir} \${p:+--} \${p:+"$p"}`
       : tool === 'claude'
         // a Claude conversation is kept under the folder it started in: resumed from there, unless a live Claude
-        // session has it open (its registry entry, its process there): then it says so and leaves a shell
-        ? `open=; for f in ${shellWord(`${home}/.claude${ws.env === '' ? '' : `-${ws.env}`}`)}/sessions/*.json; do grep -q '"sessionId":"${thread.id}"' "$f" 2>/dev/null && kill -0 "$(basename "$f" .json)" 2>/dev/null && open=1; done; ` +
+        // session has it open (its registry entry, its process there): then it says so and leaves a shell. Brought in
+        // from the session that opened the workspace (`waitFor`, its process), it first waits for that one to close
+        ? (waitFor === undefined || !Number.isInteger(waitFor) || waitFor <= 1 ? '' :
+          `w=; while kill -0 ${waitFor} 2>/dev/null && grep -q '"sessionId":"${thread.id}"' ${shellWord(`${claudeHome}/sessions/${waitFor}.json`)} 2>/dev/null; do ` +
+          `[ -n "$w" ] || echo 'Waiting for the Claude session this conversation was brought in from to close; it goes on here then.'; w=1; sleep 0.5; done; `) +
+          `open=; for f in ${shellWord(claudeHome)}/sessions/*.json; do grep -q '"sessionId":"${thread.id}"' "$f" 2>/dev/null && kill -0 "$(basename "$f" .json)" 2>/dev/null && open=1; done; ` +
           `if [ -n "$open" ]; then echo 'This conversation is open in another Claude session; close it there, then open the workspace again.'; ` +
           `else cd ${shellWord(thread.dir)} && ${start} --resume ${thread.id}${flags}${lean}${addDir} \${p:+--} \${p:+"$p"}; fi`
         : `${start} resume ${UPDATE_OFF} ${NO_DAEMON}${flags} -C ${shellWord(thread.dir)} -- ${thread.id} \${p:+"$p"}`
@@ -521,18 +527,20 @@ export const OWNER_OPTION = '@live-sessions-workspace'
  * answers an agent's question for the terminal's background (OSC 11) with it,
  * and Codex blends its input line and the owner's messages from it, once, at
  * its start; without it tmux answers with a colour left from another window,
- * or none. `socket` (a private server that reads no tmux.conf) and `bins` are
- * for tests; `attach: false` only creates.
+ * or none. `waitFor`: the process of the Claude session whose conversation
+ * its Claude resumes (the session that opened it, bringing itself in), which
+ * it waits to see closed first. `socket` (a private server that reads no
+ * tmux.conf) and `bins` are for tests; `attach: false` only creates.
  */
 export function openCommand(
   ws: Pick<Workspace, 'id' | 'env' | 'dir' | 'createdAt' | 'checkout' | 'threads' | 'only'> & { name?: string },
   home: string,
-  o: { socket?: string; bins?: { claude: string; codex: string }; attach?: boolean; background?: string } = {},
+  o: { socket?: string; bins?: { claude: string; codex: string }; attach?: boolean; background?: string; waitFor?: number } = {},
 ): string {
   // a test's private server reads no tmux.conf: the person's plugins (a session restore) never run in it
   const tmux = o.socket === undefined ? 'tmux' : `tmux -L ${shellWord(o.socket)} -f /dev/null`
   const name = tmuxName(ws)
-  const pane = (tool: 'claude' | 'codex') => shellWord(paneScript(tool, ws, home, o.bins?.[tool]))
+  const pane = (tool: 'claude' | 'codex') => shellWord(paneScript(tool, ws, home, o.bins?.[tool], tool === 'claude' ? o.waitFor : undefined))
   // tmux expands `#` sequences in -c: a literal `#` is `##`
   const dir = shellWord(ws.dir.replace(/#/g, '##'))
   // each command in the sequence acts on the pane the one before made
