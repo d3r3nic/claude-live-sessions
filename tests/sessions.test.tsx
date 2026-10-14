@@ -3266,10 +3266,19 @@ describe('bringing running sessions into a workspace', () => {
     expect(said).not.toContain('claude --resume session-101')
     expect(world.stopped).toEqual([])
     await ui.unmount()
+    // added to a workspace of Codex alone: the same
+    world.spoilsAfterRead = ''
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, env: '', only: 'codex' }] }))
+    world.spoilsAfterRead = WORKSPACES
+    const added = (await $.command.run({ ...SESSIONS, command: 'workspace', args: 'add Practice RBAC claude session-101' })).text
+    expect(added).toMatch(/^Not (added|done): /)
+    expect(added).not.toContain('claude --resume session-101')
+    expect(added).not.toContain('was closed')
+    expect(world.stopped).toEqual([])
   })
 
   test('the brief by default is the chats that came: one left where it was gets none; a workspace of one agent gets none', async ($, on) => {
-    const { files } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    const { files, clock } = engine(on, machine, { termProgram: 'Apple_Terminal' })
     await $.session.start(START)
     await $.command.run(SESSIONS)
     const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
@@ -3287,6 +3296,20 @@ describe('bringing running sessions into a workspace', () => {
     const pair = await create('Pair')
     expect([pair.threads, pair.purpose, pair.relay]).toEqual([undefined, undefined, undefined])
     expect(files.has(promptPath(HOME, 'pair', 'claude'))).toBe(false)
+    // both chosen, Claude's came and Codex's did not: Claude's alone is the work to go on with
+    files.set('/Users/u/.claude/sessions/101.json', JSON.stringify({ ...JSON.parse(files.get('/Users/u/.claude/sessions/101.json')!), status: 'idle', statusUpdatedAt: NOW - 60_000 }))
+    // (the Codex terminal running again, seen anew)
+    world.exited.clear()
+    await clock.advance(60_000)
+    await ui.press({ key: 'workspace:new' })
+    await ui.press({ key: 'form:bring claude:session-101' })
+    await ui.press({ key: `form:bring codex:${HELD}` })
+    await ui.input({ key: 'form:name', text: 'Half', kind: 'change' })
+    await ui.press({ key: 'form:create' })
+    const half = JSON.parse(files.get(WORKSPACES)!).workspaces.at(-1)
+    expect([Object.keys(half.threads), half.purpose]).toEqual([['claude'], 'Going on with the work under way in Claude\'s conversation, brought in; Claude brings Codex up to speed.'])
+    world.exited.clear()
+    await clock.advance(60_000)
     // Claude alone, its chat brought in, nothing said: no brief (it goes on in its conversation)
     files.set('/Users/u/.claude/sessions/101.json', JSON.stringify({ ...JSON.parse(files.get('/Users/u/.claude/sessions/101.json')!), status: 'idle', statusUpdatedAt: NOW - 60_000 }))
     const solo = await create('Solo', 'claude')
