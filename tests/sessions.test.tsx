@@ -222,6 +222,8 @@ const world = {
   onOpen: () => {},
   /** When a process started cannot be read (PROCESS_START prints nothing). */
   startFails: false,
+  /** Done before each command line is answered (another session acting meanwhile). */
+  onRun: (_argv: readonly string[]) => {},
   /** A file that turns unreadable right after it is read once (another writer). */
   spoilsAfterRead: '',
   /** A file that is there but cannot be read (too large, no permission). */
@@ -310,6 +312,7 @@ const resetWorld = () => {
   world.openFails = false
   world.onOpen = () => {}
   world.startFails = false
+  world.onRun = () => {}
   world.spoilsAfterRead = ''
   world.unreadable = ''
   world.turns = {}
@@ -356,6 +359,7 @@ const reveal = (ui: { press: (target: { key: string }) => Promise<unknown> }, id
 
 /** The fixture machine: each command line the mod runs, answered as macOS would. */
 function machine(argv: readonly string[], env: unknown): Run {
+  world.onRun(argv)
   const pidsAfter = (flag: string) => (argv[argv.indexOf(flag) + 1] ?? '').split(',').map(Number)
   switch (argv[0]) {
     case '/usr/bin/pgrep':
@@ -3266,12 +3270,15 @@ describe('bringing running sessions into a workspace', () => {
     expect(said).not.toContain('claude --resume session-101')
     expect(world.stopped).toEqual([])
     await ui.unmount()
-    // added to a workspace of Codex alone: the same
+    // added to a workspace of Codex alone, which another session removes as this one is checked again: the same
     world.spoilsAfterRead = ''
     files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, env: '', only: 'codex' }] }))
-    world.spoilsAfterRead = WORKSPACES
+    let checks = 0
+    world.onRun = argv => {
+      if (argv[0] === '/bin/ps' && argv.at(-1) === '101' && ++checks === 2) files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [] }))
+    }
     const added = (await $.command.run({ ...SESSIONS, command: 'workspace', args: 'add Practice RBAC claude session-101' })).text
-    expect(added).toMatch(/^Not (added|done): /)
+    expect(added).toBe('Not added: Practice RBAC was removed meanwhile.')
     expect(added).not.toContain('claude --resume session-101')
     expect(added).not.toContain('was closed')
     expect(world.stopped).toEqual([])
