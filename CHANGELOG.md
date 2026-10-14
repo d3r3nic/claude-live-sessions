@@ -2,7 +2,7 @@
 
 What each version changed, newest first. Each links its pull request, which holds the details, the checks and the reviews. After updating, run `/reload-plugins` in your sessions.
 
-## 0.32.0 — 2026-10-14
+## 0.32.0 — 2026-10-14 ([#44](https://github.com/d3r3nic/claude-live-sessions/pull/44))
 - **New workspace starts from your chats:** the form lists your running Claude and Codex chats first, from any folder (each with its folder), and you choose one of each to bring in, or none for an agent to start new. The folder fills in from the chat chosen, taken as it is, with no branch to choose: the agents settle the repository and branch as they get ready. Before, the form asked for a repository first and offered only the chats working in it, so a Codex working in the folder above the repository was never offered.
 - **The chat you are in can be brought in too** (`(this session)`): in a new workspace, by `New workspace with it` on its own row, or by `Add Claude`. The workspace opens first, its Claude waiting while this session's process runs (its pid and start time); then this session closes between turns, and the conversation goes on there (run end to end with the real Claude: `tests/e2e-self.mjs`). Before, the session whose pane made the workspace was never offered.
 - **Briefed on what is next, purpose or not:** with a chat brought into a pair and nothing typed in `what it is for`, the agents are told to go on with the work under way in the chats that came, the one brought in getting a new peer up to speed, and the relay is on. A new Claude beside a Codex brought in goes on with Codex's branch, asking Codex where its work stands.
