@@ -56,6 +56,7 @@ import {
   ALL_ACCOUNTS,
   contextSaid,
   normalPath,
+  SHARED_VERSION,
 } from '../hooks/collect'
 import type { CodexProc, ThreadRow } from '../hooks/collect'
 import type { ClaudeSession, CodexSession, Snapshot, Workspace } from '../types'
@@ -1074,7 +1075,7 @@ describe('pane', () => {
     expect(placedAt('NIGHTLY')).toBe(':/Users/u')
     // the shared snapshot holds what is shown and nothing of the processes' arguments
     const shared = files.get(SHARED) ?? ''
-    expect(JSON.parse(shared).version).toBe(7)
+    expect(JSON.parse(shared).version).toBe(8)
     for (const leak of ['opt/homebrew', 'dangerously', '--cd', 'CODEX_HOME']) expect(shared).not.toContain(leak)
 
     for (const surface of ['terminal', 'desktop'] as const) {
@@ -1577,7 +1578,7 @@ describe('pane', () => {
       checkedAt: NOW - 10_000,
       problems: [],
     }
-    files.set(SHARED, JSON.stringify({ version: 7, snapshot: theirs }))
+    files.set(SHARED, JSON.stringify({ version: 8, snapshot: theirs }))
     await $.session.start(START)
     await clock.settle()
     expect(collections()).toBe(0)
@@ -1593,6 +1594,12 @@ describe('pane', () => {
     await $.session.start(START)
     await clock.settle()
     expect(collections()).toBe(1)
+    // one a session of 0.31 or before wrote (its Codex matches without the shared server's): not taken
+    const old = { claude: [], codex: [], places: {}, workspaces: [], envs: [''], tmux: { panes: {}, clients: {} }, checkedAt: NOW, problems: [] }
+    files.set(SHARED, JSON.stringify({ version: 7, snapshot: old }))
+    expect(SHARED_VERSION).toBe(8)
+    await $.command.run(SESSIONS)
+    expect(collections()).toBe(2)
   })
 
   test('a snapshot that cannot be shared is still shown here', async ($, on) => {

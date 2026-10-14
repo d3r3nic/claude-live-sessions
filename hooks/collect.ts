@@ -1049,8 +1049,11 @@ export function orderFrom(value: unknown): Record<string, string[]> | undefined 
   return Object.fromEntries(entries)
 }
 
-/** The shared snapshot's format: one written by another version is not read. */
-export const SHARED_VERSION = 7
+/**
+ * The shared snapshot's format: one written by another version is not read. 8: Codex terminals matched through their
+ * shared server (`loaded`), which a session of an earlier version, not reloaded yet, leaves unmatched.
+ */
+export const SHARED_VERSION = 8
 
 /** A snapshot, if the value is one (as read back from the shared file). */
 export const isSnapshot = (v: unknown): v is Snapshot => {
