@@ -9,7 +9,7 @@ import type { RelayEvent, Side, Step } from './relay'
 import { branchOf, checkDue, DRIFT_EVERY, driftRequest, isDueAfterCompaction, parseVerdict, recordFolderOf, RECORDS_SCRIPT } from './drift'
 import { hiddenNames, hideInTree, hideNames, hidingFrom, namesPath, namesProblem, NO_HIDING, turned } from './names'
 import type { Hiding } from './names'
-import { bringable, codexDir, envOfProfile, holderOf, HOLDERS_SCRIPT, isKnownCodex, CODEX_FOLDER_SCRIPT, CODEX_TASK_SCRIPT, codexTaskState, JOB_COMMANDS, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, toggled, withThreads } from './bring'
+import { bringable, codexDir, CODEX_LETS_GO_S, envOfProfile, holderOf, HOLDERS_SCRIPT, isKnownCodex, CODEX_FOLDER_SCRIPT, CODEX_TASK_SCRIPT, codexTaskState, JOB_COMMANDS, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, toggled, withThreads } from './bring'
 import {
   agentsOf,
   CHECKOUT_SCRIPT,
@@ -954,12 +954,17 @@ async function isSureCodex($: EngineInterface, codexHome: string, s: CodexSessio
 }
 
 /**
- * Who holds a Codex conversation's rollout open, asked `tries` times 0.3 s apart until nobody does (a closed terminal's
- * shared server lets it go a moment later): 'free', or the process that does (undefined: not known, so not free).
+ * Who holds a Codex conversation's rollout open: 'free', or the process that does (undefined: not known, so not free).
+ * Held, it is asked again until Codex lets it go, for up to CODEX_LETS_GO_S (a closed terminal's shared server keeps it
+ * about a minute), `what` told it waits meanwhile.
  */
-async function holderOfCodex($: EngineInterface, id: string, tries: number): Promise<'free' | number | undefined> {
-  const out = await $.process.run(['/bin/sh', '-c', HOLDERS_SCRIPT, 'sh', id, String(tries)], { timeoutMs: 20_000 }).catch(() => ({ stdout: '' }))
-  return holderOf(out.stdout)
+async function codexLetsGo($: EngineInterface, id: string, what: string): Promise<'free' | number | undefined> {
+  const ask = async (seconds: number) =>
+    holderOf((await $.process.run(['/bin/sh', '-c', HOLDERS_SCRIPT, 'sh', id, String(seconds)], { timeoutMs: (seconds + 30) * 1000 }).catch(() => ({ stdout: '' }))).stdout)
+  const now = await ask(0)
+  if (now === 'free') return now
+  await toast($, `${what}: waiting for Codex to let its conversation go (its shared server keeps one about a minute after its terminal closes)…`, { timeoutMs: 60_000 })
+  return ask(CODEX_LETS_GO_S)
 }
 
 /**
@@ -1005,7 +1010,7 @@ async function openWorkspace($: EngineInterface, ws: Workspace, at?: { window: s
     // a Codex conversation open in a terminal, or written a moment ago anywhere (the desktop app, an exec run)
     const codex = ws.threads.codex === undefined || !runs.includes('codex') ? undefined : snap.codex.find(s => s.key === ws.threads!.codex!.id && (s.surface === 'terminal' || now - s.updatedAt < WORKING_MS))
     // and one any Codex holds open (a terminal, its shared server, the desktop app), however it was started
-    const holder = codex !== undefined || ws.threads.codex === undefined || !runs.includes('codex') ? 'free' : await holderOfCodex($, ws.threads.codex.id, 1)
+    const holder = codex !== undefined || ws.threads.codex === undefined || !runs.includes('codex') ? 'free' : await codexLetsGo($, ws.threads.codex.id, ws.name)
     const elsewhere = [
       ...(claude === undefined ? [] : [`Claude's runs in ${claude.tty === '??' ? 'the background' : claude.tty}`]),
       ...(codex === undefined ? [] : [`Codex's ${codex.surface === 'terminal' ? `runs in ${codex.tty}` : `was written a moment ago (${codex.surface})`}`]),
@@ -1474,7 +1479,7 @@ async function takeOver($: EngineInterface, home: string, b: Bring): Promise<{ t
     if (out.stdout.trim() !== 'stopped') return { why: `it did not close in ${b.runs.tty}; it was left as it was` }
   }
   if (b.tool === 'codex') {
-    const holder = await holderOfCodex($, b.thread.id, b.runs === undefined ? 1 : 20)
+    const holder = await codexLetsGo($, b.thread.id, b.label)
     if (holder !== 'free') {
       const other = `another Codex${typeof holder === 'number' ? ` (process ${holder})` : ''}`
       return { why: b.runs === undefined ? `it is open in ${other}; it was left as it was` : `it closed in ${b.runs.tty}, but ${other} has its conversation open still, so it was not resumed here` }

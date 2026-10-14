@@ -202,22 +202,29 @@ export const STOP_SCRIPT = [
 
 /**
  * Whether any Codex process (a terminal, a shared background server, the
- * desktop app's) holds the rollout of the conversation "$1" open, asked up to
- * "$2" times 0.3 s apart until none does: a terminal's server lets a
- * conversation go a moment after the terminal closes. Prints `free`, or
+ * desktop app's) holds the rollout of the conversation "$1" open, asked once a
+ * second for up to "$2" seconds (0: once) until none does. Prints `free`, or
  * `held <pid>` when one still holds it.
  */
 export const HOLDERS_SCRIPT = [
-  'id=$1; tries=$2; i=0',
+  'id=$1; end=$(( $(/bin/date +%s) + $2 ))',
   'while :; do',
   '  pids=$(/usr/bin/pgrep -x codex | /usr/bin/paste -sd , -)',
   '  pid=',
   `  [ -n "$pids" ] && pid=$(/usr/sbin/lsof -n -P -a -p "$pids" -Fpn 2>/dev/null | /usr/bin/awk -v end="-$id.jsonl" '/^p/ { p = substr($0, 2) } /^n/ && length($0) > length(end) && substr($0, length($0) - length(end) + 1) == end { print p; exit }')`,
   '  [ -z "$pid" ] && { echo free; exit 0; }',
-  '  i=$((i + 1)); [ "$i" -ge "$tries" ] && { echo "held $pid"; exit 0; }',
-  '  sleep 0.3',
+  '  [ "$(/bin/date +%s)" -ge "$end" ] && { echo "held $pid"; exit 0; }',
+  '  sleep 1',
   'done',
 ].join('\n')
+
+/**
+ * How long, in seconds, to wait for Codex to let a conversation go: its shared
+ * background server keeps one loaded about a minute after the last terminal
+ * using it closes, however it closed (61 to 62 s, hang-up, SIGTERM or SIGINT,
+ * measured with Codex 0.162.1).
+ */
+export const CODEX_LETS_GO_S = 90
 
 /** HOLDERS_SCRIPT's answer: free, or the process that holds the conversation open (unknown, when it said neither: not free). */
 export function holderOf(stdout: string): 'free' | number | undefined {

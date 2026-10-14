@@ -63,7 +63,7 @@ import { afterOwner, afterStep, claudeKeep, screenReady, COMPACT_FROM, cueOf, cu
 import type { Side } from '../hooks/relay'
 import { branchOf, checkDue, checkFrom, driftRequest, isDueAfterCompaction, parseVerdict, recordFolderOf, RECORDS_SCRIPT } from '../hooks/drift'
 import { accountOfFile, applyScan, claudeCost, claudeLimits, clockSaid, codexUnits, currentLimits, EMPTY_USAGE, limitSaid, markKey, mergeLimits, offsetOf, OFFSETS_SCRIPT, parseContexts, priceOf, rankUsage, scanInput, sharedLimitsFrom, usageFrom, USAGE_FILES_SCRIPT, USAGE_KEEP_MS, wholeFiles } from '../hooks/usage'
-import { bringable, codexDir, CODEX_FOLDER_SCRIPT, CODEX_TASK_SCRIPT, codexTaskState, envOfProfile, holderOf, HOLDERS_SCRIPT, isKnownCodex, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, threadFrom, toggled, withThreads } from '../hooks/bring'
+import { bringable, codexDir, CODEX_FOLDER_SCRIPT, CODEX_LETS_GO_S, CODEX_TASK_SCRIPT, codexTaskState, envOfProfile, holderOf, HOLDERS_SCRIPT, isKnownCodex, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, threadFrom, toggled, withThreads } from '../hooks/bring'
 import { BYPASS } from '../hooks/workspaces'
 import {
   absoluteDir,
@@ -780,8 +780,9 @@ describe('collect', () => {
 
   test('who holds a Codex conversation open: free, or the process', () => {
     expect([holderOf('free\n'), holderOf('held 91352\n'), holderOf(''), holderOf('held x')]).toEqual(['free', 91352, undefined, undefined])
-    // every Codex process asked, a rollout found by the end of its name, asked again a few times while one holds it
+    // every Codex process asked, a rollout found by the end of its name, asked again each second while one holds it
     expect(HOLDERS_SCRIPT).toContain('/usr/bin/pgrep -x codex')
+    expect(CODEX_LETS_GO_S).toBe(90)
     expect(HOLDERS_SCRIPT).toContain('-v end="-$id.jsonl"')
   })
 
@@ -3156,7 +3157,9 @@ describe('bringing running sessions into a workspace', () => {
     world.holders[RESUMED_A] = 204
     await create('Reports')
     expect(world.stopped).toEqual(['ttys045 codex|node 207'])
-    expect(world.heldAsked).toEqual([`${RESUMED_A} 20`])
+    // asked, then (held) asked again for up to a minute and a half, saying it waits meanwhile
+    expect(world.heldAsked).toEqual([`${RESUMED_A} 0`, `${RESUMED_A} 90`])
+    expect(toasts).toContain('Codex · Find the report writer: waiting for Codex to let its conversation go (its shared server keeps one about a minute after its terminal closes)…')
     expect(JSON.parse(files.get(WORKSPACES)!).workspaces[0].threads).toBeUndefined()
     expect(toasts.at(-1)).toContain(`Not brought in: Codex · Find the report writer (it closed in ttys045, but another Codex (process 204) has its conversation open still, so it was not resumed here, and the workspace's Codex starts new).`)
     await ui.unmount()
@@ -3176,11 +3179,11 @@ describe('bringing running sessions into a workspace', () => {
     await ui.press({ key: `form:bring codex:${RESUMED_A}` })
     await ui.input({ key: 'form:name', text: 'Reports', kind: 'change' })
     await ui.press({ key: 'form:create' })
-    // checked fresh against the server before it is closed, closed, then asked until nothing holds it; asked once more
-    // as the workspace opens and resumes it
+    // checked fresh against the server before it is closed, closed, then asked whether anything holds it; asked once
+    // more as the workspace opens and resumes it
     expect(runs.some(r => r.join(' ') === '/usr/sbin/lsof -n -P -a -p 204 -Fpn')).toBe(true)
     expect(world.stopped).toEqual(['ttys045 codex|node 207'])
-    expect(world.heldAsked).toEqual([`${RESUMED_A} 20`, `${RESUMED_A} 1`])
+    expect(world.heldAsked).toEqual([`${RESUMED_A} 0`, `${RESUMED_A} 0`])
     const [saved] = JSON.parse(files.get(WORKSPACES)!).workspaces
     expect(saved.threads.codex.id).toBe(RESUMED_A)
     await ui.unmount()
@@ -4316,7 +4319,7 @@ describe('a workspace of one agent', () => {
     expect(toasts.at(-1)).toBe('Added Codex to Practice RBAC: Codex · Execute research goes on there in its own conversation, beside Claude; Claude gets peer coding ready, and the relay passes each hand-over. Opened ws-practice-rbac in a new Terminal window.')
     // closed where it ran (that very process), let go of by every Codex, resumed with the workspace
     expect(world.stopped).toEqual(['ttys000 codex|node 201'])
-    expect(world.heldAsked).toEqual([`${HELD} 20`, `${HELD} 1`])
+    expect(world.heldAsked).toEqual([`${HELD} 0`, `${HELD} 0`])
     const [saved] = JSON.parse(files.get(WORKSPACES)!).workspaces
     expect([saved.only, saved.members, saved.threads.claude.id, saved.threads.codex.id, saved.threads.codex.dir]).toEqual([undefined, undefined, 'session-900', HELD, '/Users/u/dev/web-app'])
     expect(files.get(promptPath(HOME, 'practice-rbac', 'claude'))).toBe(addedPrompt(saved, 'claude', { isNew: false, isBrought: true }))

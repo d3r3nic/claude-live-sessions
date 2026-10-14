@@ -33,7 +33,7 @@ const scratch = mkdtempSync(join(TRUSTED, 'live-sessions-bring-'))
 mkdirSync(`${scratch}-worktrees`)
 const socket = `live-sessions-e2e-bring-${process.pid}`
 const tmux = (...args) => spawnSync('tmux', ['-L', socket, '-f', '/dev/null', ...args], { encoding: 'utf8' })
-const sh = (script, ...args) => spawnSync('/bin/sh', ['-c', script, 'sh', ...args], { encoding: 'utf8', timeout: 60_000 }).stdout
+const sh = (script, ...args) => spawnSync('/bin/sh', ['-c', script, 'sh', ...args], { encoding: 'utf8', timeout: 150_000 }).stdout
 const sleep = ms => new Promise(res => setTimeout(res, ms))
 let failures = 0
 const check = (name, ok, detail = '') => {
@@ -49,20 +49,28 @@ const codexRows = () => {
   const pids = new Set(spawnSync('/usr/bin/pgrep', ['-x', 'codex'], { encoding: 'utf8' }).stdout.split('\n').filter(Boolean).map(Number))
   const procs = c.parsePs(spawnSync('/bin/ps', ['-ww', '-o', c.PS_COLUMNS, '-p', [...pids].join(',') || '1'], { encoding: 'utf8', env: PS_ENV }).stdout)
   const raw = c.codexTerminals(procs, pids)
-  const envBy = raw.length ? c.parseEnv(spawnSync('/bin/sh', ['-c', c.ENV_SCRIPT, 'sh', raw.map(p => p.pid).join(',')], { encoding: 'utf8', env: PS_ENV }).stdout) : new Map()
-  const heldBy = raw.length ? c.parseRollouts(spawnSync('/usr/sbin/lsof', ['-n', '-P', '-a', '-p', raw.map(p => p.pid).join(','), '-Fpn'], { encoding: 'utf8' }).stdout) : new Map()
+  // and each Codex home's shared background server, with the rollouts it holds open
+  const serving = c.codexServers(procs, pids)
+  const all = [...raw, ...serving].map(p => p.pid)
+  const envBy = all.length ? c.parseEnv(spawnSync('/bin/sh', ['-c', c.ENV_SCRIPT, 'sh', all.join(',')], { encoding: 'utf8', env: PS_ENV }).stdout) : new Map()
+  const heldBy = all.length ? c.parseRollouts(spawnSync('/usr/sbin/lsof', ['-n', '-P', '-a', '-p', all.join(','), '-Fpn'], { encoding: 'utf8' }).stdout) : new Map()
   const terminals = raw.map(p => c.codexProcFrom(p, envBy.get(p.pid), heldBy.get(p.pid) ?? [], HOME))
+  const servers = new Map()
+  for (const p of serving) {
+    const home = envBy.get(p.pid)?.codexHome || join(HOME, '.codex')
+    servers.set(home, [...(servers.get(home) ?? []), { pid: p.pid, held: heldBy.get(p.pid) ?? [] }])
+  }
   const threads = new Map()
   for (const dir of readdirSync(HOME).filter(n => /^\.codex(-[\w.-]+)?$/.test(n))) {
     const codexHome = join(HOME, dir)
     const db = readdirSync(codexHome).map(n => /^state_(\d+)\.sqlite$/.exec(n)).filter(Boolean).sort((x, y) => y[1] - x[1])[0]?.[0]
     if (!db) continue
     const mine = terminals.filter(t => t.codexHome === codexHome)
-    const sql = c.threadQuery(Math.min(now - c.ACTIVE_MS, ...mine.map(t => t.startedAt - 5000)), now - c.AGENT_MS, mine.flatMap(t => [...t.held, ...(t.resumeId ? [t.resumeId] : [])]))
+    const sql = c.threadQuery(Math.min(now - c.ACTIVE_MS, ...mine.map(t => t.startedAt - 5000)), now - c.AGENT_MS, [...mine.flatMap(t => [...t.held, ...(t.resumeId ? [t.resumeId] : [])]), ...(servers.get(codexHome) ?? []).flatMap(s => s.held)])
     const path = join(codexHome, db)
     threads.set(codexHome, c.parseThreads(spawnSync('sqlite3', ['-json', '-cmd', '.timeout 2000', ...c.readOnlyArgs(path, existsSync(`${path}-shm`)), sql], { encoding: 'utf8' }).stdout))
   }
-  return c.codexSessions({ terminals, threads, now })
+  return c.codexSessions({ terminals, threads, now, servers })
 }
 const waitFor = async (what, ms, test) => {
   for (const end = Date.now() + ms; Date.now() < end; await sleep(2_000)) {
@@ -79,6 +87,7 @@ const AGAIN_CLAUDE = 'READY FOR CODEX · e2e-bring · again@2222222'
 const AGAIN_CODEX = 'READY FOR CLAUDE · e2e-bring · again@3333333'
 const ws = { id: `e2e-bring-${process.pid}`, name: 'e2e bring', env: '', dir: TRUSTED, createdAt: Date.now(), checkout: scratch }
 const ttyOf = target => tmux('display-message', '-p', '-t', target, '#{pane_tty}').stdout.trim().slice(5)
+let codexId
 
 try {
   // where they run first: a session of the private server, as the person's own terminals would be
@@ -111,7 +120,7 @@ try {
     return readdirSync(dir).map(f => join(dir, f)).filter(f => f.endsWith('.jsonl') && statSync(f).birthtimeMs >= started - 1_000)
       .find(f => readFileSync(f, 'utf8').split('\n')[0]?.includes(`"cwd":"${TRUSTED}"`))
   })
-  const codexId = rollout === undefined ? undefined : JSON.parse(readFileSync(rollout, 'utf8').split('\n')[0]).payload.id
+  codexId = rollout === undefined ? undefined : JSON.parse(readFileSync(rollout, 'utf8').split('\n')[0]).payload.id
   const codexFirst = await waitFor('Codex\'s first turn', 180_000, () => {
     const t = turnOf(rollout)
     return t?.state === 'done' && t.cue?.line === FIRST_CODEX ? t : undefined
@@ -136,6 +145,9 @@ try {
   const claudeStop = sh(b.STOP_SCRIPT, claudeTty, b.JOB_COMMANDS.claude, String(claudePid)).trim()
   const codexStop = sh(b.STOP_SCRIPT, codexTty, b.JOB_COMMANDS.codex, String(codexPid)).trim()
   check('closed where they ran: each hung up and exited; the terminal keeps its shell', claudeStop === 'stopped' && codexStop === 'stopped' && !/claude|codex/.test(front(claudeTty) + front(codexTty)), `${claudeStop} ${codexStop}`)
+  // nothing holds Codex's conversation open any more (a shared server lets it go a minute after its terminal closes)
+  const letGo = sh(b.HOLDERS_SCRIPT, codexId ?? 'none', String(b.CODEX_LETS_GO_S)).trim()
+  check('after closing: no Codex holds its conversation open', letGo === 'free', `${letGo} (it ran ${row?.match})`)
   // what the open check sees right after: neither conversation runs anywhere (no live Claude registry entry with it,
   // no Codex terminal matched to it)
   const liveClaude = readdirSync(join(HOME, '.claude', 'sessions')).filter(f => f.endsWith('.json')).some(f => {
@@ -171,7 +183,7 @@ try {
   const claudeArgs = argsIn('claude')
   const codexArgs = argsIn('codex')
   check('workspace: each agent resumed bypassed, whatever mode it ran in before',
-    claudeArgs.split('\n').some(l => /claude .*--resume \S+ --dangerously-skip-permissions/.test(l)) && codexArgs.split('\n').some(l => /codex .*resume .*--dangerously-bypass-approvals-and-sandbox/.test(l)) && !/--sandbox workspace-write/.test(codexArgs),
+    claudeArgs.split('\n').some(l => /claude .*--resume \S+ --dangerously-skip-permissions/.test(l)) && codexArgs.split('\n').some(l => /codex .*resume .*--no-daemon --dangerously-bypass-approvals-and-sandbox/.test(l)) && !/--sandbox workspace-write/.test(codexArgs),
     JSON.stringify([claudeArgs.split('\n').find(l => l.includes('--resume'))?.slice(0, 140), codexArgs.split('\n').find(l => l.includes('resume'))?.slice(0, 160)]))
 } finally {
   // the agents end with their panes: a hang-up first (as closing them would), then a kill for one that stays
@@ -186,7 +198,12 @@ try {
   for (const tool of ['claude', 'codex']) rmSync(w.promptPath(HOME, ws.id, tool), { force: true })
   rmSync(scratch, { recursive: true, force: true })
   rmSync(`${scratch}-worktrees`, { recursive: true, force: true })
-  rmSync(`${scratch}-worktrees`, { recursive: true, force: true })
+  // the test's Codex conversation leaves the person's list
+  if (codexId !== undefined) {
+    const { CODEX_HOME: _, ...env } = process.env
+    const archived = spawnSync('codex', ['archive', codexId], { encoding: 'utf8', timeout: 60_000, env })
+    check('cleaned up: the test\'s Codex conversation archived', archived.status === 0, `${archived.status} ${(archived.stderr || archived.stdout).trim().split('\n')[0]}`)
+  }
   await sleep(2_000)
   const left = spawnSync('/bin/ps', ['-ax', '-o', 'pid=,args='], { encoding: 'utf8' }).stdout.split('\n').filter(l => l.includes(socket) || l.includes(scratch))
   check('cleaned up: no tmux server, process or folder left', left.length === 0 && !existsSync(scratch), left.join(' | '))
