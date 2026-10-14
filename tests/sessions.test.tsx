@@ -3177,9 +3177,10 @@ describe('bringing running sessions into a workspace', () => {
     world.holders[RESUMED_A] = 204
     await create('Reports')
     expect(world.stopped).toEqual(['ttys045 codex|node 207'])
-    // asked, then (held) asked again for up to a minute and a half, saying it waits meanwhile
-    expect(world.heldAsked).toEqual([`${RESUMED_A} 0`, `${RESUMED_A} 90`])
-    expect(toasts).toContain('Codex · Find the report writer: waiting for Codex to let its conversation go (its shared server keeps one about a minute after its terminal closes; up to a minute and a half)…')
+    // asked, then (held) asked again for a minute, then 30 s more, saying it waits each time
+    expect(world.heldAsked).toEqual([`${RESUMED_A} 0`, `${RESUMED_A} 60`, `${RESUMED_A} 30`])
+    expect(toasts).toContain('Codex · Find the report writer: waiting for Codex to let its conversation go (its shared server keeps one about a minute after its terminal closes)…')
+    expect(toasts).toContain('Codex · Find the report writer: still waiting for Codex to let its conversation go (30 s more at most)…')
     expect(JSON.parse(files.get(WORKSPACES)!).workspaces[0].threads).toBeUndefined()
     expect(toasts.at(-1)).toContain(`Not brought in: Codex · Find the report writer (it closed in ttys045, but another Codex (process 204) has its conversation open still, so it was not resumed here, and the workspace's Codex starts new).`)
     await ui.unmount()
@@ -4407,7 +4408,7 @@ describe('a workspace of one agent', () => {
   })
 
   test('Add is left undone, the workspace opened again as it was, when the session cannot go on there', async ($, on) => {
-    const { files } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    const { files, runs } = engine(on, machine, { termProgram: 'Apple_Terminal' })
     const solo = { ...practice, env: '', only: 'claude', purpose: 'roles', checkout: '/Users/u/dev/web-app', threads: { claude: { id: 'session-101', dir: '/Users/u/dev/web-app' } } }
     files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [solo] }))
     world.tmuxPanes = `ws-practice-rbac\tpeers\t/dev/ttys004\t%1\tclaude\t${NOW}\n`
@@ -4428,6 +4429,20 @@ describe('a workspace of one agent', () => {
     expect(world.stopped).toEqual(['ttys004 claude 101', 'ttys000 codex|node 201'])
     expect(JSON.parse(files.get(WORKSPACES)!).workspaces[0]).toEqual({ ...solo, threads: { claude: { ...solo.threads.claude, since: expect.any(Number) } } })
     expect(files.get(openScriptPath(HOME, 'practice-rbac'))).not.toContain('split-window')
+    // removed (from another session) while the session was closing: said, with how to go on with what was closed, and
+    // never started again
+    delete world.holders[HELD]
+    world.exited.delete(201)
+    world.tmuxPanes = `ws-practice-rbac\tpeers\t/dev/ttys004\t%1\tclaude\t${NOW}\n`
+    world.exited.delete(101)
+    let asked = 0
+    world.codexTaskAnswer = () => {
+      if (++asked === 2) files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [] }))
+      return world.codexTask
+    }
+    const opens = runs.filter(r => r[0] === '/usr/bin/osascript' && r[4] === OPEN_SCRIPT).length
+    expect(await run(`add Practice RBAC codex ${HELD}`)).toBe(`Not added: Practice RBAC was removed meanwhile; Codex · Execute research was closed: to go on with it, codex resume ${HELD} (in /Users/u/dev/web-app).`)
+    expect(runs.filter(r => r[0] === '/usr/bin/osascript' && r[4] === OPEN_SCRIPT)).toHaveLength(opens)
   })
 })
 

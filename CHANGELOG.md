@@ -2,7 +2,7 @@
 
 What each version changed, newest first. Each links its pull request, which holds the details, the checks and the reviews. After updating, run `/reload-plugins` in your sessions.
 
-## 0.31.0 — 2026-10-14
+## 0.31.0 — 2026-10-14 ([#43](https://github.com/d3r3nic/claude-live-sessions/pull/43))
 - **Add the other agent to a workspace of one:** `Add Codex` (or `Add Claude`) in its actions, or `/workspace add <name> claude|codex [<id>]`: start it new, or bring in a running session of it from any folder, which goes on there in its own conversation. The workspace closes between turns and opens again with both; with a purpose, the agent that was there is told it no longer works alone, Claude gets peer coding ready and the relay is on. Before, a workspace made with one agent could not take the other, and `Assign to workspace` only lists a session under it.
 - **Codex terminals started without options are certain again:** Codex 0.162 runs such a terminal's conversation in a shared background server (`codex app-server --managed-daemon`), so the terminal holds no conversation file and was never offered to bring in (`not certain`). The server holds the file open for it: such a terminal is now matched through what its server holds, when the server's terminals and conversations pair off in one way only (two working in one folder do not), and offered.
 - **A Codex conversation is not resumed while a Codex holds it open:** it goes on in a workspace (brought in, added, or opened again) only once no Codex process holds its file open (the desktop app holds none, so it is not seen). The shared server lets one go about a minute after its terminal closes: it waits up to 90 s, saying so.

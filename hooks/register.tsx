@@ -975,8 +975,12 @@ async function codexLetsGo($: EngineInterface, id: string, what: string): Promis
     holderOf((await $.process.run(['/bin/sh', '-c', HOLDERS_SCRIPT, 'sh', id, String(seconds)], { timeoutMs: (seconds + 30) * 1000 }).catch(() => ({ stdout: '' }))).stdout)
   const now = await ask(0)
   if (now === 'free') return now
-  await toast($, `${what}: waiting for Codex to let its conversation go (its shared server keeps one about a minute after its terminal closes; up to a minute and a half)…`, { timeoutMs: 60_000 })
-  return ask(CODEX_LETS_GO_S)
+  // said again after a minute (a toast shows for a minute at most)
+  await toast($, `${what}: waiting for Codex to let its conversation go (its shared server keeps one about a minute after its terminal closes)…`, { timeoutMs: 60_000 })
+  const first = await ask(60)
+  if (first === 'free') return first
+  await toast($, `${what}: still waiting for Codex to let its conversation go (${CODEX_LETS_GO_S - 60} s more at most)…`, { timeoutMs: (CODEX_LETS_GO_S - 60) * 1000 })
+  return ask(CODEX_LETS_GO_S - 60)
 }
 
 /**
@@ -1422,9 +1426,10 @@ async function addTo($: EngineInterface, ws: Workspace, tool: 'claude' | 'codex'
   const mark = addingPath(home, kept.id)
   await $.fs.write(mark, `${JSON.stringify({ at: await $.clock.now() })}\n`)
   const unmark = () => $.process.run(['/bin/rm', '-f', mark], { timeoutMs: 10_000 }).catch(() => undefined)
-  const asItWas = async (said: string) => {
+  const asItWas = async (said: string, isGone = false) => {
     await unmark()
-    const again = wasRunning ? await openWorkspace($, kept) : undefined
+    // (one removed meanwhile is never started again)
+    const again = wasRunning && !isGone ? await openWorkspace($, kept) : undefined
     return { isAdded: false, text: `Not added: ${said}.${again === undefined ? '' : again.isOpen ? ` ${kept.name} was opened again as it was. ${again.text}` : ` ${kept.name} stays closed: ${again.text}`}` }
   }
   try {
@@ -1460,7 +1465,7 @@ async function addTo($: EngineInterface, ws: Workspace, tool: 'claude' | 'codex'
     })
     if (!saved || added === undefined) {
       const resume = thread === undefined ? '' : `; ${brought!.label} was closed: to go on with it, ${tool === 'claude' ? `claude --resume ${thread.id}` : `codex resume ${thread.id}`} (in ${thread.dir})`
-      return await asItWas(`${saved ? `${kept.name} was removed meanwhile` : UNREADABLE}${resume}`)
+      return await asItWas(`${saved ? `${kept.name} was removed meanwhile` : UNREADABLE}${resume}`, saved)
     }
     const made: Workspace = added
     const isBrought = thread !== undefined
