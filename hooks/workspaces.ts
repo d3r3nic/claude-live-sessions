@@ -868,9 +868,17 @@ const setUpStep = (ws: Pick<Workspace, 'checkout' | 'dir'>) =>
  * Claude has no work of its own to tell which repository it is, so it asks Codex before it sets anything up.
  */
 const askCodexFirst = (ws: Pick<Workspace, 'dir'>) => [
-  `1. The workspace's folder, ${ws.dir}, is in no git repository, and the work under way is Codex's: find out from Codex first which repository and branch it is in. Make your alignment move asking it, and end your turn with the line the rules' cue prints; set nothing up before it answers.`,
-  '2. Once it answers: if that repository is not set up for peer coding in the current layout, set it up (record the owner\'s decisions you already know and ask for the rest with NEEDS USER), and go on with Codex\'s branch there, or start one for this purpose (named from the purpose by the settings\' branch naming, never from the workspace\'s name) in its own worktree beside the repository\'s main checkout (<checkout>-worktrees/).',
+  // (the rules' cue needs a repository set up for peer coding: this question is a line of Claude's own, which the relay
+  // passes as it is)
+  `1. The workspace's folder, ${ws.dir}, is in no git repository, and the work under way is Codex's: find out from Codex first which repository and branch it is in. Set nothing up yet, and end your turn with exactly this line, which the relay passes to Codex: ${ASK_WHERE}`,
+  '2. Codex answers with a line naming them (READY FOR CLAUDE · <repository> · <branch>). Then, if that repository is not set up for peer coding in the current layout, set it up (record the owner\'s decisions you already know and ask for the rest with NEEDS USER); go on with Codex\'s branch there, or start one for this purpose (named from the purpose by the settings\' branch naming, never from the workspace\'s name) in its own worktree beside the repository\'s main checkout (<checkout>-worktrees/); make your alignment move for that branch and end your turn with the line the rules\' cue prints.',
 ]
+/** A new Claude's question to a Codex whose work is under way, in a workspace whose folder is in no repository. */
+export const ASK_WHERE = 'READY FOR CODEX · which repository and branch is your work in?'
+/** What that Codex is told to answer: one line naming them, which the relay passes to Claude. */
+const ANSWER_WHERE = `Claude, new here, will first ask which repository and branch your work is in, as the workspace's folder is in no git repository ("${ASK_WHERE}"): answer with one line naming them, READY FOR CLAUDE · <the repository's folder> · <the branch>, then wait for Claude's hand-off.`
+/** Whether a new Claude asks its Codex where the work is first (askCodexFirst): no repository and no branch chosen. */
+const isAskedWhere = (ws: Pick<Workspace, 'checkout' | 'branch'>) => ws.checkout === undefined && ws.branch === undefined
 
 /** Step 2 of a first prompt when the owner chose the branch: go on with it there, and start no other. */
 const goOnStep = (ws: Pick<Workspace, 'branch' | 'dir'>) =>
@@ -892,7 +900,7 @@ export function setupPrompt(ws: Pick<Workspace, 'name' | 'purpose' | 'checkout' 
     `You are Claude, one of two peers here; ${codex}. ${RELAY_FOR_CLAUDE}`,
     '',
     'Get the workspace ready for peer coding, using the peer-coding skill and the rules it leads to:',
-    ...(isBrought && ws.checkout === undefined && ws.branch === undefined
+    ...(isBrought && isAskedWhere(ws)
       ? askCodexFirst(ws)
       : [
           setUpStep(ws),
@@ -956,7 +964,7 @@ export function joinPrompt(ws: Pick<Workspace, 'name' | 'purpose' | 'checkout' |
       '',
       leanWork(true),
       '',
-      'Nothing to do until then: reply with one short line saying you are ready. When Claude\'s hand-off comes, align with it, and add what you know from your own work above that it does not say.',
+      `Nothing to do until then: reply with one short line saying you are ready.${ws.threads?.claude === undefined && isAskedWhere(ws) ? ` ${ANSWER_WHERE}` : ''} When Claude's hand-off comes, align with it, and add what you know from your own work above that it does not say.`,
     ].join('\n')
   }
   const codex = ws.threads?.codex === undefined ? 'Codex runs in the pane beside you, starting new' : 'Codex runs in the pane beside you, in its own conversation, brought in too'
@@ -997,7 +1005,7 @@ export function addedPrompt(ws: Pick<Workspace, 'name' | 'purpose' | 'checkout' 
       '',
       leanWork(true),
       '',
-      `Nothing to do until then: reply with one short line saying you are ready. When Claude's hand-off comes, align with it${o.isNew && !o.isBrought ? '.' : `, and add what you know from ${o.isNew ? 'your own work above' : 'your work here'} that it does not say.`}`,
+      `Nothing to do until then: reply with one short line saying you are ready.${!o.isNew && !o.isBrought && isAskedWhere(ws) ? ` ${ANSWER_WHERE}` : ''} When Claude's hand-off comes, align with it${o.isNew && !o.isBrought ? '.' : `, and add what you know from ${o.isNew ? 'your own work above' : 'your work here'} that it does not say.`}`,
     ].join('\n')
   }
   const known = o.isNew ? 'the work Codex has done here' : 'your work here'
@@ -1009,7 +1017,7 @@ export function addedPrompt(ws: Pick<Workspace, 'name' | 'purpose' | 'checkout' 
     '',
     'From here, work as a peer under the peer-coding rules, using the peer-coding skill:',
     // (a new Claude with no work of its own, in a folder in no repository: Codex says which one first)
-    ...(o.isNew && !o.isBrought && ws.checkout === undefined && ws.branch === undefined
+    ...(o.isNew && !o.isBrought && isAskedWhere(ws)
       ? askCodexFirst(ws)
       : [
           setUpStep(ws),

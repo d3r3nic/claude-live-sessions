@@ -73,6 +73,7 @@ import {
   assigned,
   checkoutResult,
   chatsPurpose,
+  ASK_WHERE,
   processStart,
   PROCESS_START,
   CHECKOUT_SCRIPT,
@@ -3040,9 +3041,21 @@ describe('bringing running sessions into a workspace', () => {
     expect(setupPrompt({ ...ws, threads: undefined })).toContain('2. Start a branch for this purpose')
     // in a folder in no repository, a new Claude with no work of its own asks Codex which repository first
     const outside = { ...ws, checkout: undefined, dir: '/Users/u/dev' }
-    const first = '1. The workspace\'s folder, /Users/u/dev, is in no git repository, and the work under way is Codex\'s: find out from Codex first which repository and branch it is in. Make your alignment move asking it, and end your turn with the line the rules\' cue prints; set nothing up before it answers.'
-    expect(setupPrompt({ ...outside, threads: { codex: { id: 'b', dir: '/y' } } })).toContain(first)
+    // (its question a line of its own, as no repository is set up for the rules' cue yet: one the relay passes to Codex)
+    const first = '1. The workspace\'s folder, /Users/u/dev, is in no git repository, and the work under way is Codex\'s: find out from Codex first which repository and branch it is in. Set nothing up yet, and end your turn with exactly this line, which the relay passes to Codex: READY FOR CODEX · which repository and branch is your work in?'
+    expect(cueOf(ASK_WHERE)).toEqual({ kind: 'ready', to: 'codex', line: ASK_WHERE })
+    const asked = { ...outside, threads: { codex: { id: 'b', dir: '/y' } } }
+    expect(setupPrompt(asked)).toContain(first)
+    expect(setupPrompt(asked)).toContain('2. Codex answers with a line naming them (READY FOR CLAUDE · <repository> · <branch>). Then, if that repository is not set up')
     expect(addedPrompt(outside, 'claude', { isNew: true, isBrought: false })).toContain(first)
+    // and its Codex is told to answer so, in a line the relay passes back; never where a repository is known
+    const answer = 'Claude, new here, will first ask which repository and branch your work is in, as the workspace\'s folder is in no git repository ("READY FOR CODEX · which repository and branch is your work in?"): answer with one line naming them, READY FOR CLAUDE · <the repository\'s folder> · <the branch>, then wait for Claude\'s hand-off.'
+    expect(cueOf('READY FOR CLAUDE · /Users/u/dev/api · feat/x')?.kind).toBe('ready')
+    expect(joinPrompt(asked, 'codex')).toContain(answer)
+    expect(addedPrompt(outside, 'codex', { isNew: false, isBrought: false })).toContain(answer)
+    expect(joinPrompt({ ...asked, checkout: '/Users/u/dev/api' }, 'codex')).not.toContain(answer)
+    expect(joinPrompt({ ...asked, threads: { ...asked.threads, claude: { id: 'a', dir: '/x' } } }, 'codex')).not.toContain(answer)
+    expect(addedPrompt(outside, 'codex', { isNew: false, isBrought: true })).not.toContain(answer)
     // one with work of its own finds it in that work
     expect(addedPrompt(outside, 'claude', { isNew: true, isBrought: true })).toContain('1. The workspace\'s folder, /Users/u/dev, is in no git repository: work in the repository the purpose concerns (the one your work above is in, if any).')
     expect(setupPrompt({ ...outside, threads: undefined })).not.toContain('the work under way is Codex\'s')
