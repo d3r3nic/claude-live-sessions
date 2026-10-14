@@ -481,11 +481,16 @@ export const sortClaude = (list: ClaudeSession[]) =>
 /** An open codex terminal, as its process and environment tell it. */
 /**
  * How a Codex terminal was matched to its conversation: it holds the
- * conversation's rollout open (`held`, certain); its command line resumed it
+ * conversation's rollout open (`held`, certain); Codex's shared background
+ * server, which runs the conversations of a terminal started without
+ * `--no-daemon` while it runs, holds it open, and each conversation that
+ * server holds is matched to one of its terminals and each of its terminals
+ * to one of them (`loaded`, certain as far as their start lines and folders
+ * tell; checked again when one is closed); its command line resumed it
  * (`resume`: a `/new` or `/resume` inside since would leave that stale); or it
  * is the newest made in its folder since it started (`folder`).
  */
-export type CodexMatch = 'held' | 'resume' | 'folder'
+export type CodexMatch = 'held' | 'loaded' | 'resume' | 'folder'
 
 export type CodexProc = {
   pid: number
@@ -534,6 +539,19 @@ export function codexTerminals(procs: ReadonlyMap<number, Proc>, codexPids: Read
     if (!codexPids.has(p.pid) || p.tty === '??' || p.tty === '') return false
     const sub = subcommandOf(wordsAfterExe(p.args))
     return sub === undefined || !NOT_SESSIONS.has(sub)
+  })
+}
+
+/**
+ * Codex's shared background servers (`codex app-server … --managed-daemon`, on
+ * no terminal): one per Codex home, running the conversations of the
+ * terminals that use it, each conversation's rollout held open there.
+ */
+export function codexServers(procs: ReadonlyMap<number, Proc>, codexPids: ReadonlySet<number>): Proc[] {
+  return [...procs.values()].filter(p => {
+    if (!codexPids.has(p.pid) || (p.tty !== '??' && p.tty !== '')) return false
+    const words = wordsAfterExe(p.args)
+    return subcommandOf(words) === 'app-server' && words.includes('--managed-daemon')
   })
 }
 
@@ -606,20 +624,32 @@ const surfaceOf = (t: ThreadRow) =>
 /**
  * The Codex sessions: every open terminal matched to its thread, then every
  * other top-level thread written in the last half hour. A terminal's thread
- * is, in order of certainty: the newest of the threads it holds open; the one
- * it resumed; the newest in its folder created since it started; the newest
+ * is, in order of certainty: the newest of the threads it holds open; for a
+ * terminal holding none whose Codex home has a shared background server
+ * (`servers`), one that server holds open: the one it resumed, else the
+ * newest in its folder created, then written, since it started; the one it
+ * resumed; the newest in its folder created since it started; the newest
  * in its folder written since it started. Each pass claims before the next,
  * and within a pass the newest terminal chooses first, so a thread born before
  * the newer of two terminals in a folder started goes to the older one. Two
  * threads both born after it, neither held open, cannot be told apart: the
- * newer terminal takes the one written last.
+ * newer terminal takes the one written last. A match through a server stands
+ * (`loaded`) only while each of its terminals holding none has one, and each
+ * top-level thread it holds is one of theirs; otherwise each is said as
+ * `resume` or `folder`, by how it was found.
  */
 export function codexSessions(args: {
   terminals: readonly CodexProc[]
   threads: ReadonlyMap<string, readonly ThreadRow[]>
   now: number
+  /** Each Codex home's shared background servers: their processes and the rollouts each holds open. */
+  servers?: ReadonlyMap<string, readonly { pid: number; held: readonly string[] }[]>
 }): CodexSession[] {
   const { terminals, threads, now } = args
+  const servers = args.servers ?? new Map<string, readonly { pid: number; held: readonly string[] }[]>()
+  const loadedIn = (codexHome: string) => new Set((servers.get(codexHome) ?? []).flatMap(s => s.held))
+  // a terminal that runs its conversation in its home's server: it holds none itself (an exec run never uses one)
+  const isClient = (proc: CodexProc) => proc.held.length === 0 && !proc.isExec && loadedIn(proc.codexHome).size > 0
   // a home named with a trailing slash is the same home
   const homeName = (codexHome: string) => profileOf(codexHome.replace(/\/+$/, '').split('/').pop() ?? codexHome)
   const newest = (list: ThreadRow[]) => list.sort((a, b) => b.updated_at_ms - a.updated_at_ms)[0]
@@ -639,6 +669,28 @@ export function codexSessions(args: {
   }
   const sinceStart = (proc: CodexProc, ms: number) => ms >= proc.startedAt - 5_000
   pass('held', (proc, free) => newest(free.filter(t => proc.held.includes(t.id))))
+  pass('loaded', (proc, free) => {
+    if (!isClient(proc)) return undefined
+    const loaded = loadedIn(proc.codexHome)
+    const open = free.filter(t => loaded.has(t.id) && t.cwd === proc.cwd && madeBy(proc, t))
+    return free.find(t => t.id === proc.resumeId && loaded.has(t.id)) ??
+      newest(open.filter(t => sinceStart(proc, t.created_at_ms))) ??
+      newest(open.filter(t => sinceStart(proc, t.updated_at_ms)))
+  })
+  // a server's matches stand only when its terminals and the top-level threads it holds pair off: else one of its
+  // terminals may run what another was matched to (a /resume inside), or one not found at all
+  for (const [codexHome, list] of servers) {
+    const held = new Set(list.flatMap(s => s.held))
+    const tops = (threads.get(codexHome) ?? []).filter(t => held.has(t.id)).map(t => t.id)
+    const clients = terminals.filter(p => p.codexHome === codexHome && isClient(p))
+    const theirs = new Set(clients.map(p => matched.get(p.pid)?.thread.id))
+    const isPaired = clients.every(p => matched.get(p.pid)?.by === 'loaded') && tops.every(id => theirs.has(id))
+    if (isPaired) continue
+    for (const p of clients) {
+      const m = matched.get(p.pid)
+      if (m?.by === 'loaded') matched.set(p.pid, { ...m, by: m.thread.id === p.resumeId ? 'resume' : 'folder' })
+    }
+  }
   pass('resume', (proc, free) => free.find(t => t.id === proc.resumeId))
   pass('folder', (proc, free) =>
     newest(free.filter(t => madeBy(proc, t) && t.cwd === proc.cwd && sinceStart(proc, t.created_at_ms))),
@@ -661,8 +713,12 @@ export function codexSessions(args: {
   })
   const rows: CodexSession[] = terminals.map(proc => {
     const found = matched.get(proc.pid)
+    const loadedBy = found?.by === 'loaded' ? (servers.get(proc.codexHome) ?? []).find(s => s.held.includes(found.thread.id))?.pid : undefined
     return found !== undefined
-      ? { ...toRow(found.thread, proc.codexHome, 'terminal', proc.tty), pid: proc.pid, startedAt: proc.startedAt, match: found.by, ...(proc.isExec ? { isExec: true } : {}) }
+      ? {
+          ...toRow(found.thread, proc.codexHome, 'terminal', proc.tty), pid: proc.pid, startedAt: proc.startedAt, match: found.by,
+          ...(proc.isExec ? { isExec: true } : {}), ...(loadedBy === undefined ? {} : { loadedBy }),
+        }
       : {
           key: `pid-${proc.pid}`,
           title: 'session (thread not found)',

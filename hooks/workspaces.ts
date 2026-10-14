@@ -27,12 +27,15 @@ export type WorkspaceCommand =
   | { action: 'list' }
   | { action: 'new'; dir: string; env: string; name: string; purpose: string; only?: 'claude' | 'codex'; goOn?: true }
   | { action: 'open' | 'close' | 'rm'; ref: string }
+  | { action: 'add'; ref: string; tool: 'claude' | 'codex'; id?: string }
   | { action: 'help'; error?: string }
 
 /**
  * `/workspace` arguments: `new <folder> <env> <name> [--only claude|codex]
  * [--go-on] [--for <purpose>]`, `open <name>`, `close <name>`, `rm <name>`,
- * or nothing to list. `<env>` is required and must be one of `envs` or `default`: a
+ * `add <name> claude|codex [<session id>]` (the other agent, to a workspace
+ * of one: starting new, or going on with the conversation of the running
+ * Claude session or Codex conversation of that id), or nothing to list. `<env>` is required and must be one of `envs` or `default`: a
  * misspelt one is an error, never another account. `~` in the folder is the
  * home directory. Before `--for`: `--only` names the one agent it runs;
  * `--go-on` has the agents go on with the branch checked out in the folder.
@@ -44,7 +47,17 @@ export function parseWorkspaceArgs(args: string, envs: readonly string[], home: 
   if (verb === 'open' || verb === 'close' || verb === 'rm') {
     return rest.length > 0 ? { action: verb, ref: rest.join(' ') } : { action: 'help', error: `say which workspace to ${verb}` }
   }
-  if (verb !== 'new') return { action: 'help', error: `"${verb}" is not one of new, open, close, rm, list` }
+  if (verb === 'add') {
+    // the name may be several words: the agent is the last word, or the one before an id
+    const last = rest.at(-1)?.toLowerCase() ?? ''
+    const before = rest.at(-2)?.toLowerCase() ?? ''
+    const isTool = (w: string): w is 'claude' | 'codex' => w === 'claude' || w === 'codex'
+    const [tool, id, name] = isTool(last) ? [last, undefined, rest.slice(0, -1)] : isTool(before) ? [before, rest.at(-1), rest.slice(0, -2)] : [undefined, undefined, rest]
+    if (tool === undefined || name.length === 0) return { action: 'help', error: 'add needs a workspace, then claude or codex, then (to go on with a running session) its id' }
+    if (id !== undefined && !/^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/.test(id)) return { action: 'help', error: `"${id}" is not a session's id` }
+    return { action: 'add', ref: name.join(' '), tool, ...(id === undefined ? {} : { id }) }
+  }
+  if (verb !== 'new') return { action: 'help', error: `"${verb}" is not one of new, open, close, add, rm, list` }
   const [folder = '', envWord = '', ...afterEnv] = rest
   const at = afterEnv.indexOf('--for')
   const beforeFor = at >= 0 ? afterEnv.slice(0, at) : afterEnv
@@ -143,7 +156,8 @@ export const promptPath = (home: string, id: string, tool: 'claude' | 'codex') =
  * from the workspace, when there is one, and removes it so a restart never
  * sends it again; it goes after `--`, so an option taking several values
  * (Claude's --add-dir) never takes it. Codex starts without its update
- * offer, whose default answer on Enter installs a new version. Every agent
+ * offer, whose default answer on Enter installs a new version, and runs its
+ * conversation itself (NO_DAEMON). Every agent
  * starts with its permission checks bypassed, the owner's choice for their
  * workspaces (`BYPASS`): Claude asks before nothing, and Codex runs with no
  * sandbox and no approvals (so it needs no --add-dir for the worktrees
@@ -163,7 +177,7 @@ function paneScript(tool: 'claude' | 'codex', ws: Pick<Workspace, 'id' | 'env' |
   const agent =
     thread === undefined
       ? tool === 'codex'
-        ? `${start} ${UPDATE_OFF}${flags} \${p:+--} \${p:+"$p"}`
+        ? `${start} ${UPDATE_OFF} ${NO_DAEMON}${flags} \${p:+--} \${p:+"$p"}`
         : `${start}${flags}${lean}${addDir} \${p:+--} \${p:+"$p"}`
       : tool === 'claude'
         // a Claude conversation is kept under the folder it started in: resumed from there, unless a live Claude
@@ -171,11 +185,17 @@ function paneScript(tool: 'claude' | 'codex', ws: Pick<Workspace, 'id' | 'env' |
         ? `open=; for f in ${shellWord(`${home}/.claude${ws.env === '' ? '' : `-${ws.env}`}`)}/sessions/*.json; do grep -q '"sessionId":"${thread.id}"' "$f" 2>/dev/null && kill -0 "$(basename "$f" .json)" 2>/dev/null && open=1; done; ` +
           `if [ -n "$open" ]; then echo 'This conversation is open in another Claude session; close it there, then open the workspace again.'; ` +
           `else cd ${shellWord(thread.dir)} && ${start} --resume ${thread.id}${flags}${lean}${addDir} \${p:+--} \${p:+"$p"}; fi`
-        : `${start} resume ${UPDATE_OFF}${flags} -C ${shellWord(thread.dir)} -- ${thread.id} \${p:+"$p"}`
+        : `${start} resume ${UPDATE_OFF} ${NO_DAEMON}${flags} -C ${shellWord(thread.dir)} -- ${thread.id} \${p:+"$p"}`
   const run = `p=$(cat ${prompt} 2>/dev/null) && rm -f ${prompt}; ${agent}`
   return `/bin/sh -c ${shellWord(`${run}; exec "$SHELL" -l`)}`
 }
 const UPDATE_OFF = '-c check_for_update_on_startup=false'
+/**
+ * A workspace's Codex runs its conversation itself, never in Codex's shared background server: it holds the
+ * conversation's rollout open, which is how which conversation it runs is known for certain (CodexMatch `held`), and
+ * it ends with its pane.
+ */
+export const NO_DAEMON = '--no-daemon'
 /** How every workspace agent starts, fresh or resumed: its permission checks bypassed (Claude), or its approvals and sandbox (Codex). */
 export const BYPASS = { claude: '--dangerously-skip-permissions', codex: '--dangerously-bypass-approvals-and-sandbox' } as const
 
@@ -879,6 +899,46 @@ export function joinPrompt(ws: Pick<Workspace, 'name' | 'purpose' | 'checkout' |
       ? `2. ${goOnStep(ws)} Work of yours not committed yet stays where it is: ask the owner with NEEDS USER before moving any of it.`
       : `2. If the work above already has a peer-coding branch, go on with it. Otherwise start one for this purpose: name it from the purpose by the settings' branch naming, never from the workspace's name, in its own worktree in ${ws.checkout ?? '<checkout>'}-worktrees/. Work of yours not committed yet stays where it is: ask the owner with NEEDS USER before moving any of it.`,
     '3. Make your alignment move for that branch, telling Codex where the work stands, and end your turn with the line the rules\' cue prints.',
+  ].join('\n')
+}
+
+/**
+ * The first prompts when the owner adds the other agent to a workspace of one,
+ * made for a purpose: for `tool`, the agent that `isNew` joins now (resuming
+ * its own conversation when `isBrought`), or the one that worked there alone
+ * (going on with its conversation). Either way Claude gets peer coding ready,
+ * going on with a branch the work already has, and Codex waits for its
+ * hand-off; the one that was there tells, or is asked, where the work stands.
+ */
+export function addedPrompt(ws: Pick<Workspace, 'name' | 'purpose' | 'checkout' | 'branch' | 'dir'>, tool: 'claude' | 'codex', o: { isNew: boolean; isBrought: boolean }): string {
+  const other = tool === 'claude' ? 'Codex' : 'Claude'
+  const was = o.isNew
+    ? `${o.isBrought ? 'The owner moved this conversation into the workspace: everything above stays yours. ' : ''}You join ${other}, who has worked here alone until now: you are one of two peers from here, ${other} in the pane beside you.`
+    : `The owner added ${tool === 'claude' ? 'Codex' : 'Claude'} to this workspace, ${o.isBrought ? 'in its own conversation, brought in from elsewhere' : 'starting new'}: you no longer work here alone, but as one of two peers, ${other} in the pane beside you.`
+  const head = [`This is the workspace "${ws.name}". What it is for: ${ws.purpose ?? ''}`, '']
+  if (tool === 'codex') {
+    return [
+      ...head,
+      `${was} Claude is getting peer coding ready now, under the peer-coding rules. ${RELAY_FOR_CODEX}`,
+      '',
+      leanWork(true),
+      '',
+      `Nothing to do until then: reply with one short line saying you are ready. When Claude's hand-off comes, align with it, and add what you know from ${o.isNew ? 'your own work above' : 'your work here'} that it does not say.`,
+    ].join('\n')
+  }
+  const known = o.isNew ? 'the work Codex has done here' : 'your work here'
+  return [
+    ...head,
+    `${was} ${RELAY_FOR_CLAUDE}`,
+    '',
+    leanWork(true),
+    '',
+    'From here, work as a peer under the peer-coding rules, using the peer-coding skill:',
+    '1. If this repository is not set up for peer coding in the current layout, set it up. Record the owner\'s decisions you already know and ask for the rest with NEEDS USER.',
+    ws.branch !== undefined
+      ? `2. ${goOnStep(ws)}`
+      : `2. If ${known} is on a branch, go on with it${o.isNew ? ' (ask Codex in your alignment brief if the repository does not show which)' : ''}. Otherwise start one for this purpose: name it from the purpose by the settings' branch naming, never from the workspace's name, in its own worktree in ${ws.checkout ?? '<checkout>'}-worktrees/.${o.isNew && !o.isBrought ? '' : ' Work not committed yet stays where it is: ask the owner with NEEDS USER before moving any of it.'}`,
+    `3. Make your alignment move for that branch, ${o.isNew ? 'asking Codex where its work stands' : 'telling Codex where the work stands'}, and end your turn with the line the rules' cue prints.`,
   ].join('\n')
 }
 

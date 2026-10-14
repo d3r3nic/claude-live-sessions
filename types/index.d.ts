@@ -65,8 +65,10 @@ export type CodexSession = {
   /** An open terminal matched to its thread: its process, when it started, how it was matched (CodexMatch), and whether it is an exec run. */
   pid?: number
   startedAt?: number
-  match?: 'held' | 'resume' | 'folder'
+  match?: 'held' | 'loaded' | 'resume' | 'folder'
   isExec?: boolean
+  /** Matched as `loaded`: the process of Codex's shared background server that runs its conversation for it. */
+  loadedBy?: number
   /** Its context at its last request, in tokens, and its window, as its rollout records them (none read yet: unset). */
   context?: SessionContext
 }
@@ -217,6 +219,8 @@ declare module 'claude-code' {
       projects: string[]
       /** The session whose workspace is being chosen: its row's key and lasting id; '' when none. */
       assigning: { key: string; member: string }
+      /** The workspace of one whose Add chooser is shown ('' none). */
+      adding: string
       /** A workspace is being made: a second create waits for it instead of making another. */
       creating: boolean
       /** The usage by project shown under the limits; kept across sessions. */

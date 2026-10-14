@@ -9,7 +9,7 @@ import type { RelayEvent, Side, Step } from './relay'
 import { branchOf, checkDue, DRIFT_EVERY, driftRequest, isDueAfterCompaction, parseVerdict, recordFolderOf, RECORDS_SCRIPT } from './drift'
 import { hiddenNames, hideInTree, hideNames, hidingFrom, namesPath, namesProblem, NO_HIDING, turned } from './names'
 import type { Hiding } from './names'
-import { bringable, codexDir, envOfProfile, isKnownCodex, CODEX_FOLDER_SCRIPT, CODEX_TASK_SCRIPT, codexTaskState, JOB_COMMANDS, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, toggled, withThreads } from './bring'
+import { bringable, codexDir, envOfProfile, holderOf, HOLDERS_SCRIPT, isKnownCodex, CODEX_FOLDER_SCRIPT, CODEX_TASK_SCRIPT, codexTaskState, JOB_COMMANDS, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, toggled, withThreads } from './bring'
 import {
   agentsOf,
   CHECKOUT_SCRIPT,
@@ -48,6 +48,7 @@ import {
   statusJobs,
   setupPrompt,
   joinPrompt,
+  addedPrompt,
   soloPrompt,
   BRANCH_SCRIPT,
   headOf,
@@ -87,6 +88,7 @@ import {
   isDarkBackground,
   codexProcFrom,
   codexSessions,
+  codexServers,
   codexTerminals,
   isClaudeProcess,
   isAttachTo,
@@ -194,6 +196,8 @@ const NO_DRAFT = { isOpen: false, name: '', query: '', dir: '', env: '', purpose
 const draft = atom({ plugin: 'live-sessions', key: 'draft' } as const, NO_DRAFT)
 /** The session whose workspace is being chosen. */
 const assigning = atom({ plugin: 'live-sessions', key: 'assigning' } as const, { key: '', member: '' })
+/** The workspace of one whose Add chooser is shown ('' none). */
+const adding = atom({ plugin: 'live-sessions', key: 'adding' } as const, '')
 /** A workspace is being made in this session. */
 const creating = atom({ plugin: 'live-sessions', key: 'creating' } as const, false)
 /** The row whose actions are shown, as `item:<key>`, `tree:<key>`, `repo:<key>` or `ws:<id>`; '' for none. */
@@ -349,6 +353,8 @@ async function codexThreads(
   terminals: readonly CodexProc[],
   now: number,
   problems: string[],
+  /** Threads its shared background server holds open, read whenever they were last written. */
+  loaded: readonly string[] = [],
 ): Promise<ThreadRow[] | undefined> {
   const files = await $.fs.list(codexHome).catch(() => [])
   const db = files
@@ -358,7 +364,7 @@ async function codexThreads(
   if (db === undefined) return undefined
   const mine = terminals.filter(t => t.codexHome === codexHome)
   const since = Math.min(now - ACTIVE_MS, ...mine.map(t => t.startedAt - 5_000))
-  const ids = mine.flatMap(t => [...t.held, ...(t.resumeId === undefined ? [] : [t.resumeId])])
+  const ids = [...mine.flatMap(t => [...t.held, ...(t.resumeId === undefined ? [] : [t.resumeId])]), ...loaded]
   const sql = threadQuery(since, now - AGENT_MS, ids)
   const name = profileOf(codexHome.split('/').pop() ?? codexHome)
   try {
@@ -419,15 +425,24 @@ async function collect($: EngineInterface, home: string, now: number): Promise<S
 
   const open = codexTerminals(procs, codexPids)
   let terminals: CodexProc[] = []
+  // each Codex home's shared background server, with the rollouts it holds open: the conversations of the terminals
+  // that run theirs there (only while one of them is open is it asked about)
+  const servers = new Map<string, { pid: number; held: string[] }[]>()
   if (open.length > 0) {
+    const serving = codexServers(procs, codexPids)
     const openPids = open.map(p => p.pid)
-    const env = await $.process.run(['/bin/sh', '-c', ENV_SCRIPT, 'sh', openPids.join(',')], {
+    const allPids = [...openPids, ...serving.map(p => p.pid)]
+    const env = await $.process.run(['/bin/sh', '-c', ENV_SCRIPT, 'sh', allPids.join(',')], {
       env: PS_ENV,
       timeoutMs: 10_000,
     })
     const envByPid = parseEnv(env.stdout)
-    const byPid = await heldRollouts($, openPids, now)
+    const byPid = await heldRollouts($, allPids, now)
     terminals = open.map(p => codexProcFrom(p, envByPid.get(p.pid), byPid.get(p.pid) ?? [], home))
+    for (const p of serving) {
+      const codexHome = envByPid.get(p.pid)?.codexHome || `${home}/.codex`
+      servers.set(codexHome, [...(servers.get(codexHome) ?? []), { pid: p.pid, held: byPid.get(p.pid) ?? [] }])
+    }
   }
   const codexHomes = new Set([
     ...dirsLike(/^\.codex(-[\w.-]+)?$/).map(name => `${home}/${name}`),
@@ -435,10 +450,10 @@ async function collect($: EngineInterface, home: string, now: number): Promise<S
   ])
   const threads = new Map<string, ThreadRow[]>()
   for (const codexHome of codexHomes) {
-    const rows = await codexThreads($, codexHome, terminals, now, problems)
+    const rows = await codexThreads($, codexHome, terminals, now, problems, (servers.get(codexHome) ?? []).flatMap(s => s.held))
     if (rows !== undefined) threads.set(codexHome, rows)
   }
-  const started = codexSessions({ terminals, threads, now })
+  const started = codexSessions({ terminals, threads, now, servers })
 
   // each session is listed where it has been working, which its own records say
   const rollouts = new Map([...threads.values()].flat().map(t => [t.id, t.rollout_path] as const))
@@ -923,15 +938,28 @@ async function closeWorkspace($: EngineInterface, ws: Workspace): Promise<{ isCl
 
 /**
  * Whether a Codex terminal runs the conversation its row says, made sure of now: the rollout it holds open, read fresh;
- * or, the only Codex terminal of its account, no other conversation written there since it started.
+ * matched through its shared background server, that server holds it open still, read fresh (and once the terminal
+ * is closed, nothing may hold it: HOLDERS_SCRIPT); or, the only Codex terminal of its account, no other conversation
+ * written there since it started.
  */
 async function isSureCodex($: EngineInterface, codexHome: string, s: CodexSession): Promise<boolean> {
   if (s.pid === undefined) return false
-  if (s.match === 'held') {
-    const held = await $.process.run(['/usr/sbin/lsof', '-n', '-P', '-a', '-p', String(s.pid), '-Fpn'], { timeoutMs: 10_000 }).catch(() => ({ stdout: '' }))
-    return (parseRollouts(held.stdout).get(s.pid) ?? []).includes(s.key)
+  const by = s.match === 'held' ? s.pid : s.match === 'loaded' ? s.loadedBy : undefined
+  if (by !== undefined) {
+    const held = await $.process.run(['/usr/sbin/lsof', '-n', '-P', '-a', '-p', String(by), '-Fpn'], { timeoutMs: 10_000 }).catch(() => ({ stdout: '' }))
+    return (parseRollouts(held.stdout).get(by) ?? []).includes(s.key)
   }
+  if (s.match === 'loaded') return false
   return (await codexWrittenSince($, codexHome, (s.startedAt ?? (await $.clock.now())) - 5_000)).every(t => t === s.key)
+}
+
+/**
+ * Who holds a Codex conversation's rollout open, asked `tries` times 0.3 s apart until nobody does (a closed terminal's
+ * shared server lets it go a moment later): 'free', or the process that does (undefined: not known, so not free).
+ */
+async function holderOfCodex($: EngineInterface, id: string, tries: number): Promise<'free' | number | undefined> {
+  const out = await $.process.run(['/bin/sh', '-c', HOLDERS_SCRIPT, 'sh', id, String(tries)], { timeoutMs: 20_000 }).catch(() => ({ stdout: '' }))
+  return holderOf(out.stdout)
 }
 
 /**
@@ -976,9 +1004,12 @@ async function openWorkspace($: EngineInterface, ws: Workspace, at?: { window: s
     const claude = ws.threads.claude === undefined || !runs.includes('claude') ? undefined : snap.claude.find(s => s.sessionId === ws.threads!.claude!.id)
     // a Codex conversation open in a terminal, or written a moment ago anywhere (the desktop app, an exec run)
     const codex = ws.threads.codex === undefined || !runs.includes('codex') ? undefined : snap.codex.find(s => s.key === ws.threads!.codex!.id && (s.surface === 'terminal' || now - s.updatedAt < WORKING_MS))
+    // and one any Codex holds open (a terminal, its shared server, the desktop app), however it was started
+    const holder = codex !== undefined || ws.threads.codex === undefined || !runs.includes('codex') ? 'free' : await holderOfCodex($, ws.threads.codex.id, 1)
     const elsewhere = [
       ...(claude === undefined ? [] : [`Claude's runs in ${claude.tty === '??' ? 'the background' : claude.tty}`]),
       ...(codex === undefined ? [] : [`Codex's ${codex.surface === 'terminal' ? `runs in ${codex.tty}` : `was written a moment ago (${codex.surface})`}`]),
+      ...(holder === 'free' ? [] : [`Codex's is open in another Codex${typeof holder === 'number' ? ` (process ${holder})` : ' (it could not be checked)'}`]),
     ]
     if (elsewhere.length > 0) return { isOpen: false, text: `Not opened: its agents go on with their own conversations, and ${elsewhere.join(' and ')}. Close it there first.` }
     // each resumes now: the relay types into it only once it is at its prompt (it may first ask how to resume)
@@ -1270,19 +1301,9 @@ async function makeWorkspace($: EngineInterface, w: NewWorkspace): Promise<{ isC
   const notBrought: string[] = []
   const createdAt = await $.clock.now()
   for (const b of checked.bring) {
-    // checked again just before it is closed: one that began a turn since is left running
-    const live = b.tool === 'claude' && b.runs !== undefined ? await liveClaude($, home, b.runs.pid, b.profile, b.thread.id) : undefined
-    const why = typeof live === 'string' ? live : b.rollout === undefined ? undefined : await codexBusy($, b.rollout)
-    // a conversation closed already has nothing to close
-    const out = why !== undefined
-      ? { stdout: why }
-      : b.runs === undefined
-        ? { stdout: 'stopped' }
-        : await $.process
-          .run(['/bin/sh', '-c', STOP_SCRIPT, 'sh', b.runs.tty, JOB_COMMANDS[b.tool], String(b.runs.pid)], { timeoutMs: 30_000 })
-          .catch(() => ({ stdout: 'failed' }))
-    if (out.stdout.trim() === 'stopped') threads[b.tool] = { ...b.thread, since: createdAt }
-    else notBrought.push(`${b.label} (${why === undefined ? `it did not close in ${b.runs?.tty ?? 'its terminal'}` : `it ${why}`}; it was left as it was, and the workspace's ${b.tool === 'claude' ? 'Claude' : 'Codex'} starts new)`)
+    const taken = await takeOver($, home, b)
+    if ('thread' in taken) threads[b.tool] = { ...taken.thread, since: createdAt }
+    else notBrought.push(`${b.label} (${taken.why}, and the workspace's ${b.tool === 'claude' ? 'Claude' : 'Codex'} starts new)`)
   }
   // never the name of a tmux session already running: a new workspace never takes over an old one
   const running = Object.values(snap.tmux.panes).map(p => p.session).filter(s => s.startsWith('ws-')).map(s => s.slice(3))
@@ -1334,8 +1355,131 @@ async function makeWorkspace($: EngineInterface, w: NewWorkspace): Promise<{ isC
   }
 }
 
+/**
+ * Adds the other agent to a workspace of one: starting new, or going on with the conversation of the session `member`
+ * (a running Claude session, a Codex terminal or a Codex conversation open in none), from any folder, checked as
+ * bringing one into a new workspace checks it. The workspace closes first if it runs (each agent between turns, as
+ * Close checks), the session is closed where it runs, and the workspace opens again with both: the agent that was
+ * there going on with its conversation, each told (when the workspace has a purpose) that they now work as peers,
+ * Claude getting peer coding ready, and the relay passing each hand-over. One at a time, as making one.
+ */
+async function addAgent($: EngineInterface, ws: Workspace, member?: string): Promise<{ isAdded: boolean; text: string }> {
+  let isMine = false
+  await update($, creating, now => {
+    isMine = !now
+    return true
+  })
+  if (!isMine) return { isAdded: false, text: 'Not added: a workspace is being made or changed already.' }
+  try {
+    return await addTo($, ws, member)
+  } finally {
+    await update($, creating, () => false)
+  }
+}
+
+async function addTo($: EngineInterface, ws: Workspace, member?: string): Promise<{ isAdded: boolean; text: string }> {
+  const home = (await $.env.get('HOME')) ?? ''
+  const NAME = { claude: 'Claude', codex: 'Codex' } as const
+  const fail = (why: string) => ({ isAdded: false, text: `Not added: ${why}.` })
+  if (ws.only === undefined) return fail(`${ws.name} runs Claude and Codex already`)
+  const there = ws.only
+  const tool = there === 'claude' ? 'codex' : 'claude'
+  if (member !== undefined && member.split(':')[0] !== tool) return fail(`${ws.name} runs ${NAME[there]}: what it can take is ${NAME[tool]}`)
+  if (!(await readWorkspaces($, home)).isReadable) return fail(UNREADABLE)
+  await refresh($, 0)
+  const snap = await read($, snapshot)
+  const kept = snap.workspaces.find(w => w.id === ws.id)
+  if (kept === undefined) return fail(`${ws.name} is no longer one of the workspaces`)
+  // the session as it runs now, from any folder: under the workspace's environment, between turns, Codex's conversation
+  // known for certain
+  const checked = member === undefined ? { bring: [] as Bring[] } : await checkBring($, home, snap, [member], kept.env)
+  if ('error' in checked) return fail(checked.error)
+  // it starts again with both: closed first, its agents between turns
+  const wasRunning = Object.values(snap.tmux.panes).some(p => isOwnPane(kept, p))
+  const closed = await closeWorkspace($, kept)
+  if (!closed.isClosed) return { isAdded: false, text: `Not added: ${kept.name} closes first, to start again with both. ${closed.text}` }
+  const brought = checked.bring[0]
+  let thread: Thread | undefined
+  if (brought !== undefined) {
+    const taken = await takeOver($, home, brought)
+    if (!('thread' in taken)) {
+      // left as it was: the workspace too
+      const again = wasRunning ? await openWorkspace($, kept) : undefined
+      const after = again === undefined ? '' : again.isOpen ? ` ${kept.name} was opened again as it was. ${again.text}` : ` ${kept.name} stays closed: ${again.text}`
+      return { isAdded: false, text: `Not added: ${brought.label} ${taken.why.replace(/^it /, '')}.${after}` }
+    }
+    thread = taken.thread
+  }
+  const now = await $.clock.now()
+  const purpose = kept.purpose?.trim() ?? ''
+  let added: Workspace | undefined
+  const saved = await changeWorkspaces($, home, list => {
+    const cur = list.find(w => w.id === kept.id)
+    if (cur === undefined) return list
+    const { only: _, threads: __, relay: ___, ...rest } = cur
+    const threads = { ...cur.threads, ...(thread === undefined ? {} : { [tool]: { ...thread, since: now } }) }
+    // a purpose: the relay passes the cues from now (as for a pair made with one); else it stays as it was
+    const relay = purpose !== '' ? { mode: 'auto' as const, since: now, streak: 0 } : cur.relay
+    added = { ...rest, ...(threads.claude === undefined && threads.codex === undefined ? {} : { threads }), ...(relay === undefined ? {} : { relay }) }
+    const changed = list.map(w => (w.id === cur.id ? added! : w))
+    // the conversation goes on here alone, and is no longer listed as assigned anywhere
+    return withThreads(member === undefined ? changed : assigned(changed, member, ''), cur.id, threads)
+  })
+  if (!saved || added === undefined) {
+    const resume = thread === undefined ? '' : `; to go on with what was closed: ${tool === 'claude' ? `claude --resume ${thread.id}` : `codex resume ${thread.id}`} (in ${thread.dir})`
+    return fail(`${UNREADABLE}${resume}`)
+  }
+  const made: Workspace = added
+  const isBrought = thread !== undefined
+  if (purpose !== '') {
+    // the agent that was there goes on with its conversation, told it no longer works alone; one with none kept starts
+    // new, as in a pair made new
+    const isKept = made.threads?.[there] !== undefined
+    const fresh = (t: 'claude' | 'codex') => (made.threads?.[t] !== undefined ? joinPrompt(made, t) : t === 'claude' ? setupPrompt(made) : peerPrompt(made))
+    await $.fs.write(promptPath(home, made.id, there), isKept ? addedPrompt(made, there, { isNew: false, isBrought }) : fresh(there))
+    await $.fs.write(promptPath(home, made.id, tool), isKept ? addedPrompt(made, tool, { isNew: true, isBrought }) : fresh(tool))
+  } else {
+    await removePrompts($, home, made.id)
+  }
+  await refresh($, 0)
+  const opened = await openWorkspace($, made)
+  const who = `${isBrought ? `${brought!.label} goes on there in its own conversation` : `${NAME[tool]} starts new there`}, beside ${NAME[there]}`
+  const how = purpose === '' ? '' : '; Claude gets peer coding ready, and the relay passes each hand-over'
+  return {
+    isAdded: true,
+    text: opened.isOpen ? `Added ${NAME[tool]} to ${made.name}: ${who}${how}. ${opened.text}` : `Added ${NAME[tool]} to ${made.name}, but it was not opened: ${opened.text}`,
+  }
+}
+
 /** A session to bring in: where it runs (none for a conversation already closed), and the conversation it resumes. */
 type Bring = { tool: 'claude' | 'codex'; label: string; runs?: { tty: string; pid: number }; profile: string; rollout?: string; thread: Thread }
+
+/**
+ * Closes a session being brought in where it runs, checked again just before (one that began a turn since is left
+ * running), so its conversation goes on in the workspace alone: the conversation, or why not. A Codex conversation must
+ * then be open in no Codex at all (a terminal's shared server lets it go a moment after the terminal closes), or it is
+ * not resumed: it would run twice.
+ */
+async function takeOver($: EngineInterface, home: string, b: Bring): Promise<{ thread: Thread } | { why: string }> {
+  const live = b.tool === 'claude' && b.runs !== undefined ? await liveClaude($, home, b.runs.pid, b.profile, b.thread.id) : undefined
+  const busy = typeof live === 'string' ? live : b.rollout === undefined ? undefined : await codexBusy($, b.rollout)
+  if (busy !== undefined) return { why: `it ${busy}; it was left as it was` }
+  // a conversation closed already has nothing to close
+  if (b.runs !== undefined) {
+    const out = await $.process
+      .run(['/bin/sh', '-c', STOP_SCRIPT, 'sh', b.runs.tty, JOB_COMMANDS[b.tool], String(b.runs.pid)], { timeoutMs: 30_000 })
+      .catch(() => ({ stdout: 'failed' }))
+    if (out.stdout.trim() !== 'stopped') return { why: `it did not close in ${b.runs.tty}; it was left as it was` }
+  }
+  if (b.tool === 'codex') {
+    const holder = await holderOfCodex($, b.thread.id, b.runs === undefined ? 1 : 20)
+    if (holder !== 'free') {
+      const other = `another Codex${typeof holder === 'number' ? ` (process ${holder})` : ''}`
+      return { why: b.runs === undefined ? `it is open in ${other}; it was left as it was` : `it closed in ${b.runs.tty}, but ${other} has its conversation open still, so it was not resumed here` }
+    }
+  }
+  return { thread: b.thread }
+}
 
 /**
  * The sessions to bring into a new workspace, each checked as it runs now:
@@ -1344,7 +1488,7 @@ type Bring = { tool: 'claude' | 'codex'; label: string; runs?: { tty: string; pi
  * conversation known for certain; with the conversation it resumes there
  * (bypassed, as every workspace agent).
  */
-async function checkBring($: EngineInterface, home: string, snap: Snapshot, members: readonly string[], env: string, dir: string | readonly string[]): Promise<{ bring: Bring[] } | { error: string }> {
+async function checkBring($: EngineInterface, home: string, snap: Snapshot, members: readonly string[], env: string, dir?: string | readonly string[]): Promise<{ bring: Bring[] } | { error: string }> {
   const bring: Bring[] = []
   const now = await $.clock.now()
   const offered = bringable(snap, { now, selfId: await $.session.id() }, dir)
@@ -1353,7 +1497,7 @@ async function checkBring($: EngineInterface, home: string, snap: Snapshot, memb
     if ((tool !== 'claude' && tool !== 'codex') || bring.some(b => b.tool === tool)) return { error: `"${member}" is not one session of each agent` }
     const name = tool === 'claude' ? 'that Claude session' : 'that Codex terminal'
     const offer = offered.find(b => b.member === member)
-    if (offer === undefined) return { error: `${name} cannot be brought in: it has ended, works in another repository, runs in the background or in a workspace already, or is this session` }
+    if (offer === undefined) return { error: `${name} cannot be brought in: it has ended, ${dir === undefined ? '' : 'works in another repository, '}runs in the background or in a workspace already, or is this session` }
     if (offer.blocked !== undefined) return { error: `${offer.label} cannot be brought in: ${offer.blocked}` }
     if (offer.env !== env) return { error: `${offer.label} runs under the ${offer.env || 'default'} environment; choose that one` }
     if (tool === 'claude') {
@@ -2218,7 +2362,7 @@ export const register: Register = on => {
     await refresh($, VISIBLE_MAX_AGE_MS)
     const snap = await read($, snapshot)
     const named = snap.envs.filter(env => env !== '')
-    const usage = `Usage: /workspace new <folder> <${['default', ...named].join(' | ')}> <name> [--only claude | codex] [--go-on: with the branch checked out in <folder>] [--for <what it is for: Claude gets peer coding ready for it>]; /workspace open <name>; /workspace close <name> (its agents end between turns; open goes on with their conversations); /workspace rm <name>`
+    const usage = `Usage: /workspace new <folder> <${['default', ...named].join(' | ')}> <name> [--only claude | codex] [--go-on: with the branch checked out in <folder>] [--for <what it is for: Claude gets peer coding ready for it>]; /workspace open <name>; /workspace close <name> (its agents end between turns; open goes on with their conversations); /workspace add <name> claude | codex [<id of a running session: it goes on there>] (the other agent, to a workspace of one); /workspace rm <name>`
     const command = parseWorkspaceArgs(e.args, named, home)
     const { list, isReadable } = await readWorkspaces($, home)
     const label = (ws: Workspace) => `${ws.name} (${ws.env || 'default'}, ${ws.dir})`
@@ -2229,6 +2373,7 @@ export const register: Register = on => {
         return { text: list.length === 0 ? `No workspaces yet. ${usage}` : `Workspaces: ${list.map(label).join('; ')}. ${usage}` }
       case 'open':
       case 'close':
+      case 'add':
       case 'rm':
         if (!isReadable) return { text: `Not done: ${UNREADABLE}.` }
     }
@@ -2242,6 +2387,11 @@ export const register: Register = on => {
         const ws = findWorkspace(list, command.ref)
         if (ws === undefined) return { text: `No workspace named "${command.ref}".` }
         return { text: (await closeWorkspace($, ws)).text }
+      }
+      case 'add': {
+        const ws = findWorkspace(list, command.ref)
+        if (ws === undefined) return { text: `No workspace named "${command.ref}".` }
+        return { text: (await addAgent($, ws, command.id === undefined ? undefined : `${command.tool}:${command.id}`)).text }
       }
       case 'rm': {
         const ws = findWorkspace(list, command.ref)
@@ -2370,6 +2520,13 @@ export const register: Register = on => {
         await update($, pendingMove, () => ({ key: `close:${id}`, at }))
       }
     }
+    // Add, to a workspace of one: the other agent, new or a running session going on there
+    const addingTo = await read($, adding)
+    const pressAdd = (id: string, member?: string) => async () => {
+      await update($, adding, () => '')
+      const ws = (await read($, snapshot)).workspaces.find(w => w.id === id)
+      if (ws !== undefined) await toast($, (await addAgent($, ws, member)).text, { timeoutMs: 20_000 })
+    }
     const pressMove = (key: string, move: NonNullable<Item['move']>) => async () => {
       const at = await $.clock.now()
       const asked = await read($, pendingMove)
@@ -2389,6 +2546,7 @@ export const register: Register = on => {
     const toggle = (id: string) => async () => {
       await update($, selected, now => (now === id ? '' : id))
       await update($, assigning, () => ({ key: '', member: '' }))
+      await update($, adding, () => '')
     }
     const more = (id: string): Element => (
       <Box width={9} flexShrink={0} marginLeft={1}>
@@ -2797,6 +2955,10 @@ export const register: Register = on => {
                         />,
                       ]
                     : []),
+                  // the other agent, to a workspace of one (it closes and opens again: never from its own Claude)
+                  ...(ws.only !== undefined && ownSession !== `ws-${ws.key}`
+                    ? [<Button key={`add ${ws.key}`} label={`Add ${ws.only === 'claude' ? 'Codex' : 'Claude'} (a)`} hotkey="a" {...(addingTo === ws.key ? { variant: 'primary' as const } : {})} onPress={() => void update($, adding, now => (now === ws.key ? '' : ws.key))} />]
+                    : []),
                   // the relay, the compaction at a hand-off and the drift check all go by hand-offs: one agent makes none
                   ...(ws.only !== undefined
                     ? []
@@ -2814,6 +2976,26 @@ export const register: Register = on => {
                     onPress={() => void pressRemove(ws.key)()}
                   />,
                 ], inner)}
+              {open === `ws:${ws.key}` && addingTo === ws.key && ws.only !== undefined && (() => {
+                // the other agent: new, or a running session of it under the workspace's environment, from any folder
+                const other = ws.only === 'claude' ? 'codex' : 'claude'
+                const offers = offeredAll.filter(b => b.tool === other && b.env === ws.env)
+                return (
+                  <Box key={`ws-add ${ws.key}`} flexDirection="column" width={inner - 2} marginLeft={2}>
+                    <Text dimColor wrap="wrap">{`Add ${other === 'claude' ? 'Claude' : 'Codex'}: ${ws.name} closes (its agent between turns) and opens again with both; one you bring in closes where it runs and goes on here, in its own conversation.`}</Text>
+                    <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
+                      <Button key={`add-new ${ws.key}`} label="Start new" onPress={() => void pressAdd(ws.key)()} />
+                      {offers.filter(b => b.blocked === undefined).map(b => (
+                        <Button key={`add ${ws.key} ${b.member}`} label={`${b.label}${b.isIdle ? '' : ' (working)'}`} onPress={() => void pressAdd(ws.key, b.member)()} />
+                      ))}
+                      <Button key={`add-back ${ws.key}`} label="Back" onPress={() => void update($, adding, () => '')} />
+                    </Box>
+                    {offers.filter(b => b.blocked !== undefined).map(b => (
+                      <Text key={`add-not ${ws.key} ${b.member}`} dimColor wrap="truncate-end">{`${b.label} · not offered: ${b.blocked}`}</Text>
+                    ))}
+                  </Box>
+                )
+              })()}
               {(ws.relay.status !== '' || ws.relay.isWaiting) && (
                 <Box key={`ws-relay ${ws.key}`} flexDirection="row" width={inner - 2} columnGap={1} marginLeft={2}>
                   <Text dimColor wrap="truncate-end">{`relay: ${ws.relay.isWaiting ? `waits for you after ${RELAY_CAP} hand-offs` : ws.relay.status}`}</Text>

@@ -32,15 +32,18 @@ export type Bringable = {
  * Whether a Codex terminal's conversation is known for certain, so that
  * closing it closes that conversation and no other. Codex records no link
  * from a terminal to its conversation, so only: it holds the conversation's
- * rollout open (checked again, fresh, before it is closed); or it is the only
- * Codex terminal under its Codex home and no other conversation there was
- * written since it started (a `/new` or `/resume` inside it would make one;
- * checked again in Codex's own records before it is closed). An exec run is
- * never one.
+ * rollout open (checked again, fresh, before it is closed); Codex's shared
+ * background server holds it open for it, its terminals and the
+ * conversations it holds pairing off (`loaded`: checked again before it is
+ * closed, and after, that nothing holds it open any more: HOLDERS_SCRIPT); or
+ * it is the only Codex terminal under its Codex home and no other
+ * conversation there was written since it started (a `/new` or `/resume`
+ * inside it would make one; checked again in Codex's own records before it
+ * is closed). An exec run is never one.
  */
 export function isKnownCodex(snap: Pick<Snapshot, 'codex'>, s: CodexSession): boolean {
   if (s.surface !== 'terminal' || s.pid === undefined || s.match === undefined || s.isExec === true || !SAFE_ID.test(s.key) || s.key.startsWith('pid-')) return false
-  if (s.match === 'held') return true
+  if (s.match === 'held' || s.match === 'loaded') return true
   const since = (s.startedAt ?? 0) - 5_000
   // what a Codex terminal could be running: another terminal's conversation, or one made in a terminal (an exec run
   // and its thread, or the desktop app's, never are)
@@ -196,6 +199,33 @@ export const STOP_SCRIPT = [
   '  sleep 0.2',
   'done',
 ].join('\n')
+
+/**
+ * Whether any Codex process (a terminal, a shared background server, the
+ * desktop app's) holds the rollout of the conversation "$1" open, asked up to
+ * "$2" times 0.3 s apart until none does: a terminal's server lets a
+ * conversation go a moment after the terminal closes. Prints `free`, or
+ * `held <pid>` when one still holds it.
+ */
+export const HOLDERS_SCRIPT = [
+  'id=$1; tries=$2; i=0',
+  'while :; do',
+  '  pids=$(/usr/bin/pgrep -x codex | /usr/bin/paste -sd , -)',
+  '  pid=',
+  `  [ -n "$pids" ] && pid=$(/usr/sbin/lsof -n -P -a -p "$pids" -Fpn 2>/dev/null | /usr/bin/awk -v end="-$id.jsonl" '/^p/ { p = substr($0, 2) } /^n/ && length($0) > length(end) && substr($0, length($0) - length(end) + 1) == end { print p; exit }')`,
+  '  [ -z "$pid" ] && { echo free; exit 0; }',
+  '  i=$((i + 1)); [ "$i" -ge "$tries" ] && { echo "held $pid"; exit 0; }',
+  '  sleep 0.3',
+  'done',
+].join('\n')
+
+/** HOLDERS_SCRIPT's answer: free, or the process that holds the conversation open (unknown, when it said neither: not free). */
+export function holderOf(stdout: string): 'free' | number | undefined {
+  const line = stdout.trim()
+  if (line === 'free') return 'free'
+  const m = /^held (\d+)$/.exec(line)
+  return m === null ? undefined : Number(m[1])
+}
 
 /** The commands of an agent's job in front of its terminal: Codex runs as a node wrapper and its own binary. */
 export const JOB_COMMANDS: Record<Tool, string> = { claude: 'claude', codex: 'codex|node' }

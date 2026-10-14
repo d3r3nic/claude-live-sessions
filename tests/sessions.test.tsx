@@ -62,7 +62,7 @@ import { afterOwner, afterStep, claudeKeep, screenReady, COMPACT_FROM, cueOf, cu
 import type { Side } from '../hooks/relay'
 import { branchOf, checkDue, checkFrom, driftRequest, isDueAfterCompaction, parseVerdict, recordFolderOf, RECORDS_SCRIPT } from '../hooks/drift'
 import { accountOfFile, applyScan, claudeCost, claudeLimits, clockSaid, codexUnits, currentLimits, EMPTY_USAGE, limitSaid, markKey, mergeLimits, offsetOf, OFFSETS_SCRIPT, parseContexts, priceOf, rankUsage, scanInput, sharedLimitsFrom, usageFrom, USAGE_FILES_SCRIPT, USAGE_KEEP_MS, wholeFiles } from '../hooks/usage'
-import { bringable, codexDir, CODEX_FOLDER_SCRIPT, CODEX_TASK_SCRIPT, codexTaskState, envOfProfile, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, threadFrom, toggled, withThreads } from '../hooks/bring'
+import { bringable, codexDir, CODEX_FOLDER_SCRIPT, CODEX_TASK_SCRIPT, codexTaskState, envOfProfile, holderOf, HOLDERS_SCRIPT, isKnownCodex, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, threadFrom, toggled, withThreads } from '../hooks/bring'
 import { BYPASS } from '../hooks/workspaces'
 import {
   absoluteDir,
@@ -242,6 +242,9 @@ const world = {
   sessionId: undefined as string | undefined,
   /** What lsof answers now, when not the fixture's. */
   lsof: undefined as string | undefined,
+  /** The Codex process holding a conversation's rollout open, by its id, as HOLDERS_SCRIPT finds it (none: free); and each asked. */
+  holders: {} as Record<string, number>,
+  heldAsked: [] as string[],
   /** Threads the Codex databases no longer have, though the fixtures do. */
   hiddenThreads: new Set<string>(),
   /** Processes that have exited (a terminal STOP_SCRIPT closed). */
@@ -307,6 +310,8 @@ const resetWorld = () => {
   world.exited.clear()
   world.hiddenThreads.clear()
   world.lsof = undefined
+  world.holders = {}
+  world.heldAsked = []
   world.codexMode = '/Users/u/dev/web-app\n'
   world.codexTask = '"type":"task_complete"\n'
   world.codexTaskAnswer = undefined
@@ -381,6 +386,11 @@ function machine(argv: readonly string[], env: unknown): Run {
         // closed: the processes in front of that terminal have exited
         if (answer === 'stopped') for (const [pid, line] of Object.entries(PS_LINES)) if (line.includes(` ${args[0]} `)) world.exited.add(Number(pid))
         return ok(`${answer}\n`)
+      }
+      if (argv[2] === HOLDERS_SCRIPT) {
+        world.heldAsked.push(`${args[0]} ${args[1]}`)
+        const pid = world.holders[args[0] ?? '']
+        return ok(pid === undefined ? 'free\n' : `held ${pid}\n`)
       }
       if (argv[2] === ROLLOUT_SCRIPT) return ok(args[0] === '/Users/u/.codex' && (args[1] === RESUMED_A || args[1] === HELD) ? `/rollouts/${args[1]}.jsonl\n` : '')
       if (argv[2] === CODEX_TASK_SCRIPT) return ok(world.codexTaskAnswer?.() ?? world.codexTask)
@@ -1620,8 +1630,9 @@ describe('workspaces', () => {
     expect(withCheckout).toContain('Application Support/live-sessions/prompts/practice-rbac-claude.txt')
     expect(withCheckout).toContain('Application Support/live-sessions/prompts/practice-rbac-codex.txt')
     expect(cmd).not.toContain('--add-dir')
-    // Codex starts without its update offer, whose default answer on Enter installs a new version
-    expect(cmd).toContain('codex -c check_for_update_on_startup=false --dangerously-bypass-approvals-and-sandbox')
+    // Codex starts without its update offer, whose default answer on Enter installs a new version, and runs its
+    // conversation itself, never in Codex's shared background server (so it holds its rollout open)
+    expect(cmd).toContain('codex -c check_for_update_on_startup=false --no-daemon --dangerously-bypass-approvals-and-sandbox')
     // every agent starts bypassed: Claude asks before nothing, Codex runs with no approvals and no sandbox
     expect(cmd).toContain(' claude --dangerously-skip-permissions --append-system-prompt')
     expect(cmd).not.toMatch(/--sandbox |--ask-for-approval|--permission-mode/)
@@ -2882,13 +2893,13 @@ describe('bringing running sessions into a workspace', () => {
     expect(line).toContain(nested(`if [ -n "$open" ]; then echo 'This conversation is open in another Claude session; close it there, then open the workspace again.'; else cd '/Users/u/dev/web-app/src' && env `))
     expect(line).toContain(nested(` claude --resume session-101 --dangerously-skip-permissions --append-system-prompt '${leanWork(true)}' --add-dir '/Users/u/dev/web-app-worktrees' \${p:+--} \${p:+"$p"}; fi; exec`))
     // Codex with no sandbox needs no folder added
-    expect(line).toContain(nested(` codex resume -c check_for_update_on_startup=false --dangerously-bypass-approvals-and-sandbox -C '/Users/u/dev/web-app' -- ${RESUMED_A} \${p:+"$p"}; exec`))
+    expect(line).toContain(nested(` codex resume -c check_for_update_on_startup=false --no-daemon --dangerously-bypass-approvals-and-sandbox -C '/Users/u/dev/web-app' -- ${RESUMED_A} \${p:+"$p"}; exec`))
     expect(line).not.toMatch(/--sandbox|--ask-for-approval|--permission-mode/)
     // a named environment's Claude registry
     expect(openCommand({ ...ws, env: 'work' }, HOME)).toContain(nested(`for f in '/Users/u/.claude-work'/sessions/*.json;`))
     // an agent with no conversation starts new, bypassed too
     const plain = openCommand({ ...ws, threads: { codex: { id: RESUMED_A, dir: '/Users/u/dev/web-app' } } }, HOME)
-    expect(plain).toContain(nested(` codex resume -c check_for_update_on_startup=false --dangerously-bypass-approvals-and-sandbox -C '/Users/u/dev/web-app' -- ${RESUMED_A} `))
+    expect(plain).toContain(nested(` codex resume -c check_for_update_on_startup=false --no-daemon --dangerously-bypass-approvals-and-sandbox -C '/Users/u/dev/web-app' -- ${RESUMED_A} `))
     expect(plain).toContain(nested(` claude --dangerously-skip-permissions --append-system-prompt '${leanWork(true)}' --add-dir '/Users/u/dev/web-app-worktrees' \${p:+--}`))
     expect(BYPASS).toEqual({ claude: '--dangerously-skip-permissions', codex: '--dangerously-bypass-approvals-and-sandbox' })
     // Codex has it in its first prompt, never as a flag; a Claude alone has it without the hand-overs
@@ -3128,6 +3139,8 @@ describe('bringing running sessions into a workspace', () => {
     expect(await create({ codex: true })).toMatch(/Not done: Codex · .* cannot be brought in: which conversation it runs is no longer certain; close it yourself, then bring in its conversation\./)
     await ui.press({ key: 'form:cancel' })
     world.lsof = undefined
+  world.holders = {}
+  world.heldAsked = []
     expect(world.stopped).toEqual([])
     expect(files.get(WORKSPACES)).toBeUndefined()
     // Codex began a turn between the checks and its close: it is left as it was, and the workspace's Codex starts new
@@ -3932,7 +3945,7 @@ describe('a workspace of one agent', () => {
     const codex = openCommand({ ...practice, checkout: '/Users/u/dev/web-app', only: 'codex' }, HOME)
     const firstPane = codex.slice(codex.indexOf('-n peers '), codex.indexOf('\\; set-option -p @live-sessions-agent'))
     expect(firstPane).toContain('practice-rbac-codex.txt')
-    expect(firstPane).toContain('codex -c check_for_update_on_startup=false --dangerously-bypass-approvals-and-sandbox')
+    expect(firstPane).toContain('codex -c check_for_update_on_startup=false --no-daemon --dangerously-bypass-approvals-and-sandbox')
     expect(codex).toContain("\\; set-option -p @live-sessions-agent codex \\; set-option -t 'ws-practice-rbac' @live-sessions-workspace")
     expect(codex).not.toContain('split-window')
     expect(codex).not.toContain('practice-rbac-claude.txt')
