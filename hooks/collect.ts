@@ -682,8 +682,8 @@ export function codexSessions(args: {
     const tops = (threads.get(codexHome) ?? []).filter(t => held.has(t.id) && !taken.has(t.id))
     const clients = terminals.filter(p => p.codexHome === codexHome && isClient(p) && !matched.has(p.pid))
     const each = clients.map(p => tops.filter(t => could(p, t)))
-    const isForced = clients.length > 0 && tops.length === clients.length && each.every(c => c.length === 1) &&
-      tops.every(t => clients.filter(p => could(p, t)).length === 1)
+    // (each terminal one, each conversation one terminal: as many of each)
+    const isForced = clients.length > 0 && each.every(c => c.length === 1) && tops.every(t => clients.filter(p => could(p, t)).length === 1)
     if (!isForced) continue
     clients.forEach((p, i) => {
       const thread = each[i]![0]!

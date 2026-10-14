@@ -781,6 +781,11 @@ describe('collect', () => {
     const s1 = matches(['A', 'Q', 'B', 'C'], [...terminals, term(47, 30)], [...threads, row('Q', 9000, 12)])
     expect(s1.filter(m => m.includes(':loaded'))).toEqual([])
     expect(s1).toContain('ttys041=A:resume')
+    // one terminal that can be running either of two the server holds (its own, and one written in its folder since it
+    // started): not certain
+    expect(matches(['A', 'K'], [term(41, 10, { resumeId: 'A' })], [row('A', 9000, 1), row('K', 9000, 2)])).toEqual(['ttys041=A:resume'])
+    // two terminals that both resumed one conversation (the server runs it once, for both): neither is certain
+    expect(matches(['A'], [term(41, 10, { resumeId: 'A' }), term(48, 20, { resumeId: 'A', cwd: '/v' })], [row('A', 9000, 1)]).filter(m => m.includes(':loaded'))).toEqual([])
     // two started 3 s apart in one folder, each made one there since (S2): none is certain
     const s2 = matches(['G', 'H'], [term(51, 30.05), term(52, 30)], [row('G', 29, 1), row('H', 29, 2)])
     expect(s2.filter(m => m.includes(':loaded'))).toEqual([])
@@ -3227,6 +3232,21 @@ describe('bringing running sessions into a workspace', () => {
     expect(world.stopped).toEqual([])
     expect(JSON.parse(files.get(WORKSPACES)!).workspaces[0].threads).toBeUndefined()
     expect(toasts.at(-1)).toContain('Not brought in: Codex · Find the report writer (it is no longer known for certain to run that conversation (a /new or /resume inside it); it was left as it was, and the workspace\'s Codex starts new).')
+    // the server still holds it, but now another conversation too that none of its terminals can be running: only all
+    // of what the Codex processes hold open, read again, shows it is no longer certain
+    world.lsof = ['p204', 'f31', `n/Users/u/.codex/sessions/2026/10/08/rollout-2026-10-08T10-00-00-${RESUMED_A}.jsonl`, 'p207', 'f3', 'n/dev/ttys045', ''].join('\n')
+    world.codexTaskAnswer = () => {
+      world.lsof = ['p204', 'f31', `n/Users/u/.codex/sessions/2026/10/08/rollout-2026-10-08T10-00-00-${RESUMED_A}.jsonl`, 'f32', `n/Users/u/.codex/sessions/2026/09/24/rollout-2026-09-24T07-30-15-${HELD}.jsonl`, ''].join('\n')
+      return world.codexTask
+    }
+    // (the first was made, its Codex new)
+    if ((await ui.find({ key: 'new-from:/Users/u/dev/web-app' })) === undefined) await reveal(ui, 'tree:/Users/u/dev/web-app')
+    await ui.press({ key: 'new-from:/Users/u/dev/web-app' })
+    await ui.press({ key: `form:bring codex:${RESUMED_A}` })
+    await ui.input({ key: 'form:name', text: 'Reports two', kind: 'change' })
+    await ui.press({ key: 'form:create' })
+    expect(world.stopped).toEqual([])
+    expect(toasts.at(-1)).toContain('(it is no longer known for certain to run that conversation (a /new or /resume inside it); it was left as it was')
     await ui.unmount()
   })
 
