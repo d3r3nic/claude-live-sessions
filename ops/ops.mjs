@@ -241,8 +241,11 @@ function cellsOf(plain, from, to) {
 const clean = s => String(s ?? '').replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g, ' ')
 const RAIN = 'ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄ01234567890ABCDEF<>/\\|=+*'
 /** The compact view's tiles: at least this many cells wide, and at most this many. */
-const TILE_MIN = 32
-const TILE_MAX = 44
+const TILE_MIN = 34
+const TILE_MAX = 46
+/** Room around tiles: cells between two side by side, and inside a tile between its sides and what it says. */
+const TILE_GAP = 3
+const TILE_PAD = 2
 /**
  * A tile's buttons, on its bottom border at the right: while it runs, >_ brings up its terminal and ■ (red) stops it;
  * stopped, ► starts it again (its agents going on with their conversations). A click anywhere else on it shows its
@@ -526,13 +529,13 @@ function frame(snap, now, cols, rows, tick, note = '', modal = undefined) {
     const name = cut(clean(n.ws.name), Math.max(1, w - 7 - markCells))
     // its name in amber while an agent works, as its border
     const top = `${rgb(edge, '┌─ ')}${rgb(n.needs ? edge : n.isWorking ? G.amber : n.isBright ? G.hi : G.mid, bold(name))}${rgb(edge, ` ${'─'.repeat(Math.max(1, w - 6 - width(name) - markCells))}`)}${mark === '' ? '' : ` ${mark} `}${rgb(edge, '─┐')}`
-    // a row inside the border: what it says at its left, and at its right
-    const room = w - 4
+    // a row inside the border: what it says at its left, and at its right, TILE_PAD cells in from each side
+    const room = w - 2 - 2 * TILE_PAD
     const inside = (left, right = '') => {
       // what is at its right (a context, the buttons) kept whole: its left is cut to the room left
       const shown = clip(left, Math.max(0, room - width(right) - (right === '' ? 0 : 1)))
       const text = `${shown}${' '.repeat(Math.max(0, room - width(shown) - width(right)))}${right}`
-      return `${rgb(edge, '│')} ${text} ${rgb(edge, '│')}`
+      return `${rgb(edge, '│')}${' '.repeat(TILE_PAD)}${text}${' '.repeat(TILE_PAD)}${rgb(edge, '│')}`
     }
     const agent = (tool, item) => {
       if (item === undefined) return inside(`${rgb(G.dim, '·')} ${rgb(G.dim, pad(tool, 6))} ${rgb(G.dim, 'offline')}`)
@@ -551,10 +554,13 @@ function frame(snap, now, cols, rows, tick, note = '', modal = undefined) {
   /** Workspaces drawn under a rule: as tiles, several a row (the compact view), or each in full (the detailed view). */
   const drawNodes = list => {
     if (prefs.view === 'compact') {
-      // as many tiles a row as the window holds, at least TILE_MIN cells each, sharing the row's width
-      const across = Math.max(1, Math.floor(inner / (TILE_MIN + 1)))
-      const w = Math.min(TILE_MAX, Math.floor((inner - 1 - (across - 1)) / across))
+      // as many tiles a row as the window holds, at least TILE_MIN cells each and TILE_GAP apart, sharing the row's
+      // width; a blank line between rows
+      // (a cell's margin at each end of the row, inside the screen's border)
+      const across = Math.max(1, Math.floor((inner - 2 + TILE_GAP) / (TILE_MIN + TILE_GAP)))
+      const w = Math.min(TILE_MAX, Math.floor((inner - 2 - (across - 1) * TILE_GAP) / across))
       for (let k = 0; k < list.length; k += across) {
+        if (k > 0) line()
         const row = list.slice(k, k + across)
         const drawn = row.map(n => tileOf(n, w))
         for (let y = 0; y < TILE_ROWS; y++) {
@@ -562,7 +568,7 @@ function frame(snap, now, cols, rows, tick, note = '', modal = undefined) {
           // after the border, in the second cell, then a space)
           const presses = row.flatMap((n, j) => {
             if (!n.isOpenable) return []
-            const left = 3 + j * (w + 1)
+            const left = 3 + j * (w + TILE_GAP)
             // its buttons end two cells in from its right edge (`─┘`), one `─` between them
             const buttons = tileButtons(n)
             let at = left + w - 2 - buttons.reduce((sum, b) => sum + width(b.label), Math.max(0, buttons.length - 1))
@@ -573,7 +579,7 @@ function frame(snap, now, cols, rows, tick, note = '', modal = undefined) {
             })
             return [...(y === TILE_ROWS - 1 ? pressed : []), { kind: 'details', id: n.ws.key, cols: [left, left + w - 1] }]
           })
-          line(` ${drawn.map(t => t[y]).join(' ')}`, presses.length === 0 ? undefined : presses)
+          line(` ${drawn.map(t => t[y]).join(' '.repeat(TILE_GAP))}`, presses.length === 0 ? undefined : presses)
         }
       }
     } else {

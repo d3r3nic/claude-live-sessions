@@ -1561,10 +1561,10 @@ except ChildProcessError: pass
       const first = tiles.findIndex(l => l.includes('┌─ Ops X'))
       const relayRow = tiles[first + 3] ?? ''
       const hist = tiles.findIndex(l => l.includes('┌─ Stopped one'))
-      check('ops, compact: running workspaces under FOCUS, stopped ones under HISTORY at the bottom; tiles three a row at 120 columns, each 38 cells, the frame its size, wide names too',
+      check('ops, compact: running workspaces under FOCUS, stopped ones under HISTORY at the bottom; tiles three a row at 120 columns, each 36 cells, 3 apart, two cells of room inside, the frame its size, wide names too',
         tiles[2].includes('[▣ COMPACT] v') && tiles[3].includes('FOCUS 1') && first > 0 && (tiles[first].match(/┌─/g) ?? []).length === 1 &&
         hist > first && tiles[hist - 1].includes('HISTORY 3 ▼ h') && (tiles[hist].match(/┌─/g) ?? []).length === 3 && tiles[hist + 4]?.startsWith('╚') &&
-        cellsOfLines(tiles[first].slice(tiles[first].indexOf('┌'), tiles[first].indexOf('┐') + 1))[0] === 38 &&
+        cellsOfLines(tiles[first].slice(tiles[first].indexOf('┌'), tiles[first].indexOf('┐') + 1))[0] === 36 && /┘   └/.test(tiles[hist + 3] ?? '') && /│  /.test(tiles[first + 1]) &&
         cellsOfLines(show({}, [])).every(n => n === 120) && cellsOfLines(show({ MODAL: 'opsx' }, [])).every(n => n === 120) && !tiles.some(l => /\|O\|/.test(l)),
         JSON.stringify(tiles.map(l => l.trim().slice(0, 60))))
       // its border drawn with square corners (as every monospace font has them; Andale Mono has no rounded ones, which
@@ -1572,7 +1572,7 @@ except ChildProcessError: pass
       check('ops, compact: tiles drawn with square corners only', tiles.some(l => l.includes('┌─ Ops X')) && tiles.some(l => /└─+\[>_\]─\[■\]─┘/.test(l)) && !tiles.some(l => /[╭╮╰╯▶▾▴]/.test(l)),
         JSON.stringify(tiles.filter(l => /[╭╮╰╯▶▾▴]/.test(l)).map(l => l.trim().slice(0, 50))))
       check('ops, compact: an agent at background work is at work in its tile (never idle or done), its context beside it',
-        /┌─ Ops X 要確認 ✅ é ─+ ◐ ─┐/.test(tiles[first]) && /│ ◐ CLAUDE background +208k │/.test(tiles[first + 1]) && /│ · CODEX +offline +│/.test(tiles[first + 2]) &&
+        /┌─ Ops X 要確認 ✅ é ─+ ◐ ─┐/.test(tiles[first]) && /│  ◐ CLAUDE background +208k  │/.test(tiles[first + 1]) && /│  · CODEX +offline +│/.test(tiles[first + 2]) &&
         /└─+\[>_\]─\[■\]─┘/.test(relayRow) && tiles[1].includes('BACKGROUND 1') && !tiles.some(l => /done \d/.test(l)) && !tiles.some(l => /⇄|\[»\]|📁/.test(l)),
         JSON.stringify(tiles.slice(first, first + 4).map(l => l.slice(0, 44))))
       // one agent working: the other, idle, says nothing (its mark dim), and the workspace's name is amber, as its
@@ -1592,9 +1592,9 @@ except ChildProcessError: pass
         const bothWorking = look(claudeAs('busy', now - 5_000), codexAs(now))
         const neither = look(claudeAs('idle', now - 600_000), codexAs(now - 600_000))
         check('ops, compact: an agent idle beside one at work says nothing; both working both say so; neither, both idle; the name amber while one works',
-          /│ ● CLAUDE working/.test(oneWorking.rows[1]) && /│ ○ CODEX +20k │/.test(oneWorking.rows[2]) && !oneWorking.rows[2].includes('idle') && oneWorking.isAmber &&
-          /│ ● CLAUDE working/.test(bothWorking.rows[1]) && /│ ● CODEX +working/.test(bothWorking.rows[2]) && bothWorking.isAmber &&
-          /│ ○ CLAUDE idle/.test(neither.rows[1]) && /│ ○ CODEX +idle/.test(neither.rows[2]) && !neither.isAmber,
+          /│  ● CLAUDE working/.test(oneWorking.rows[1]) && /│  ○ CODEX +20k  │/.test(oneWorking.rows[2]) && !oneWorking.rows[2].includes('idle') && oneWorking.isAmber &&
+          /│  ● CLAUDE working/.test(bothWorking.rows[1]) && /│  ● CODEX +working/.test(bothWorking.rows[2]) && bothWorking.isAmber &&
+          /│  ○ CLAUDE idle/.test(neither.rows[1]) && /│  ○ CODEX +idle/.test(neither.rows[2]) && !neither.isAmber,
           JSON.stringify([oneWorking, bothWorking, neither].map(x => [...x.rows.slice(1).map(r => r.trim().slice(0, 40)), x.isAmber])))
       }
       // on its bottom border: a click on >_ brings up its terminal, on ■ stops it (while it runs); anywhere else on it
@@ -1605,9 +1605,9 @@ except ChildProcessError: pass
       const stoppedRow = tiles[hist + 3] ?? ''
       const playAt = columnOf(stoppedRow, '[►]')
       check('ops, compact: a click on a tile\'s >_ brings up its window, on its ■ stops it, anywhere else on it its details; a stopped one has ► alone, which starts it; a forged workspace\'s tile presses nothing',
-        JSON.stringify(tileTargets[first + 3]?.slice(0, 3)) === JSON.stringify([{ kind: 'workspace', id: 'opsx', cols: [folderAt, folderAt + 3] }, { kind: 'shut', id: 'opsx', cols: [shutAt, shutAt + 2] }, { kind: 'details', id: 'opsx', cols: [tileAt, tileAt + 37] }]) &&
+        JSON.stringify(tileTargets[first + 3]?.slice(0, 3)) === JSON.stringify([{ kind: 'workspace', id: 'opsx', cols: [folderAt, folderAt + 3] }, { kind: 'shut', id: 'opsx', cols: [shutAt, shutAt + 2] }, { kind: 'details', id: 'opsx', cols: [tileAt, tileAt + 35] }]) &&
         /└─+\[►\]─┘/.test(stoppedRow) && JSON.stringify(tileTargets[hist + 3]?.[0]) === JSON.stringify({ kind: 'workspace', id: 'stopped', cols: [playAt, playAt + 2] }) &&
-        [0, 1, 2].every(k => JSON.stringify(tileTargets[first + k]?.[0]) === JSON.stringify({ kind: 'details', id: 'opsx', cols: [tileAt, tileAt + 37] })) &&
+        [0, 1, 2].every(k => JSON.stringify(tileTargets[first + k]?.[0]) === JSON.stringify({ kind: 'details', id: 'opsx', cols: [tileAt, tileAt + 35] })) &&
         JSON.stringify(tileTargets[hist - 1]) === JSON.stringify({ kind: 'toggle', what: 'history' }) &&
         !JSON.stringify(tileTargets).includes('../..'),
         `${folderAt} ${shutAt} ${tileAt} ${JSON.stringify(tileTargets[first + 3])} ${JSON.stringify(stoppedRow.trim())} ${JSON.stringify(tileTargets[hist + 3])}`)
@@ -1678,7 +1678,7 @@ except ChildProcessError: pass
       const waitingAt = waitingTiles.findIndex(l => l.includes('┌─ Ops X'))
       const waitingNode = waitingFull.findIndex(l => l.includes('▓▒░ Ops X'))
       check('ops: an agent waiting on the owner says so, in its tile and in full, its workspace marked; never idle or done',
-        /┌─ Ops X 要確認 ✅ é ─+ ◆ ─┐/.test(waitingTiles[waitingAt]) && /│ ◆ CLAUDE waiting +208k │/.test(waitingTiles[waitingAt + 1]) &&
+        /┌─ Ops X 要確認 ✅ é ─+ ◆ ─┐/.test(waitingTiles[waitingAt]) && /│  ◆ CLAUDE waiting +208k  │/.test(waitingTiles[waitingAt + 1]) &&
         /\|O\| ◆ WAITING  ▓▒░ Ops X/.test(waitingFull[waitingNode]) && /\[CLAUDE\] ◆ waiting +context 208k/.test(waitingFull[waitingNode + 1]) &&
         !waitingFull[waitingNode].includes('done') && ![...waitingTiles, ...waitingFull].some(l => /CLAUDE\]? +○ idle|○ CLAUDE idle/.test(l)),
         JSON.stringify([waitingTiles[waitingAt + 1]?.trim().slice(0, 50), waitingFull[waitingNode]?.trim().slice(0, 60), waitingFull[waitingNode + 1]?.trim().slice(0, 60)]))

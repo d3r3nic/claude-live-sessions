@@ -2,6 +2,9 @@
 
 What each version changed, newest first. Each links its pull request, which holds the details, the checks and the reviews. After updating, run `/reload-plugins` in your sessions.
 
+## 0.30.1 — 2026-10-13
+- **Ops tiles with room:** two cells inside each side, three between tiles side by side, a blank line between rows of tiles, a cell's margin at each end of a row.
+
 ## 0.30.0 — 2026-10-13 ([#40](https://github.com/d3r3nic/claude-live-sessions/pull/40))
 - **Ops screen, FOCUS and HISTORY:** running workspaces under `FOCUS`; stopped ones under `HISTORY`, a line kept at the bottom of the screen, folded until a click on it or `h` opens it (kept), where each is started again. FOCUS comes first: an open HISTORY takes only the rows below it, and says what of it does not fit.
 - **/sessions on a dark tab:** Claude's and Codex's names in lighter colors (`#e8875f`, `#6aa5ff`), readable on black; on a light tab as before. (The pane's frame and the theme's own accent colors are Claude Code's theme: on a dark terminal choose a dark one in `/theme`.)
