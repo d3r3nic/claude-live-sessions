@@ -2,7 +2,7 @@
 
 What each version changed, newest first. Each links its pull request, which holds the details, the checks and the reviews. After updating, run `/reload-plugins` in your sessions.
 
-## 0.30.2 — 2026-10-13
+## 0.30.2 — 2026-10-13 ([#42](https://github.com/d3r3nic/claude-live-sessions/pull/42))
 - **Codex's input line and your messages no longer beige on a dark window:** Codex asks the terminal for its background once, at its start, and colours them from it; tmux answered with a colour left from an earlier light window. A workspace's tmux window now takes the background of the tab it is opened from, set before its agents start. A Codex already running keeps its colours until the workspace is stopped and started again (`■` then `►` on the Ops screen).
 
 ## 0.30.1 — 2026-10-13 ([#41](https://github.com/d3r3nic/claude-live-sessions/pull/41))
