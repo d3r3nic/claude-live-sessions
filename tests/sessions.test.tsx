@@ -4830,7 +4830,12 @@ describe('going on with a branch', () => {
     expect(await texts()).toContain('  where Claude · WEB CONSOLE works: the agents settle the repository and branch as they get ready')
     expect(await ui.find({ key: 'form:branch' })).toBeUndefined()
     expect((await ui.find({ key: 'form:purpose' }))?.props.placeholder).toBe('optional: what is next; left empty, they go on with the work in the chats brought in')
-    // a folder the owner typed stays theirs when a chat is chosen
+    // a folder the owner typed stays theirs when a chat is chosen; its branches are not asked about then either
+    await ui.press({ key: 'form:bring claude:session-101' })
+    await ui.input({ key: 'form:project', text: '~/dev/web-app', kind: 'change' })
+    expect(await ui.find({ key: 'form:branch' })).toBeDefined()
+    await ui.press({ key: 'form:bring claude:session-101' })
+    expect(await ui.find({ key: 'form:branch' })).toBeUndefined()
     await ui.input({ key: 'form:project', text: '/Users/u/dev/api', kind: 'change' })
     await ui.press({ key: 'form:bring claude:session-101' })
     await ui.press({ key: 'form:bring claude:session-101' })
@@ -4873,6 +4878,22 @@ describe('going on with a branch', () => {
     expect(world.stopped).toEqual(['ttys022 claude 104'])
     const [saved] = JSON.parse(files.get(WORKSPACES)!).workspaces
     expect([saved.dir, saved.env, saved.threads?.claude?.id]).toEqual(['/Users/u/dev/web-app', 'work', 'session-104'])
+    await ui.unmount()
+  })
+
+  test('a chat\'s folder inside a repository is the workspace\'s as it is, not moved to the repository\'s top', async ($, on) => {
+    const { files } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    files.set('/Users/u/.claude-work/sessions/104.json', JSON.stringify({ ...JSON.parse(files.get('/Users/u/.claude-work/sessions/104.json')!), status: 'idle', statusUpdatedAt: NOW - 60_000 }))
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    await ui.press({ key: 'workspace:new' })
+    await ui.press({ key: 'form:bring claude:session-104' })
+    expect((await ui.find({ key: 'form:project' }))?.props.value).toBe('~/dev/api/src')
+    await ui.input({ key: 'form:name', text: 'Api', kind: 'change' })
+    await ui.press({ key: 'form:create' })
+    const [saved] = JSON.parse(files.get(WORKSPACES)!).workspaces
+    expect([saved.dir, saved.checkout]).toEqual(['/Users/u/dev/api/src', '/Users/u/dev/api'])
     await ui.unmount()
   })
 
