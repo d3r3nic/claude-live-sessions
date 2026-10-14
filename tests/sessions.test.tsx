@@ -4856,6 +4856,26 @@ describe('going on with a branch', () => {
     await ui.unmount()
   })
 
+  test('a chat brought into a workspace whose folder is in another repository: checked and brought in from where it works', async ($, on) => {
+    const { files } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    // WORKER (ttys022, the work environment) between turns, working in api
+    files.set('/Users/u/.claude-work/sessions/104.json', JSON.stringify({ ...JSON.parse(files.get('/Users/u/.claude-work/sessions/104.json')!), status: 'idle', statusUpdatedAt: NOW - 60_000 }))
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    await ui.press({ key: 'workspace:new' })
+    await ui.press({ key: 'form:bring claude:session-104' })
+    expect((await ui.find({ key: 'form:env' }))?.props.value).toBe('work')
+    await ui.input({ key: 'form:project', text: '~/dev/web-app', kind: 'change' })
+    await ui.input({ key: 'form:name', text: 'Cross', kind: 'change' })
+    await ui.press({ key: 'form:create' })
+    expect((await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')).not.toContain('Not done')
+    expect(world.stopped).toEqual(['ttys022 claude 104'])
+    const [saved] = JSON.parse(files.get(WORKSPACES)!).workspaces
+    expect([saved.dir, saved.env, saved.threads?.claude?.id]).toEqual(['/Users/u/dev/web-app', 'work', 'session-104'])
+    await ui.unmount()
+  })
+
   test('a lookup that ends after another project was picked shows nothing of its own; the branch chosen must still be there', async ($, on) => {
     const { files, clock } = engine(on, machine, { termProgram: 'Apple_Terminal' })
     world.slowWorktrees = '/Users/u/dev/web-app'
