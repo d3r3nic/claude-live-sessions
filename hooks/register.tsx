@@ -9,7 +9,7 @@ import type { RelayEvent, Side, Step } from './relay'
 import { branchOf, checkDue, DRIFT_EVERY, driftRequest, isDueAfterCompaction, parseVerdict, recordFolderOf, RECORDS_SCRIPT } from './drift'
 import { hiddenNames, hideInTree, hideNames, hidingFrom, namesPath, namesProblem, NO_HIDING, turned } from './names'
 import type { Hiding } from './names'
-import { bringable, codexDir, CODEX_LETS_GO_S, envOfProfile, holderOf, HOLDERS_SCRIPT, isKnownCodex, CODEX_FOLDER_SCRIPT, CODEX_TASK_SCRIPT, codexTaskState, JOB_COMMANDS, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, toggled, withThreads } from './bring'
+import { type Bringable, bringable, codexDir, CODEX_LETS_GO_S, envOfProfile, holderOf, HOLDERS_SCRIPT, isKnownCodex, CODEX_FOLDER_SCRIPT, CODEX_TASK_SCRIPT, codexTaskState, JOB_COMMANDS, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, toggled, withThreads } from './bring'
 import {
   agentsOf,
   CHECKOUT_SCRIPT,
@@ -39,6 +39,7 @@ import {
   workspacesFrom,
   absoluteDir,
   checkoutResult,
+  chatsPurpose,
   peerPrompt,
   openScriptPath,
   addingPath,
@@ -193,7 +194,7 @@ const allAccounts = atom({ plugin: 'live-sessions', key: 'allAccounts' } as cons
 const pendingMove = atom({ plugin: 'live-sessions', key: 'pendingMove' } as const, { key: '', at: 0 })
 const CONFIRM_MS = 6_000
 
-const NO_DRAFT = { isOpen: false, name: '', query: '', dir: '', env: '', purpose: '', error: '', bring: [] as string[], only: '' as '' | 'claude' | 'codex', goOn: '', choices: [] as string[] }
+const NO_DRAFT = { isOpen: false, name: '', query: '', dir: '', env: '', purpose: '', error: '', bring: [] as string[], only: '' as '' | 'claude' | 'codex', goOn: '', choices: [] as string[], chatDir: '' }
 /** The new-workspace form. */
 const draft = atom({ plugin: 'live-sessions', key: 'draft' } as const, NO_DRAFT)
 /** The session whose workspace is being chosen. */
@@ -1268,9 +1269,8 @@ async function createWorkspace(
 
 /**
  * A workspace to make: `goOn` to go on with the branch checked out in `dir`
- * (`goOnBranch`: the one the form showed for it); `bringFrom`, the folder the
- * form offered the sessions to bring in for (the project, where `dir` is a
- * worktree of it chosen to go on with).
+ * (`goOnBranch`: the one the form showed for it); `bring`, the running
+ * sessions (chats) to bring in, from any folder.
  */
 type NewWorkspace = {
   dir: string
@@ -1281,9 +1281,6 @@ type NewWorkspace = {
   only?: 'claude' | 'codex'
   goOn?: boolean
   goOnBranch?: string
-  bringFrom?: string
-  /** The repository's other folders (its branches' worktrees, wherever they are), whose sessions were offered too. */
-  bringAlso?: readonly string[]
 }
 
 async function makeWorkspace($: EngineInterface, w: NewWorkspace): Promise<{ isCreated: boolean; text: string }> {
@@ -1302,8 +1299,6 @@ async function makeWorkspace($: EngineInterface, w: NewWorkspace): Promise<{ isC
     .run(['/bin/sh', '-c', CHECKOUT_SCRIPT, 'sh', typed], { timeoutMs: 30_000 })
     .catch(() => ({ exitCode: -1, stdout: '', stderr: '' }))
   const place = checkoutResult(found.stdout)
-  const purpose = w.purpose.trim()
-  if (purpose !== '' && 'error' in place) return fail(place.error)
   const checkout = 'checkout' in place ? place.checkout : undefined
   // going on with the branch checked out in the folder: read from git, never typed; a branch's own worktree only, never
   // the main checkout (its branch is the repository's own line), and the one the form showed
@@ -1318,14 +1313,18 @@ async function makeWorkspace($: EngineInterface, w: NewWorkspace): Promise<{ isC
   }
   await refreshNow($)
   const snap = await read($, snapshot)
-  // the sessions brought in, each checked as it runs now; then closed where they run, so each conversation
-  // goes on in the workspace alone
-  // checked as the form offered them: for its project, which a worktree chosen to go on with is part of
-  const checked = await checkBring($, home, snap, w.bring ?? [], w.env, [absoluteDir(w.bringFrom ?? '', home) ?? dir, ...(w.bringAlso ?? [])])
+  // the sessions brought in (from any folder), each checked as it runs now; then closed where they run, so each
+  // conversation goes on in the workspace alone
+  const checked = await checkBring($, home, snap, w.bring ?? [], w.env)
   if ('error' in checked) return fail(checked.error)
   // a workspace of one agent takes in a session of that agent only
   const stranger = checked.bring.find(b => !agentsOf(w).includes(b.tool))
   if (stranger !== undefined) return fail(`${stranger.label} is not ${w.only === 'claude' ? 'Claude' : 'Codex'}, the one agent this workspace runs`)
+  // a pair with conversations brought in and no purpose said goes on with their work: each is told what is next, the
+  // one brought in bringing a new peer up to speed
+  const purpose = w.purpose.trim() || (w.only === undefined && checked.bring.length > 0 ? chatsPurpose(checked.bring.map(b => b.tool)) : '')
+  // in a folder in no repository the agents find the one the purpose concerns as they get ready
+  if (purpose !== '' && 'error' in place && place.isOutside !== true) return fail(place.error)
   const threads: { claude?: Thread; codex?: Thread } = {}
   const notBrought: string[] = []
   const createdAt = await $.clock.now()
@@ -1654,20 +1653,22 @@ async function submitDraft($: EngineInterface) {
   // a path typed (or pasted, or picked) and created before the form had placed it: placed first, as the form would
   // have shown it
   const before = await read($, draft)
-  if (typedPath(before.query) !== undefined && (before.dir === '' || (await read($, worktrees)).dir !== before.dir)) await placeTyped($, before.query)
+  // (a folder filled in from a chat is taken as it is: where the work goes on is the agents' to settle as they get ready)
+  const isFromChat = typeof before.chatDir === 'string' && before.chatDir !== ''
+  if (!isFromChat && typedPath(before.query) !== undefined && (before.dir === '' || (await read($, worktrees)).dir !== before.dir)) await placeTyped($, before.query)
   const d = await read($, draft)
   // found in several places: the owner picks one first (said on the form; a form from before has no such list)
   if (Array.isArray(d.choices) && d.choices.length > 0) return
   // (a form open since before the choice was offered has none: both)
   const only = d.only === 'claude' || d.only === 'codex' ? d.only : undefined
   // a worktree chosen to go on with (one the form shows: found for its folder, which a new form, a pick or typing
-  // starts over) is the workspace's folder; the sessions to bring in were offered for the project, its worktrees too
+  // starts over) is the workspace's folder; with chats brought in, none (their agents settle the branch)
   const project = d.dir || d.query
   const found = await read($, worktrees)
   const isPlaced = found.dir !== '' && found.dir === d.dir
-  const goOn = isPlaced ? found.list.find(w => w.path === d.goOn) : undefined
+  const goOn = isPlaced && d.bring.length === 0 ? found.list.find(w => w.path === d.goOn) : undefined
   const made = await createWorkspace($, {
-    name: d.name, dir: goOn?.path ?? project, env: d.env, purpose: d.purpose, bring: d.bring, bringFrom: project, bringAlso: isPlaced ? found.list.map(w => w.path) : [],
+    name: d.name, dir: goOn?.path ?? project, env: d.env, purpose: d.purpose, bring: d.bring,
     ...(only === undefined ? {} : { only }),
     ...(goOn === undefined ? {} : { goOn: true, goOnBranch: goOn.branch }),
   })
@@ -1738,18 +1739,20 @@ async function removePrompts($: EngineInterface, home: string, id: string) {
 }
 
 /** Opens the form, with `dir` filled in when given (and a session to bring in, with its environment), and looks for the projects to offer. */
-async function openDraft($: EngineInterface, dir: string, with_?: { member: string; env: string }) {
+async function openDraft($: EngineInterface, dir: string, with_?: { member: string; env: string; dir: string }) {
   const home = (await $.env.get('HOME')) ?? ''
-  const shown = dir.startsWith(`${home}/`) ? `~${dir.slice(home.length)}` : dir
+  // with a chat chosen, its folder (taken as it is)
+  const folder = with_?.dir ?? dir
+  const shown = folder.startsWith(`${home}/`) ? `~${folder.slice(home.length)}` : folder
   // in this session's own environment unless a session brought in names another
   const own = await ownEnv($, home)
   const env = own !== undefined && (await read($, snapshot)).envs.includes(own) ? own : ''
-  await update($, draft, () => ({ ...NO_DRAFT, isOpen: true, dir, query: shown, env, ...(with_ === undefined ? {} : { bring: [with_.member], env: with_.env }) }))
+  await update($, draft, () => ({ ...NO_DRAFT, isOpen: true, dir: folder, query: shown, env, ...(with_ === undefined ? {} : { bring: [with_.member], env: with_.env, chatDir: with_.member }) }))
   // a form opened anew shows no worktrees another one found
   await update($, worktrees, () => ({ dir: '', list: [] }))
   // while this pane has the keys (the form opened by its key), what is typed next goes into the name, not to the pane's keys
   await $.ui.focus({ requestId: PANE, key: 'form:name' }).catch(() => undefined)
-  if (dir.startsWith('/')) await placeTyped($, shown)
+  if (folder.startsWith('/') && with_ === undefined) await placeTyped($, shown)
   if ((await read($, projects)).length > 0) return
   const found = await $.process
     .run(['/bin/sh', '-c', PROJECTS_SCRIPT, 'sh', home], { timeoutMs: 30_000 })
@@ -2571,8 +2574,18 @@ export const register: Register = on => {
     const branches = form.isOpen && formDir !== undefined && found.dir === formDir ? found.list : []
     // the places a path typed was found in, to pick one (a form from before this list has none)
     const choices = Array.isArray(form.choices) ? form.choices : []
-    // the repository's sessions, wherever its worktrees are
-    const offered = form.isOpen && formDir !== undefined ? bringable(snap, { now, selfId }, [formDir, ...branches.map(b => b.path)]).filter(b => formOnly === '' || b.tool === formOnly) : []
+    // the chats the form can bring in, from any folder: of the agents chosen
+    const offered = form.isOpen ? offeredAll.filter(b => formOnly === '' || b.tool === formOnly) : []
+    const tilde = (dir: string) => (dir.startsWith(`${home}/`) ? `~${dir.slice(home.length)}` : dir)
+    // a chat chosen fills in the folder with its own, unless the owner typed one; its agents settle the branch
+    const fromChat = typeof form.chatDir === 'string' ? form.chatDir : ''
+    const withChats = <D extends typeof form>(d: D, bring: string[]): D => {
+      const first = ['claude', 'codex'].map(t => offeredAll.find(o => o.tool === t && bring.includes(o.member))).find(o => o !== undefined)
+      const isChats = (typeof d.chatDir === 'string' && d.chatDir !== '') || d.query.trim() === ''
+      const folder = !isChats ? {} : first === undefined ? { query: '', dir: '', chatDir: '' } : { query: tilde(first.dir), dir: first.dir, chatDir: first.member }
+      return { ...d, bring, ...folder, ...(isChats ? { goOn: '', choices: [] } : {}), error: '' }
+    }
+    const chooseChat = (b: Bringable) => update($, draft, d => ({ ...withChats(d, toggled(d.bring, b.member)), ...(d.bring.includes(b.member) ? {} : { env: b.env }) }))
     const matches = form.isOpen ? rankProjects(await read($, projects), [...snap.claude, ...snap.codex].map(s => ({ cwd: s.cwd, at: 'lastActive' in s ? s.lastActive : s.since })), form.dir === '' ? form.query : '', home) : []
     const pending = await read($, pendingMove)
     const isPending = (key: string) => pending.key === key && now - pending.at < CONFIRM_MS
@@ -2885,20 +2898,67 @@ export const register: Register = on => {
           {form.isOpen && Input !== undefined && Select !== undefined && (
             <Box key="form" flexDirection="column" width={width - 2} marginLeft={2}>
               <Input key="form:name" label="name" autoFocus value={form.name} placeholder="Practice RBAC" onInput={setForm('name')} onSubmit={() => void submitDraft($)} />
+              <Select
+                key="form:agents"
+                label="agents"
+                options={[
+                  { value: 'both', label: 'Claude and Codex' },
+                  { value: 'claude', label: 'Claude only' },
+                  { value: 'codex', label: 'Codex only' },
+                ]}
+                value={formOnly || 'both'}
+                // a chat chosen to bring in that the workspace will not run is let go
+                onSelect={value => {
+                  const only: '' | 'claude' | 'codex' = value === 'claude' ? 'claude' : value === 'codex' ? 'codex' : ''
+                  void update($, draft, d => ({ ...withChats(d, d.bring.filter(m => only === '' || m.startsWith(`${only}:`))), only }))
+                }}
+              />
+              {/* your chats first: each agent goes on with one, from any folder, or starts new */}
+              <Text dimColor wrap="truncate-end">{'bring in your chats (each closes where it runs and goes on here, in its own conversation):'}</Text>
+              {(['claude', 'codex'] as const).filter(t => formOnly === '' || formOnly === t).map(t => {
+                const NAME = t === 'claude' ? 'Claude' : 'Codex'
+                const chats = offered.filter(b => b.tool === t)
+                const chosen = chats.find(b => form.bring.includes(b.member))
+                return (
+                  <Box key={`form:chats ${t}`} flexDirection="column" marginLeft={2}>
+                    <Text dimColor wrap="truncate-end">{`${NAME}: ${chosen !== undefined ? 'goes on with the chat chosen' : chats.some(b => b.blocked === undefined) ? 'starts new, unless you choose a chat' : 'starts new (no chat of it to bring in)'}`}</Text>
+                    {chats.map(b =>
+                      b.blocked !== undefined ? (
+                        <Box key={`form:bring-row ${b.member}`} marginLeft={2}>
+                          <Text dimColor wrap="truncate-end">{`${b.label} · not offered: ${b.blocked}`}</Text>
+                        </Box>
+                      ) : (
+                        <Box key={`form:bring-row ${b.member}`} marginLeft={2}>
+                          <Button
+                            key={`form:bring ${b.member}`}
+                            label={`${form.bring.includes(b.member) ? '[x]' : '[ ]'} ${b.label} · ${tilde(b.dir)}${b.isIdle ? '' : ' · working: bring it in once its turn is done'}`}
+                            {...(form.bring.includes(b.member) ? { variant: 'primary' as const } : {})}
+                            onPress={() => void chooseChat(b)}
+                          />
+                        </Box>
+                      ),
+                    )}
+                  </Box>
+                )
+              })}
               <Input
                 key="form:project"
-                label="repository"
+                label="folder"
                 value={form.query}
-                placeholder="search by name (a repository or a branch's worktree), or paste a folder or file in one"
+                placeholder={form.bring.length > 0 ? 'the chat\'s own, or search a repository, or paste a folder' : 'where new agents start: search a repository or a branch\'s worktree, or paste a folder or file in one'}
                 onInput={value => {
                   void (async () => {
-                    await update($, draft, d => ({ ...d, query: value, dir: '', bring: [], goOn: '', choices: [], error: '' }))
+                    // typed over: the owner's folder, no longer the chat's
+                    await update($, draft, d => ({ ...d, query: value, dir: '', goOn: '', choices: [], chatDir: '', error: '' }))
                     // a path: placed in its repository, and in its branch's worktree when it is in one
                     if (typedPath(value) !== undefined) await placeTyped($, value)
                   })().catch(() => undefined)
                 }}
                 onSubmit={() => void submitDraft($)}
               />
+              {fromChat !== '' && (
+                <Text dimColor wrap="truncate-end">{`  where ${offered.find(b => b.member === fromChat)?.label ?? 'the chat'} works: the agents settle the repository and branch as they get ready`}</Text>
+              )}
               {form.dir === '' && (choices.length > 0 || matches.length > 0) && (
                 <Select
                   key="form:pick"
@@ -2909,63 +2969,27 @@ export const register: Register = on => {
                     const shown = rankProjects([value], [], '', home)[0]?.label ?? value
                     // its folder (and branch) once placed; until then, the folder as picked
                     void (async () => {
-                      await update($, draft, d => ({ ...d, dir: '', query: shown, bring: [], goOn: '', choices: [], error: '' }))
+                      await update($, draft, d => ({ ...d, dir: '', query: shown, goOn: '', choices: [], chatDir: '', error: '' }))
                       await placeTyped($, shown)
                     })().catch(() => undefined)
                   }}
                 />
               )}
               {form.dir !== '' && absoluteDir(form.query, home) !== form.dir && (
-                <Text dimColor wrap="truncate-end">{`  in the repository ${form.dir.startsWith(`${home}/`) ? `~${form.dir.slice(home.length)}` : form.dir}`}</Text>
+                <Text dimColor wrap="truncate-end">{`  in the repository ${tilde(form.dir)}`}</Text>
               )}
-              {offered.length > 0 && <Text dimColor wrap="truncate-end">{'bring in (each closes where it runs and goes on here, in its own conversation):'}</Text>}
-              {offered.map(b => {
-                const isChosen = form.bring.includes(b.member)
-                if (b.blocked !== undefined) {
-                  return (
-                    <Box key={`form:bring-row ${b.member}`} marginLeft={2}>
-                      <Text dimColor wrap="truncate-end">{`${b.label} · not offered: ${b.blocked}`}</Text>
-                    </Box>
-                  )
-                }
-                return (
-                  <Box key={`form:bring-row ${b.member}`} marginLeft={2}>
-                    <Button
-                      key={`form:bring ${b.member}`}
-                      label={`${isChosen ? '[x]' : '[ ]'} ${b.label}${b.isIdle ? '' : ' · working: bring it in once its turn is done'}`}
-                      {...(isChosen ? { variant: 'primary' as const } : {})}
-                      onPress={() => void update($, draft, d => ({ ...d, bring: toggled(d.bring, b.member), ...(d.bring.includes(b.member) ? {} : { env: b.env }), error: '' }))}
-                    />
-                  </Box>
-                )
-              })}
-              {branches.length > 0 && (
+              {branches.length > 0 && form.bring.length === 0 && (
                 <Select
                   key="form:branch"
                   label="branch"
                   options={[
                     { value: 'new', label: 'a new branch for the purpose (a clean start, in a worktree of its own)' },
-                    ...branches.map(b => ({ value: b.path, label: `go on with ${b.branch} · ${b.path.startsWith(`${home}/`) ? `~${b.path.slice(home.length)}` : b.path}` })),
+                    ...branches.map(b => ({ value: b.path, label: `go on with ${b.branch} · ${tilde(b.path)}` })),
                   ]}
                   value={form.goOn || 'new'}
                   onSelect={value => void update($, draft, d => ({ ...d, goOn: value === 'new' ? '' : value, error: '' }))}
                 />
               )}
-              <Select
-                key="form:agents"
-                label="agents"
-                options={[
-                  { value: 'both', label: 'Claude and Codex' },
-                  { value: 'claude', label: 'Claude only' },
-                  { value: 'codex', label: 'Codex only' },
-                ]}
-                value={formOnly || 'both'}
-                // a session chosen to bring in that the workspace will not run is let go
-                onSelect={value => {
-                  const only: '' | 'claude' | 'codex' = value === 'claude' ? 'claude' : value === 'codex' ? 'codex' : ''
-                  void update($, draft, d => ({ ...d, only, bring: d.bring.filter(m => only === '' || m.startsWith(`${only}:`)), error: '' }))
-                }}
-              />
               <Select
                 key="form:env"
                 label="environment"
@@ -2977,7 +3001,13 @@ export const register: Register = on => {
                 key="form:purpose"
                 label="what it is for"
                 value={form.purpose}
-                placeholder={formOnly === '' ? 'optional: Claude sets up peer coding for it, and the relay passes each hand-over' : `optional: ${formOnly === 'claude' ? 'Claude' : 'Codex'} gets ready for it, then waits for you`}
+                placeholder={
+                  formOnly !== ''
+                    ? `optional: ${formOnly === 'claude' ? 'Claude' : 'Codex'} gets ready for it, then waits for you`
+                    : form.bring.length > 0
+                    ? 'optional: what is next; left empty, they go on with the work in the chats brought in'
+                    : 'optional: Claude sets up peer coding for it, and the relay passes each hand-over'
+                }
                 onInput={setForm('purpose')}
                 onSubmit={() => void submitDraft($)}
               />

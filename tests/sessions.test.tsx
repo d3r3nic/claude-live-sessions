@@ -71,6 +71,7 @@ import {
   leanWork,
   assigned,
   checkoutResult,
+  chatsPurpose,
   CHECKOUT_SCRIPT,
   openScriptPath,
   addingPath,
@@ -2320,7 +2321,7 @@ describe('workspaces, from the pane', () => {
 
   test('helpers: the checkout script\'s answers; projects ranked; assigning a session to one workspace; members kept', async () => {
     expect(checkoutResult('ok /Users/u/dev/web-app\n')).toEqual({ checkout: '/Users/u/dev/web-app' })
-    expect(checkoutResult('error: not-a-repo\n')).toEqual({ error: 'that folder is not in a git checkout; peer coding works on a git repository' })
+    expect(checkoutResult('error: not-a-repo\n')).toEqual({ error: 'that folder is not in a git checkout; peer coding works on a git repository', isOutside: true })
     expect(checkoutResult('error: no-main\n')).toEqual({ error: 'git cannot tell where this repository\'s main checkout is; pick the main checkout' })
     expect(checkoutResult('')).toEqual({ error: 'its worktrees folder could not be made beside the repository' })
     // the projects with a session most recently first (in the checkout, under it or in its worktrees), then by path
@@ -2404,7 +2405,7 @@ describe('workspaces, from the pane', () => {
     await ui.unmount()
   })
 
-  test('New workspace here on a branch row fills in its folder; a purpose needs a git repository', async ($, on) => {
+  test('New workspace here on a branch row fills in its folder; a purpose in a folder outside git: the agents find the repository as they get ready', async ($, on) => {
     const { files } = engine(on, machine, { termProgram: 'Apple_Terminal' })
     await $.session.start(START)
     await $.command.run(SESSIONS)
@@ -2416,11 +2417,18 @@ describe('workspaces, from the pane', () => {
     await ui.press({ key: 'form:create' })
     expect(JSON.parse(files.get(WORKSPACES)!).workspaces[0].dir).toBe('/Users/u/dev/web-app')
     await ui.unmount()
-    // a folder outside git takes a workspace, but not one for a purpose
+    // a folder outside git takes a workspace, one for a purpose too: no worktrees folder, and Claude told to work in
+    // the repository the purpose concerns
     const run = async (args: string) => (await $.command.run({ ...SESSIONS, command: 'workspace', args })).text
     expect(await run('new ~ work Plain')).toMatch(/^Created Plain/)
-    expect(await run('new ~ work Peers --for a thing')).toBe('Not done: that folder is not in a git checkout; peer coding works on a git repository.')
-    expect(await run('new ~/dev/api work Peers --for a thing')).toMatch(/Claude gets peer coding ready for it/)
+    expect(await run('new ~ work Peers --for a thing')).toMatch(/Claude gets peer coding ready for it/)
+    const peers = JSON.parse(files.get(WORKSPACES)!).workspaces.find((w: Workspace) => w.id === 'peers')
+    expect(peers.checkout).toBeUndefined()
+    const setup = files.get(promptPath(HOME, 'peers', 'claude'))!
+    expect(setup).toContain('1. The workspace\'s folder, /Users/u, is in no git repository: work in the repository the purpose concerns (the one your work above is in, if any). If it is not set up for peer coding in the current layout, set it up.')
+    expect(setup).toContain('in its own worktree in the worktrees folder beside the repository\'s main checkout (<checkout>-worktrees/).')
+    expect(files.get(openScriptPath(HOME, 'peers'))).not.toContain('--add-dir')
+    expect(await run('new ~/dev/api work Peers2 --for a thing')).toMatch(/Claude gets peer coding ready for it/)
   })
 
   test('the form refuses a relative folder, a gone environment and an unreadable list, before any git or tmux', async ($, on) => {
@@ -3002,7 +3010,12 @@ describe('bringing running sessions into a workspace', () => {
     const both = { ...ws, threads: { claude: { id: 'a', dir: '/x' }, codex: { id: 'b', dir: '/y' } } }
     expect(joinPrompt(both, 'codex')).toContain('Claude runs in the pane beside you, in its own conversation, brought in too, and is getting peer coding ready now')
     expect(joinPrompt(both, 'codex')).toContain('add what you know from your own work above that it does not say')
-    expect(setupPrompt({ ...ws, threads: { codex: { id: 'b', dir: '/y' } } })).toContain('which the owner brought in: your alignment brief can ask it where its work stands.')
+    // a new Claude gets ready with the Codex brought in: its branch, asked where its work stands
+    const withCodex = setupPrompt({ ...ws, threads: { codex: { id: 'b', dir: '/y' } } })
+    expect(withCodex).toContain('Codex runs in the pane beside you, in its own conversation, which the owner brought in.')
+    expect(withCodex).toContain('2. If Codex\'s work is on a branch, go on with it (ask Codex in your alignment brief if the repository does not show which). Otherwise start a branch for this purpose')
+    expect(withCodex).toContain('3. Make your alignment move for that branch, asking Codex where its work stands, and end your turn')
+    expect(setupPrompt({ ...ws, threads: undefined })).toContain('2. Start a branch for this purpose')
     expect(setupPrompt({ ...ws, threads: undefined })).toContain('You are Claude, one of two peers here; Codex runs in the pane beside you. The owner turned on')
   })
 
@@ -3097,7 +3110,7 @@ describe('bringing running sessions into a workspace', () => {
     await ui.press({ key: 'bring claude-101' })
     // the form: its project, its environment, it chosen; the Codex terminal holding its conversation offered, the other shown, not offered
     expect((await ui.find({ key: 'form:project' }))?.props.value).toBe('~/dev/web-app')
-    expect((await ui.find({ key: 'form:bring claude:session-101' }))?.props.label).toBe('[x] Claude · WEB CONSOLE')
+    expect((await ui.find({ key: 'form:bring claude:session-101' }))?.props.label).toBe('[x] Claude · WEB CONSOLE · ~/dev/web-app')
     expect((await ui.find({ key: `form:bring codex:${HELD}` }))?.props.label).toMatch(/^\[ \] Codex · /)
     expect(await ui.find({ key: 'form:bring codex-tty:ttys045' })).toBeUndefined()
     expect((await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')).toContain('Codex · the terminal in ttys045 · not offered: which conversation it runs is not certain')
@@ -3134,7 +3147,7 @@ describe('bringing running sessions into a workspace', () => {
     await reveal(ui, 'item:claude-101')
     expect((await ui.find({ key: 'bring claude-101' }))?.props.label).toBe('New workspace with it (n)')
     await ui.press({ key: 'bring claude-101' })
-    expect((await ui.find({ key: 'form:bring claude:session-101' }))?.props.label).toBe('[x] Claude · WEB CONSOLE (this session)')
+    expect((await ui.find({ key: 'form:bring claude:session-101' }))?.props.label).toBe('[x] Claude · WEB CONSOLE (this session) · ~/dev/web-app')
     await ui.input({ key: 'form:name', text: 'Console', kind: 'change' })
     await ui.press({ key: 'form:create' })
     // opened while this session still ran the conversation (never refused for it), and only then closed: that process
@@ -3323,7 +3336,7 @@ describe('bringing running sessions into a workspace', () => {
     const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
     await reveal(ui, 'tree:/Users/u/dev/web-app')
     await ui.press({ key: 'new-from:/Users/u/dev/web-app' })
-    expect((await ui.find({ key: `form:bring codex:${RESUMED_A}` }))?.props.label).toBe('[ ] Codex · Find the report writer (closed)')
+    expect((await ui.find({ key: `form:bring codex:${RESUMED_A}` }))?.props.label).toBe('[ ] Codex · Find the report writer (closed) · ~/dev/web-app')
     await ui.press({ key: `form:bring codex:${RESUMED_A}` })
     await ui.input({ key: 'form:name', text: 'Reports', kind: 'change' })
     await ui.press({ key: 'form:create' })
@@ -4249,7 +4262,7 @@ describe('a workspace of one agent', () => {
     // Claude only: the Codex sessions are not offered, and the one chosen is let go
     await ui.select({ key: 'form:agents', value: 'claude' })
     expect(await ui.find({ key: `form:bring codex:${HELD}` })).toBeUndefined()
-    expect((await ui.find({ key: 'form:bring claude:session-101' }))?.props.label).toBe('[x] Claude · WEB CONSOLE')
+    expect((await ui.find({ key: 'form:bring claude:session-101' }))?.props.label).toBe('[x] Claude · WEB CONSOLE · ~/dev/web-app')
     expect((await ui.find({ key: 'form:purpose' }))?.props.placeholder).toBe('optional: Claude gets ready for it, then waits for you')
     await ui.select({ key: 'form:agents', value: 'both' })
     expect((await ui.find({ key: `form:bring codex:${HELD}` }))?.props.label).toMatch(/^\[ \] Codex · /)
@@ -4258,7 +4271,9 @@ describe('a workspace of one agent', () => {
     expect(await ui.find({ key: 'form:bring claude:session-101' })).toBeUndefined()
     expect((await ui.find({ key: 'form:purpose' }))?.props.placeholder).toBe('optional: Codex gets ready for it, then waits for you')
     await ui.select({ key: 'form:agents', value: 'claude' })
-    expect((await ui.find({ key: 'form:bring claude:session-101' }))?.props.label).toBe('[ ] Claude · WEB CONSOLE')
+    // the folder was the chat's: let go with it
+    expect((await ui.find({ key: 'form:project' }))?.props.value).toBe('')
+    expect((await ui.find({ key: 'form:bring claude:session-101' }))?.props.label).toBe('[ ] Claude · WEB CONSOLE · ~/dev/web-app')
     await ui.press({ key: 'form:bring claude:session-101' })
     await ui.input({ key: 'form:name', text: 'Console', kind: 'change' })
     await ui.input({ key: 'form:purpose', text: 'finish the console', kind: 'change' })
@@ -4791,28 +4806,53 @@ describe('going on with a branch', () => {
     expect([whereFrom(''), whereFrom('\0x'), whereFrom('relative\0/r\0' + list), whereFrom('/r\0'), whereFrom('/r\0rel\0' + list)]).toEqual([undefined, undefined, undefined, undefined, undefined])
   })
 
-  test('New workspace with it, going on with a worktree of the same repository: the session is brought in', async ($, on) => {
+  test('chats first: from any folder, the folder the chat\'s own, no branch to choose; no purpose said: each told to go on with the work', async ($, on) => {
     const { files } = engine(on, machine, { termProgram: 'Apple_Terminal' })
-    // a worktree of web-app's no session works in, so nothing the sessions show places it
+    // web-app has a branch's worktree to go on with, which a chat leaves to its agents
     world.moreWorktrees = 'worktree /Users/u/dev/web-app-worktrees/feat-rbac\0HEAD 4444\0branch refs/heads/feat/rbac\0\0'
     world.dirs.add('/Users/u/dev/web-app-worktrees/feat-rbac')
-    world.heads['/Users/u/dev/web-app-worktrees/feat-rbac'] = 'linked\nfeat/rbac\n'
     // WEB CONSOLE (ttys004, default environment) between turns, working in web-app's main checkout
     files.set('/Users/u/.claude/sessions/101.json', JSON.stringify({ ...JSON.parse(files.get('/Users/u/.claude/sessions/101.json')!), status: 'idle', statusUpdatedAt: NOW - 60_000 }))
     await $.session.start(START)
     await $.command.run(SESSIONS)
     const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
-    await reveal(ui, 'item:claude-101')
-    await ui.press({ key: 'bring claude-101' })
-    await ui.select({ key: 'form:branch', value: '/Users/u/dev/web-app-worktrees/feat-rbac' })
+    await ui.press({ key: 'workspace:new' })
+    // the chats of every folder, before any folder is named: each agent's, said which goes on
+    const texts = async () => (await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')
+    expect(await texts()).toContain('Claude: starts new, unless you choose a chat')
+    expect(await ui.find({ key: 'form:bring claude:session-101' })).toBeDefined()
+    expect((await ui.find({ key: 'form:bring claude:session-104' }))?.props.label).toBe('[ ] Claude · WORKER · ~/dev/api/src')
+    expect((await ui.find({ key: 'form:project' }))?.props.value).toBe('')
+    // a chat chosen: its folder, as it is; no branch asked (its agents settle it)
+    await ui.press({ key: 'form:bring claude:session-101' })
+    expect((await ui.find({ key: 'form:project' }))?.props.value).toBe('~/dev/web-app')
+    expect(await texts()).toContain('Claude: goes on with the chat chosen')
+    expect(await texts()).toContain('  where Claude · WEB CONSOLE works: the agents settle the repository and branch as they get ready')
+    expect(await ui.find({ key: 'form:branch' })).toBeUndefined()
+    expect((await ui.find({ key: 'form:purpose' }))?.props.placeholder).toBe('optional: what is next; left empty, they go on with the work in the chats brought in')
+    // a folder the owner typed stays theirs when a chat is chosen
+    await ui.input({ key: 'form:project', text: '/Users/u/dev/api', kind: 'change' })
+    await ui.press({ key: 'form:bring claude:session-101' })
+    await ui.press({ key: 'form:bring claude:session-101' })
+    expect((await ui.find({ key: 'form:project' }))?.props.value).toBe('/Users/u/dev/api')
+    await ui.input({ key: 'form:project', text: '', kind: 'change' })
+    await ui.press({ key: 'form:bring claude:session-101' })
+    await ui.press({ key: 'form:bring claude:session-101' })
+    expect((await ui.find({ key: 'form:project' }))?.props.value).toBe('~/dev/web-app')
     await ui.input({ key: 'form:name', text: 'RBAC', kind: 'change' })
-    await ui.input({ key: 'form:purpose', text: 'roles', kind: 'change' })
     await ui.press({ key: 'form:create' })
-    expect((await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')).not.toContain('Not done')
+    expect(await texts()).not.toContain('Not done')
     expect(world.stopped).toEqual(['ttys004 claude 101'])
     const [saved] = JSON.parse(files.get(WORKSPACES)!).workspaces
-    expect([saved.dir, saved.branch, saved.threads?.claude?.id]).toEqual(['/Users/u/dev/web-app-worktrees/feat-rbac', 'feat/rbac', 'session-101'])
+    // the chat's folder, no branch; no purpose said, so each is told to go on with the work, Claude bringing Codex up
+    // to speed, the relay on
+    expect([saved.dir, saved.branch, saved.threads?.claude?.id]).toEqual(['/Users/u/dev/web-app', undefined, 'session-101'])
+    expect(saved.purpose).toBe('Going on with the work under way in Claude\'s conversation, brought in; Claude brings Codex up to speed.')
+    expect(saved.relay?.mode).toBe('auto')
     expect(files.get(promptPath(HOME, 'rbac', 'claude'))).toBe(joinPrompt(saved, 'claude'))
+    expect(files.get(promptPath(HOME, 'rbac', 'codex'))).toBe(peerPrompt(saved))
+    expect(chatsPurpose(['codex'])).toBe('Going on with the work under way in Codex\'s conversation, brought in; Codex brings Claude up to speed.')
+    expect(chatsPurpose(['claude', 'codex'])).toBe('Going on with the work under way in Claude\'s and Codex\'s conversations, both brought in.')
     await ui.unmount()
   })
 

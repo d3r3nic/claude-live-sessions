@@ -746,11 +746,14 @@ export const CHECKOUT_SCRIPT = [
   `printf 'ok %s\\n' "$main"`,
 ].join('\n')
 
-/** CHECKOUT_SCRIPT's answer: the main checkout, or why there is none, said for a person. */
-export function checkoutResult(stdout: string): { checkout: string } | { error: string } {
+/**
+ * CHECKOUT_SCRIPT's answer: the main checkout, or why there is none, said for a person; `isOutside` when the folder is
+ * in no git repository (the agents then work in the one the purpose concerns, as they find in getting ready).
+ */
+export function checkoutResult(stdout: string): { checkout: string } | { error: string; isOutside?: boolean } {
   const line = stdout.trim().split('\n').pop() ?? ''
   if (line.startsWith('ok /')) return { checkout: line.slice(3) }
-  if (line === 'error: not-a-repo') return { error: 'that folder is not in a git checkout; peer coding works on a git repository' }
+  if (line === 'error: not-a-repo') return { error: 'that folder is not in a git checkout; peer coding works on a git repository', isOutside: true }
   if (line === 'error: no-main') return { error: 'git cannot tell where this repository\'s main checkout is; pick the main checkout' }
   return { error: 'its worktrees folder could not be made beside the repository' }
 }
@@ -830,6 +833,19 @@ export function leanWork(isPair: boolean): string {
   ].join(' ')
 }
 
+/** Where a branch's own worktree goes: beside the repository's main checkout. */
+const worktreesOf = (ws: Pick<Workspace, 'checkout'>) =>
+  ws.checkout === undefined ? 'the worktrees folder beside the repository\'s main checkout (<checkout>-worktrees/)' : `${ws.checkout}-worktrees/`
+
+/**
+ * Step 1 of a first prompt for peer coding: the repository set up for it; in a workspace whose folder is in no
+ * repository, the one the work is in, found first.
+ */
+const setUpStep = (ws: Pick<Workspace, 'checkout' | 'dir'>) =>
+  ws.checkout === undefined
+    ? `1. The workspace's folder, ${ws.dir}, is in no git repository: work in the repository the purpose concerns (the one your work above is in, if any). If it is not set up for peer coding in the current layout, set it up. Record the owner's decisions you already know and ask for the rest with NEEDS USER.`
+    : '1. If this repository is not set up for peer coding in the current layout, set it up. Record the owner\'s decisions you already know and ask for the rest with NEEDS USER.'
+
 /** Step 2 of a first prompt when the owner chose the branch: go on with it there, and start no other. */
 const goOnStep = (ws: Pick<Workspace, 'branch' | 'dir'>) =>
   `Go on with the branch the owner chose, ${ws.branch}, in its worktree ${ws.dir}: the work there is under way. Start no other branch.`
@@ -841,19 +857,32 @@ const goOnStep = (ws: Pick<Workspace, 'branch' | 'dir'>) =>
  * which the workspace's relay passes on.
  */
 export function setupPrompt(ws: Pick<Workspace, 'name' | 'purpose' | 'checkout' | 'threads' | 'branch' | 'dir'>): string {
-  const codex = ws.threads?.codex === undefined ? 'Codex runs in the pane beside you' : 'Codex runs in the pane beside you, in its own conversation, which the owner brought in: your alignment brief can ask it where its work stands'
+  // a Codex brought in has work of its own: Claude gets ready with it, asking where it stands
+  const isBrought = ws.threads?.codex !== undefined
+  const codex = isBrought ? 'Codex runs in the pane beside you, in its own conversation, which the owner brought in' : 'Codex runs in the pane beside you'
   return [
     `This is the workspace "${ws.name}". What it is for: ${ws.purpose ?? ''}`,
     '',
     `You are Claude, one of two peers here; ${codex}. ${RELAY_FOR_CLAUDE}`,
     '',
     'Get the workspace ready for peer coding, using the peer-coding skill and the rules it leads to:',
-    '1. If this repository is not set up for peer coding in the current layout, set it up. Record the owner\'s decisions you already know and ask for the rest with NEEDS USER.',
+    setUpStep(ws),
     ws.branch !== undefined
       ? `2. ${goOnStep(ws)}`
-      : `2. Start a branch for this purpose: name it from the purpose by the settings' branch naming, never from the workspace's name, in its own worktree in ${ws.checkout ?? '<checkout>'}-worktrees/.`,
-    '3. Make your alignment move for that branch and end your turn with the line the rules\' cue prints.',
+      : `2. ${isBrought ? 'If Codex\'s work is on a branch, go on with it (ask Codex in your alignment brief if the repository does not show which). Otherwise start' : 'Start'} a branch for this purpose: name it from the purpose by the settings' branch naming, never from the workspace's name, in its own worktree in ${worktreesOf(ws)}.`,
+    `3. Make your alignment move for that branch${isBrought ? ', asking Codex where its work stands,' : ''} and end your turn with the line the rules' cue prints.`,
   ].join('\n')
+}
+
+/**
+ * What a pair made with conversations brought in is for, when the owner says nothing: going on with the work under
+ * way there, the one brought in bringing a new peer up to speed.
+ */
+export function chatsPurpose(brought: readonly ('claude' | 'codex')[]): string {
+  const NAME = { claude: 'Claude', codex: 'Codex' } as const
+  const [one] = brought
+  if (brought.length >= 2 || one === undefined) return 'Going on with the work under way in Claude\'s and Codex\'s conversations, both brought in.'
+  return `Going on with the work under way in ${NAME[one]}'s conversation, brought in; ${NAME[one]} brings ${NAME[one === 'claude' ? 'codex' : 'claude']} up to speed.`
 }
 
 /**
@@ -909,10 +938,10 @@ export function joinPrompt(ws: Pick<Workspace, 'name' | 'purpose' | 'checkout' |
     leanWork(true),
     '',
     'From here, work as a peer under the peer-coding rules, using the peer-coding skill:',
-    '1. If this repository is not set up for peer coding in the current layout, set it up. Record the owner\'s decisions you already know and ask for the rest with NEEDS USER.',
+    setUpStep(ws),
     ws.branch !== undefined
       ? `2. ${goOnStep(ws)} Work of yours not committed yet stays where it is: ask the owner with NEEDS USER before moving any of it.`
-      : `2. If the work above already has a peer-coding branch, go on with it. Otherwise start one for this purpose: name it from the purpose by the settings' branch naming, never from the workspace's name, in its own worktree in ${ws.checkout ?? '<checkout>'}-worktrees/. Work of yours not committed yet stays where it is: ask the owner with NEEDS USER before moving any of it.`,
+      : `2. If the work above already has a peer-coding branch, go on with it. Otherwise start one for this purpose: name it from the purpose by the settings' branch naming, never from the workspace's name, in its own worktree in ${worktreesOf(ws)}. Work of yours not committed yet stays where it is: ask the owner with NEEDS USER before moving any of it.`,
     '3. Make your alignment move for that branch, telling Codex where the work stands, and end your turn with the line the rules\' cue prints.',
   ].join('\n')
 }
@@ -949,10 +978,10 @@ export function addedPrompt(ws: Pick<Workspace, 'name' | 'purpose' | 'checkout' 
     leanWork(true),
     '',
     'From here, work as a peer under the peer-coding rules, using the peer-coding skill:',
-    '1. If this repository is not set up for peer coding in the current layout, set it up. Record the owner\'s decisions you already know and ask for the rest with NEEDS USER.',
+    setUpStep(ws),
     ws.branch !== undefined
       ? `2. ${goOnStep(ws)}`
-      : `2. If ${known} is on a branch, go on with it${o.isNew ? ' (ask Codex in your alignment brief if the repository does not show which)' : ''}. Otherwise start one for this purpose: name it from the purpose by the settings' branch naming, never from the workspace's name, in its own worktree in ${ws.checkout ?? '<checkout>'}-worktrees/.${o.isNew && !o.isBrought ? '' : ' Work not committed yet stays where it is: ask the owner with NEEDS USER before moving any of it.'}`,
+      : `2. If ${known} is on a branch, go on with it${o.isNew ? ' (ask Codex in your alignment brief if the repository does not show which)' : ''}. Otherwise start one for this purpose: name it from the purpose by the settings' branch naming, never from the workspace's name, in its own worktree in ${worktreesOf(ws)}.${o.isNew && !o.isBrought ? '' : ' Work not committed yet stays where it is: ask the owner with NEEDS USER before moving any of it.'}`,
     `3. Make your alignment move for that branch, ${o.isNew ? 'asking Codex where its work stands' : 'telling Codex where the work stands'}, and end your turn with the line the rules' cue prints.`,
   ].join('\n')
 }
@@ -976,8 +1005,8 @@ export function soloPrompt(ws: Pick<Workspace, 'name' | 'purpose' | 'checkout' |
     ws.branch !== undefined
       ? `1. ${goOnStep(ws)}${isBrought ? ' Work of yours not committed yet stays where it is: ask the owner before moving any of it.' : ''}`
       : isBrought
-      ? `1. If the work above already has a branch, go on with it. Otherwise start one for this purpose: name it from the purpose, never from the workspace's name, in its own worktree in ${ws.checkout ?? '<checkout>'}-worktrees/. Work of yours not committed yet stays where it is: ask the owner before moving any of it.`
-      : `1. If the purpose names a branch or worktree already under way, go on there. Otherwise start a branch for this purpose: name it from the purpose, never from the workspace's name, in its own worktree in ${ws.checkout ?? '<checkout>'}-worktrees/.`,
+      ? `1. If the work above already has a branch, go on with it. Otherwise start one for this purpose: name it from the purpose, never from the workspace's name, in its own worktree in ${worktreesOf(ws)}. Work of yours not committed yet stays where it is: ask the owner before moving any of it.`
+      : `1. If the purpose names a branch or worktree already under way, go on there. Otherwise start a branch for this purpose: name it from the purpose, never from the workspace's name, in its own worktree in ${worktreesOf(ws)}.`,
     '2. Say in a few lines where things stand and what you would do first, then wait for the owner.',
   ].join('\n')
 }

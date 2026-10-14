@@ -210,7 +210,7 @@ declare module 'claude-code' {
       /** A move to the background pressed once: the row's key and when; a second press confirms it. */
       pendingMove: { key: string; at: number }
       /** The new-workspace form, while open. */
-      draft: { isOpen: boolean; name: string; query: string; dir: string; env: string; purpose: string; error: string; bring: string[]; only: '' | 'claude' | 'codex'; goOn: string; choices: string[] }
+      draft: { isOpen: boolean; name: string; query: string; dir: string; env: string; purpose: string; error: string; bring: string[]; only: '' | 'claude' | 'codex'; goOn: string; choices: string[]; chatDir: string }
       /** The worktrees of the form's project the agents can go on with, as found for its folder. */
       worktrees: { dir: string; list: { path: string; branch: string }[] }
       /** The row whose actions are shown under it: `item:<key>`, `tree:<key>`, `repo:<key>` or `ws:<id>`; '' for none. */

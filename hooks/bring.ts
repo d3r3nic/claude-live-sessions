@@ -20,6 +20,8 @@ export type Bringable = {
   tool: Tool
   label: string
   env: string
+  /** The folder it works in now. */
+  dir: string
   /** Between turns: what bringing it in needs. */
   isIdle: boolean
   /** Why it cannot be brought in, when it cannot: it is shown, not offered. */
@@ -74,7 +76,7 @@ export function bringable(snap: Snapshot, o: { now: number; selfId: string }, di
     if (s.kind !== 'interactive' || !/^ttys\d+$/.test(s.tty) || !SAFE_ID.test(s.sessionId)) continue
     if (env === undefined || !s.startCwd.startsWith('/') || inWorkspace(s.tty) || !inRepo(s.cwd)) continue
     const isSelf = s.sessionId === o.selfId
-    found.push({ member: `claude:${s.sessionId}`, tool: 'claude', label: `Claude · ${s.name}${isSelf ? ' (this session)' : ''}`, env, isIdle: claudeState(s, o.now) === 'idle', at: s.since, ...(isSelf ? { isSelf } : {}) })
+    found.push({ member: `claude:${s.sessionId}`, tool: 'claude', label: `Claude · ${s.name}${isSelf ? ' (this session)' : ''}`, env, dir: s.cwd, isIdle: claudeState(s, o.now) === 'idle', at: s.since, ...(isSelf ? { isSelf } : {}) })
   }
   for (const s of snap.codex) {
     const env = envOfProfile('codex', s.profile)
@@ -87,7 +89,7 @@ export function bringable(snap: Snapshot, o: { now: number; selfId: string }, di
     const blocked = isKnown ? undefined : s.key.startsWith('pid-') ? 'its conversation was not found; close it yourself, then bring in its conversation' : 'which conversation it runs is not certain (other Codex work under this account): close it yourself, then bring in its conversation'
     found.push({
       // an uncertain terminal is named by its terminal alone: a title would be a guess, and could send the owner to close another
-      member: isKnown ? `codex:${s.key}` : `codex-tty:${s.tty}`, tool: 'codex', label: `Codex · ${isKnown ? s.title || s.key.slice(0, 8) : `the terminal in ${s.tty}`}`, env, isIdle, at: s.lastActive,
+      member: isKnown ? `codex:${s.key}` : `codex-tty:${s.tty}`, tool: 'codex', label: `Codex · ${isKnown ? s.title || s.key.slice(0, 8) : `the terminal in ${s.tty}`}`, env, dir: s.cwd, isIdle, at: s.lastActive,
       ...(blocked === undefined ? {} : { blocked }),
     })
   }
@@ -97,7 +99,7 @@ export function bringable(snap: Snapshot, o: { now: number; selfId: string }, di
     const env = envOfProfile('codex', s.profile)
     if (s.surface !== 'cli' || !SAFE_ID.test(s.key) || env === undefined || !s.cwd.startsWith('/') || !inRepo(s.cwd) || o.now - s.updatedAt < WORKING_MS) continue
     if (snap.codex.some(t => t.surface === 'terminal' && t.isExec !== true && t.profile === s.profile && !isKnownCodex(snap, t))) continue
-    found.push({ member: `codex:${s.key}`, tool: 'codex', label: `Codex · ${s.title || s.key.slice(0, 8)} (closed)`, env, isIdle: true, isClosed: true, at: s.lastActive })
+    found.push({ member: `codex:${s.key}`, tool: 'codex', label: `Codex · ${s.title || s.key.slice(0, 8)} (closed)`, env, dir: s.cwd, isIdle: true, isClosed: true, at: s.lastActive })
   }
   return found.sort((a, b) => Number(b.isIdle) - Number(a.isIdle) || b.at - a.at).map(({ at: _, ...b }) => b)
 }
