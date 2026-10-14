@@ -73,6 +73,8 @@ import {
   checkoutResult,
   CHECKOUT_SCRIPT,
   openScriptPath,
+  addingPath,
+  ADDING_MAX_AGE_MS,
   promptPath,
   PROJECTS_SCRIPT,
   peerPrompt,
@@ -242,8 +244,9 @@ const world = {
   events: [] as Record<string, unknown>[],
   /** This session's id, when it changed since the engine started (a /clear, a /resume). */
   sessionId: undefined as string | undefined,
-  /** What lsof answers now, when not the fixture's. */
+  /** What lsof answers now, when not the fixture's; and, when set, what it answers asked of one process alone (a check made just before a close). */
   lsof: undefined as string | undefined,
+  lsofOne: undefined as string | undefined,
   /** The Codex process holding a conversation's rollout open, by its id, as HOLDERS_SCRIPT finds it (none: free); and each asked. */
   holders: {} as Record<string, number>,
   heldAsked: [] as string[],
@@ -312,6 +315,7 @@ const resetWorld = () => {
   world.exited.clear()
   world.hiddenThreads.clear()
   world.lsof = undefined
+  world.lsofOne = undefined
   world.holders = {}
   world.heldAsked = []
   world.codexMode = '/Users/u/dev/web-app\n'
@@ -447,8 +451,8 @@ function machine(argv: readonly string[], env: unknown): Run {
     }
     case '/bin/rm':
       world.removed.push(...argv.slice(2))
-      // (what the sessions take from the ops screen goes; the rest is only recorded)
-      for (const path of argv.slice(2)) if (path.startsWith(`${requestsDir(HOME)}/`)) world.files.delete(path)
+      // what it names goes, as with rm (and is recorded)
+      for (const path of argv.slice(2)) world.files.delete(path)
       return ok('')
     case '/bin/mv': {
       // a rename: one only, the file gone from where it was
@@ -484,7 +488,7 @@ function machine(argv: readonly string[], env: unknown): Run {
       if (argv[1] === 'show-options') return ok(`${world.started.get(argv[3] ?? '') ?? world.tmuxOwner}\n`)
       return { exitCode: 1, stdout: '', stderr: `unexpected tmux ${argv.join(' ')}` }
     case '/usr/sbin/lsof':
-      return { exitCode: 1, stdout: world.lsof ?? LSOF, stderr: '' }
+      return { exitCode: 1, stdout: (!(argv[argv.indexOf('-p') + 1] ?? '').includes(',') ? world.lsofOne : undefined) ?? world.lsof ?? LSOF, stderr: '' }
     case '/usr/bin/osascript':
       if (argv[4] === FOCUS_SCRIPT) return ok(TABS.has(argv[5] ?? '') && !world.noTab.has(argv[5] ?? '') ? 'shown\n' : '\n')
       if (argv[4] === OPEN_SCRIPT) {
@@ -756,24 +760,35 @@ describe('collect', () => {
       id, title: id, name: '', cwd, source: 'vscode', originator: 'codex-tui', rollout_path: '',
       created_at_ms: NOW - createdAgo * 60_000, updated_at_ms: NOW - writtenAgo * 60_000, agents: 0,
     })
-    // 41 resumed A; 42 made B in its folder since it started; 43 went on with an old C from inside it (written since);
-    // 44 runs its own conversation (it holds it); 45 is an exec run
-    const terminals = [term(41, 10, { resumeId: 'A' }), term(42, 60), term(43, 120, { cwd: '/y' }), term(44, 30, { held: ['F'] }), term(45, 5, { isExec: true })]
-    const threads = [row('A', 9000, 1), row('B', 55, 2), row('C', 40 * 1440, 3, '/y'), row('F', 25, 4), row('D', 9000, 600)]
+    // 41 resumed A (in /x); 42 made B in its folder (/w) since it started; 43 went on with an old C from inside it (in /y,
+    // written since); 44 runs its own conversation (it holds it); 45 is an exec run
+    const terminals = [term(41, 10, { resumeId: 'A' }), term(42, 60, { cwd: '/w' }), term(43, 120, { cwd: '/y' }), term(44, 30, { held: ['F'] }), term(45, 5, { isExec: true })]
+    const threads = [row('A', 9000, 1), row('B', 55, 2, '/w'), row('C', 40 * 1440, 3, '/y'), row('F', 25, 4), row('D', 9000, 600)]
     const matches = (held: string[], list = terminals, rows = threads) =>
       codexSessions({ terminals: list, threads: new Map([['/h', rows]]), now: NOW, servers: new Map([['/h', [{ pid: 304, held }]]]) })
         .filter(r => r.surface === 'terminal').map(r => `${r.tty}=${r.title}${r.match === undefined ? '' : `:${r.match}`}${r.loadedBy === undefined ? '' : `@${r.loadedBy}`}`).sort()
     // the server holds their three conversations (and a subagent's, no top-level thread): each one theirs, for certain
     expect(matches(['A', 'B', 'C', 'sub-1'])).toEqual(['ttys041=A:loaded@304', 'ttys042=B:loaded@304', 'ttys043=C:loaded@304', 'ttys044=F:held', 'ttys045=session (thread not found)'])
-    // it holds another conversation besides (D: none of its terminals was matched to it): none of theirs is certain
+    // it holds another conversation besides (D: none of its terminals can be running it): nothing is claimed through it,
+    // and the terminals are matched as before (not certain)
     expect(matches(['A', 'B', 'C', 'D'])).toEqual(['ttys041=A:resume', 'ttys042=B:folder', 'ttys043=C:folder', 'ttys044=F:held', 'ttys045=session (thread not found)'])
     // 41 started anew inside (/new): the server holds E, made in its folder since it started, and no longer A
     expect(matches(['E', 'B', 'C'], terminals, [...threads, row('E', 5, 1)])).toEqual(['ttys041=E:loaded@304', 'ttys042=B:loaded@304', 'ttys043=C:loaded@304', 'ttys044=F:held', 'ttys045=session (thread not found)'])
-    // a terminal of the server's with nothing found for it (one yet to write): none of the others is certain either
+    // a terminal of the server's with nothing it can be running (one yet to write): none is certain
     expect(matches(['A', 'B', 'C'], [...terminals, term(46, 1, { cwd: '/z' })])).toContain('ttys041=A:resume')
+    // two of its terminals in one folder, each able to be running either conversation: none is certain, however they
+    // look (41 resumed A; 47, started before it, switched to Q there with /resume: S1)
+    const s1 = matches(['A', 'Q', 'B', 'C'], [...terminals, term(47, 30)], [...threads, row('Q', 9000, 12)])
+    expect(s1.filter(m => m.includes(':loaded'))).toEqual([])
+    expect(s1).toContain('ttys041=A:resume')
+    // two started 3 s apart in one folder, each made one there since (S2): none is certain
+    const s2 = matches(['G', 'H'], [term(51, 30.05), term(52, 30)], [row('G', 29, 1), row('H', 29, 2)])
+    expect(s2.filter(m => m.includes(':loaded'))).toEqual([])
     // certain for bringing in, closing and keeping, as one that holds its own
     const rows = codexSessions({ terminals, threads: new Map([['/h', threads]]), now: NOW, servers: new Map([['/h', [{ pid: 304, held: ['A', 'B', 'C'] }]]]) })
     expect(rows.filter(r => r.surface === 'terminal' && !r.key.startsWith('pid-')).map(r => isKnownCodex({ codex: rows }, r))).toEqual([true, true, true, true])
+    const both = codexSessions({ terminals: [...terminals, term(47, 30)], threads: new Map([['/h', [...threads, row('Q', 9000, 12)]]]), now: NOW, servers: new Map([['/h', [{ pid: 304, held: ['A', 'Q', 'B', 'C'] }]]]) })
+    expect(both.filter(r => r.pid === 41 || r.pid === 47).map(r => isKnownCodex({ codex: both }, r))).toEqual([false, false])
     // with no server, as before: by the command line and the folder, not certain
     expect(matches([], terminals).slice(0, 3)).toEqual(['ttys041=A:resume', 'ttys042=B:folder', 'ttys043=C:folder'])
   })
@@ -1986,9 +2001,9 @@ describe('workspaces', () => {
     // which conversation Codex runs no longer certain (the rollout it holds open, read fresh, is another)
     const before = world.lsof
     world.whileTurnsRead = () => {}
-    world.lsof = (before ?? LSOF).replaceAll(HELD, RESUMED_A)
-    expect(await run('close practice-rbac')).toMatch(/^Not closed: which conversation Codex runs is (not known for certain yet|no longer certain); try again in a moment\.$/)
-    world.lsof = before
+    world.lsofOne = (before ?? LSOF).replaceAll(HELD, RESUMED_A)
+    expect(await run('close practice-rbac')).toBe('Not closed: which conversation Codex runs is no longer certain; try again in a moment.')
+    world.lsofOne = undefined
     expect(world.stopped).toEqual([])
     // Codex would not exit: Claude closed, the session left running for another close
     world.stop.ttys000 = 'stuck'
@@ -2447,7 +2462,7 @@ describe('workspaces, from the pane', () => {
     await ui.press({ key: 'form:create' })
     await ui.input({ key: 'form:name', text: 'Twice', kind: 'submit' })
     // the command waits its turn too
-    expect((await $.command.run({ ...SESSIONS, command: 'workspace', args: 'new ~/dev/web-app work Third' })).text).toBe('Not done: a workspace is already being made.')
+    expect((await $.command.run({ ...SESSIONS, command: 'workspace', args: 'new ~/dev/web-app work Third' })).text).toBe('Not done: a workspace is already being made or changed.')
     await clock.advance(5_000)
     await first
     await clock.settle()
@@ -2463,7 +2478,7 @@ describe('workspaces, from the pane', () => {
     const run = (args: string) => $.command.run({ ...SESSIONS, command: 'workspace', args })
     const cut = run('new ~/dev/web-app work Cut')
     await clock.settle()
-    expect((await run('new ~/dev/web-app work Waits')).text).toBe('Not done: a workspace is already being made.')
+    expect((await run('new ~/dev/web-app work Waits')).text).toBe('Not done: a workspace is already being made or changed.')
     // the plugin loads again (register runs, session.start fires): the flag of the cut-off create goes
     await $.session.start(START)
     const after = run('new ~/dev/web-app work After')
@@ -3159,7 +3174,7 @@ describe('bringing running sessions into a workspace', () => {
     expect(world.stopped).toEqual(['ttys045 codex|node 207'])
     // asked, then (held) asked again for up to a minute and a half, saying it waits meanwhile
     expect(world.heldAsked).toEqual([`${RESUMED_A} 0`, `${RESUMED_A} 90`])
-    expect(toasts).toContain('Codex · Find the report writer: waiting for Codex to let its conversation go (its shared server keeps one about a minute after its terminal closes)…')
+    expect(toasts).toContain('Codex · Find the report writer: waiting for Codex to let its conversation go (its shared server keeps one about a minute after its terminal closes; up to a minute and a half)…')
     expect(JSON.parse(files.get(WORKSPACES)!).workspaces[0].threads).toBeUndefined()
     expect(toasts.at(-1)).toContain(`Not brought in: Codex · Find the report writer (it closed in ttys045, but another Codex (process 204) has its conversation open still, so it was not resumed here, and the workspace's Codex starts new).`)
     await ui.unmount()
@@ -3186,6 +3201,32 @@ describe('bringing running sessions into a workspace', () => {
     expect(world.heldAsked).toEqual([`${RESUMED_A} 0`, `${RESUMED_A} 0`])
     const [saved] = JSON.parse(files.get(WORKSPACES)!).workspaces
     expect(saved.threads.codex.id).toBe(RESUMED_A)
+    await ui.unmount()
+  })
+
+  test('a Codex terminal no longer known to run that conversation just before its close is left as it was', async ($, on) => {
+    const { files, toasts, clock } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    for (const pid of [201, 208, 209, 211]) world.exited.add(pid)
+    await clock.advance(120_000)
+    world.args.set(204, '/Users/u/.codex/packages/app-server-daemon/releases/0.162.1/bin/codex app-server --listen unix:// --managed-daemon')
+    world.lsof = ['p204', 'f31', `n/Users/u/.codex/sessions/2026/10/08/rollout-2026-10-08T10-00-00-${RESUMED_A}.jsonl`, 'p207', 'f3', 'n/dev/ttys045', ''].join('\n')
+    // checked between turns, then (a /new inside it) the server holds another conversation, no longer that one
+    world.codexTaskAnswer = () => {
+      world.lsof = ['p204', 'f31', `n/Users/u/.codex/sessions/2026/10/14/rollout-2026-10-14T10-00-00-${HELD}.jsonl`, ''].join('\n')
+      return world.codexTask
+    }
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    await reveal(ui, 'tree:/Users/u/dev/web-app')
+    await ui.press({ key: 'new-from:/Users/u/dev/web-app' })
+    await ui.press({ key: `form:bring codex:${RESUMED_A}` })
+    await ui.input({ key: 'form:name', text: 'Reports', kind: 'change' })
+    await ui.press({ key: 'form:create' })
+    // everything read again just before the close: not that conversation's for certain any more, so never closed
+    expect(world.stopped).toEqual([])
+    expect(JSON.parse(files.get(WORKSPACES)!).workspaces[0].threads).toBeUndefined()
+    expect(toasts.at(-1)).toContain('Not brought in: Codex · Find the report writer (it is no longer known for certain to run that conversation (a /new or /resume inside it); it was left as it was, and the workspace\'s Codex starts new).')
     await ui.unmount()
   })
 
@@ -3241,10 +3282,10 @@ describe('bringing running sessions into a workspace', () => {
     await ui.press({ key: 'form:cancel' })
     // 201 no longer holds its rollout (a /new inside it): which conversation it runs is no longer certain
     world.codexTask = '"type":"task_complete"\n'
-    world.lsof = 'p201\nfcwd\nn/Users/u/dev/web-app\n'
+    world.lsofOne = 'p201\nfcwd\nn/Users/u/dev/web-app\n'
     expect(await create({ codex: true })).toMatch(/Not done: Codex · .* cannot be brought in: which conversation it runs is no longer certain; close it yourself, then bring in its conversation\./)
     await ui.press({ key: 'form:cancel' })
-    world.lsof = undefined
+    world.lsofOne = undefined
   world.holders = {}
   world.heldAsked = []
     expect(world.stopped).toEqual([])
@@ -4249,6 +4290,10 @@ describe('a workspace of one agent', () => {
     expect(joins).toContain('The owner moved this conversation into the workspace: everything above stays yours. You join Claude, who has worked here alone until now')
     expect(joins).toContain('Claude is getting peer coding ready now, under the peer-coding rules.')
     expect(joins.endsWith('When Claude\'s hand-off comes, align with it, and add what you know from your own work above that it does not say.')).toBe(true)
+    // a Codex new to it has no work of its own to add
+    const fresh = addedPrompt(ws, 'codex', { isNew: true, isBrought: false })
+    expect(fresh).toContain('You join Claude, who has worked here alone until now')
+    expect(fresh.endsWith('When Claude\'s hand-off comes, align with it.')).toBe(true)
     // a new Claude joining a Codex: it asks Codex where its work stands
     const claude = addedPrompt(ws, 'claude', { isNew: true, isBrought: false })
     expect(claude).toContain('You join Codex, who has worked here alone until now')
@@ -4290,6 +4335,19 @@ describe('a workspace of one agent', () => {
     expect(line).toContain('split-window')
     expect(line).toContain('--resume session-101')
     expect(line).not.toContain('old-1')
+    // marked while it was being changed, the mark gone once it opened
+    expect(files.has(addingPath(HOME, 'practice-rbac'))).toBe(false)
+  })
+
+  test('while an agent is being added to a workspace, no session opens it (with its one agent); a mark left by a session gone holds nothing back', async ($, on) => {
+    const { files, clock } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, env: '', only: 'claude' }] }))
+    files.set(addingPath(HOME, 'practice-rbac'), JSON.stringify({ at: NOW }))
+    await $.session.start(START)
+    const open = async () => (await $.command.run({ ...SESSIONS, command: 'workspace', args: 'open practice-rbac' })).text
+    expect(await open()).toBe('Not opened: an agent is being added to Practice RBAC; it opens with both once that is done.')
+    await clock.advance(ADDING_MAX_AGE_MS)
+    expect(await open()).toBe('Opened ws-practice-rbac in a new Terminal window.')
   })
 
   test('Add Codex in a workspace\'s actions: a running Codex terminal, from any folder, goes on there in its own conversation', async ($, on) => {
@@ -4303,7 +4361,7 @@ describe('a workspace of one agent', () => {
     await reveal(ui, 'ws:pair')
     expect(await ui.find({ key: 'add pair' })).toBeUndefined()
     await reveal(ui, 'ws:practice-rbac')
-    expect((await ui.find({ key: 'add practice-rbac' }))?.props.label).toBe('Add Codex (a)')
+    expect((await ui.find({ key: 'add practice-rbac' }))?.props.label).toBe('Add Codex')
     await ui.press({ key: 'add practice-rbac' })
     // new, or a Codex of its account: the one holding its conversation offered; the uncertain one shown, not offered;
     // the other account's not at all

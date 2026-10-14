@@ -483,10 +483,10 @@ export const sortClaude = (list: ClaudeSession[]) =>
  * How a Codex terminal was matched to its conversation: it holds the
  * conversation's rollout open (`held`, certain); Codex's shared background
  * server, which runs the conversations of a terminal started without
- * `--no-daemon` while it runs, holds it open, and each conversation that
- * server holds is matched to one of its terminals and each of its terminals
- * to one of them (`loaded`, certain as far as their start lines and folders
- * tell; checked again when one is closed); its command line resumed it
+ * `--no-daemon` while it runs, holds it open, and the server's terminals and
+ * the conversations it holds can be paired in one way only (`loaded`, as far
+ * as their start lines and folders tell; checked again when one is closed);
+ * its command line resumed it
  * (`resume`: a `/new` or `/resume` inside since would leave that stale); or it
  * is the newest made in its folder since it started (`folder`).
  */
@@ -626,17 +626,20 @@ const surfaceOf = (t: ThreadRow) =>
  * other top-level thread written in the last half hour. A terminal's thread
  * is, in order of certainty: the newest of the threads it holds open; for a
  * terminal holding none whose Codex home has a shared background server
- * (`servers`), one that server holds open: the one it resumed, else the
- * newest in its folder created, then written, since it started; the one it
- * resumed; the newest in its folder created since it started; the newest
- * in its folder written since it started. Each pass claims before the next,
+ * (`servers`), one that server holds open, when that is forced (below); the
+ * one it resumed; the newest in its folder created since it started; the
+ * newest in its folder written since it started. Each pass claims before the next,
  * and within a pass the newest terminal chooses first, so a thread born before
  * the newer of two terminals in a folder started goes to the older one. Two
  * threads both born after it, neither held open, cannot be told apart: the
- * newer terminal takes the one written last. A match through a server stands
- * (`loaded`) only while each of its terminals holding none has one, and each
- * top-level thread it holds is one of theirs; otherwise each is said as
- * `resume` or `folder`, by how it was found.
+ * newer terminal takes the one written last. A server's terminals are
+ * matched through it (`loaded`) only when the match is forced: as many
+ * terminals holding none as top-level threads it holds, each terminal able to
+ * be running exactly one of them (the one it resumed, or one in its folder
+ * written since it started) and each of them that of exactly one terminal.
+ * Two `/resume`s across folders that swap would still pass: every Codex
+ * conversation is checked again before its terminal is closed, and resumed
+ * elsewhere only once nothing holds it open.
  */
 export function codexSessions(args: {
   terminals: readonly CodexProc[]
@@ -669,27 +672,24 @@ export function codexSessions(args: {
   }
   const sinceStart = (proc: CodexProc, ms: number) => ms >= proc.startedAt - 5_000
   pass('held', (proc, free) => newest(free.filter(t => proc.held.includes(t.id))))
-  pass('loaded', (proc, free) => {
-    if (!isClient(proc)) return undefined
-    const loaded = loadedIn(proc.codexHome)
-    const open = free.filter(t => loaded.has(t.id) && t.cwd === proc.cwd && madeBy(proc, t))
-    return free.find(t => t.id === proc.resumeId && loaded.has(t.id)) ??
-      newest(open.filter(t => sinceStart(proc, t.created_at_ms))) ??
-      newest(open.filter(t => sinceStart(proc, t.updated_at_ms)))
-  })
-  // a server's matches stand only when its terminals and the top-level threads it holds pair off: else one of its
-  // terminals may run what another was matched to (a /resume inside), or one not found at all
+  // a terminal that runs its conversation in its home's server holds none: it is matched to one the server holds only
+  // when that is forced, each such terminal able to be running one of them alone (the one it resumed, or one in its
+  // folder written since it started) and each of them that of one terminal alone; anything less (two in one folder, a
+  // /resume to another folder's conversation, one yet to write) claims nothing, and the passes below match as before
+  const could = (proc: CodexProc, t: ThreadRow) => t.id === proc.resumeId || (madeBy(proc, t) && t.cwd === proc.cwd && sinceStart(proc, t.updated_at_ms))
   for (const [codexHome, list] of servers) {
     const held = new Set(list.flatMap(s => s.held))
-    const tops = (threads.get(codexHome) ?? []).filter(t => held.has(t.id)).map(t => t.id)
-    const clients = terminals.filter(p => p.codexHome === codexHome && isClient(p))
-    const theirs = new Set(clients.map(p => matched.get(p.pid)?.thread.id))
-    const isPaired = clients.every(p => matched.get(p.pid)?.by === 'loaded') && tops.every(id => theirs.has(id))
-    if (isPaired) continue
-    for (const p of clients) {
-      const m = matched.get(p.pid)
-      if (m?.by === 'loaded') matched.set(p.pid, { ...m, by: m.thread.id === p.resumeId ? 'resume' : 'folder' })
-    }
+    const tops = (threads.get(codexHome) ?? []).filter(t => held.has(t.id) && !taken.has(t.id))
+    const clients = terminals.filter(p => p.codexHome === codexHome && isClient(p) && !matched.has(p.pid))
+    const each = clients.map(p => tops.filter(t => could(p, t)))
+    const isForced = clients.length > 0 && tops.length === clients.length && each.every(c => c.length === 1) &&
+      tops.every(t => clients.filter(p => could(p, t)).length === 1)
+    if (!isForced) continue
+    clients.forEach((p, i) => {
+      const thread = each[i]![0]!
+      taken.add(thread.id)
+      matched.set(p.pid, { thread, by: 'loaded' })
+    })
   }
   pass('resume', (proc, free) => free.find(t => t.id === proc.resumeId))
   pass('folder', (proc, free) =>

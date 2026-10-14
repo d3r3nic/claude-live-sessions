@@ -41,6 +41,8 @@ import {
   checkoutResult,
   peerPrompt,
   openScriptPath,
+  addingPath,
+  ADDING_MAX_AGE_MS,
   promptPath,
   rankProjects,
   shellQuote,
@@ -616,6 +618,16 @@ function refresh($: EngineInterface, maxAgeMs: number): Promise<void> {
   return inFlight
 }
 
+/**
+ * A refresh that reads everything again now, the Codex processes' open files too (read at most every LSOF_MAX_AGE_MS
+ * otherwise): what closing or bringing in a session goes by. One under way is let finish first.
+ */
+async function refreshNow($: EngineInterface): Promise<void> {
+  if (inFlight !== undefined) await inFlight
+  held = undefined
+  await refresh($, 0)
+}
+
 /** Reads this session's Terminal.app tab background, where the session runs in one. */
 async function learnBackground($: EngineInterface) {
   if ((await $.env.get('TERM_PROGRAM')) !== 'Apple_Terminal') return
@@ -865,7 +877,7 @@ async function closeWorkspace($: EngineInterface, ws: Workspace): Promise<{ isCl
     return { isClosed: true, text: `${ws.name} was not running (tmux had brought back empty shells under its name after a restart: ended); ${reopens}.` }
   }
   // the conversations kept for it as they are now; then each pane as it is now
-  await refresh($, 0)
+  await refreshNow($)
   const snap = await read($, snapshot)
   const kept = snap.workspaces.find(w => w.id === ws.id) ?? ws
   const listed = await tmux(['list-panes', '-s', '-t', `=${name}`, '-F', PANE_STATE_FORMAT])
@@ -963,7 +975,7 @@ async function codexLetsGo($: EngineInterface, id: string, what: string): Promis
     holderOf((await $.process.run(['/bin/sh', '-c', HOLDERS_SCRIPT, 'sh', id, String(seconds)], { timeoutMs: (seconds + 30) * 1000 }).catch(() => ({ stdout: '' }))).stdout)
   const now = await ask(0)
   if (now === 'free') return now
-  await toast($, `${what}: waiting for Codex to let its conversation go (its shared server keeps one about a minute after its terminal closes)…`, { timeoutMs: 60_000 })
+  await toast($, `${what}: waiting for Codex to let its conversation go (its shared server keeps one about a minute after its terminal closes; up to a minute and a half)…`, { timeoutMs: 60_000 })
   return ask(CODEX_LETS_GO_S)
 }
 
@@ -979,6 +991,11 @@ async function openWorkspace($: EngineInterface, ws: Workspace, at?: { window: s
     $.process.run(['tmux', ...args], { timeoutMs: 10_000 }).catch((error: unknown) => ({ exitCode: -1, stdout: '', stderr: message(error) }))
   const isDir = await $.fs.stat(ws.dir).then(s => s.kind === 'dir').catch(() => false)
   if (!isDir) return { isOpen: false, text: `Not opened: its folder ${ws.dir} is not there any more.` }
+  // an agent being added to it (by any session): it opens with both once that is done, never before with one
+  const addingAt = await $.fs.read(addingPath(home, ws.id)).then(text => Number((JSON.parse(text) as { at?: unknown }).at)).catch(() => Number.NaN)
+  if (Number.isFinite(addingAt) && (await $.clock.now()) - addingAt < ADDING_MAX_AGE_MS) {
+    return { isOpen: false, text: `Not opened: an agent is being added to ${ws.name}; it opens with both once that is done.` }
+  }
   // a running session of that name must be this workspace's own, not an older one or anyone else's
   let wasRunning = (await tmux(['has-session', '-t', `=${name}`])).exitCode === 0
   // show-options takes no `=` target; has-session just found this exact name, which tmux prefers to a prefix
@@ -1234,7 +1251,7 @@ async function createWorkspace(
     isMine = !now
     return true
   })
-  if (!isMine) return { isCreated: false, text: 'Not done: a workspace is already being made.' }
+  if (!isMine) return { isCreated: false, text: 'Not done: a workspace is already being made or changed.' }
   try {
     return await makeWorkspace($, w)
   } finally {
@@ -1292,7 +1309,7 @@ async function makeWorkspace($: EngineInterface, w: NewWorkspace): Promise<{ isC
     if (head?.isDefault === true) return fail(`${branch}, checked out in ${typed}, is the repository's default branch: go on with a branch of its own`)
     if (w.goOnBranch !== undefined && w.goOnBranch !== branch) return fail(`the branch checked out in ${typed} is now ${branch}, not ${w.goOnBranch}; choose again`)
   }
-  await refresh($, VISIBLE_MAX_AGE_MS)
+  await refreshNow($)
   const snap = await read($, snapshot)
   // the sessions brought in, each checked as it runs now; then closed where they run, so each conversation
   // goes on in the workspace alone
@@ -1374,7 +1391,7 @@ async function addAgent($: EngineInterface, ws: Workspace, tool: 'claude' | 'cod
     isMine = !now
     return true
   })
-  if (!isMine) return { isAdded: false, text: 'Not added: a workspace is being made or changed already.' }
+  if (!isMine) return { isAdded: false, text: 'Not added: a workspace is already being made or changed.' }
   try {
     return await addTo($, ws, tool, member)
   } finally {
@@ -1391,7 +1408,7 @@ async function addTo($: EngineInterface, ws: Workspace, tool: 'claude' | 'codex'
   if (tool === there) return fail(`${ws.name} runs ${NAME[there]} already: what it can take is ${NAME[there === 'claude' ? 'codex' : 'claude']}`)
   if (member !== undefined && member.split(':')[0] !== tool) return fail(`that session is not ${NAME[tool]}`)
   if (!(await readWorkspaces($, home)).isReadable) return fail(UNREADABLE)
-  await refresh($, 0)
+  await refreshNow($)
   const snap = await read($, snapshot)
   const kept = snap.workspaces.find(w => w.id === ws.id)
   if (kept === undefined) return fail(`${ws.name} is no longer one of the workspaces`)
@@ -1399,62 +1416,75 @@ async function addTo($: EngineInterface, ws: Workspace, tool: 'claude' | 'codex'
   // known for certain
   const checked = member === undefined ? { bring: [] as Bring[] } : await checkBring($, home, snap, [member], kept.env)
   if ('error' in checked) return fail(checked.error)
-  // it starts again with both: closed first, its agents between turns
+  // it starts again with both: closed first, its agents between turns; marked meanwhile, so that no session opens it
+  // with its one agent before it is changed (the mark goes before it opens again, whatever happens)
   const wasRunning = Object.values(snap.tmux.panes).some(p => isOwnPane(kept, p))
-  const closed = await closeWorkspace($, kept)
-  if (!closed.isClosed) return { isAdded: false, text: `Not added: ${kept.name} closes first, to start again with both. ${closed.text}` }
-  const brought = checked.bring[0]
-  let thread: Thread | undefined
-  if (brought !== undefined) {
-    const taken = await takeOver($, home, brought)
-    if (!('thread' in taken)) {
-      // left as it was: the workspace too
-      const again = wasRunning ? await openWorkspace($, kept) : undefined
-      const after = again === undefined ? '' : again.isOpen ? ` ${kept.name} was opened again as it was. ${again.text}` : ` ${kept.name} stays closed: ${again.text}`
-      return { isAdded: false, text: `Not added: ${brought.label} ${taken.why.replace(/^it /, '')}.${after}` }
+  const mark = addingPath(home, kept.id)
+  await $.fs.write(mark, `${JSON.stringify({ at: await $.clock.now() })}\n`)
+  const unmark = () => $.process.run(['/bin/rm', '-f', mark], { timeoutMs: 10_000 }).catch(() => undefined)
+  const asItWas = async (said: string) => {
+    await unmark()
+    const again = wasRunning ? await openWorkspace($, kept) : undefined
+    return { isAdded: false, text: `Not added: ${said}.${again === undefined ? '' : again.isOpen ? ` ${kept.name} was opened again as it was. ${again.text}` : ` ${kept.name} stays closed: ${again.text}`}` }
+  }
+  try {
+    const closed = await closeWorkspace($, kept)
+    if (!closed.isClosed) {
+      await unmark()
+      return { isAdded: false, text: `Not added: ${kept.name} closes first, to start again with both. ${closed.text}` }
     }
-    thread = taken.thread
-  }
-  const now = await $.clock.now()
-  const purpose = kept.purpose?.trim() ?? ''
-  let added: Workspace | undefined
-  const saved = await changeWorkspaces($, home, list => {
-    const cur = list.find(w => w.id === kept.id)
-    if (cur === undefined) return list
-    const { only: _, threads: __, relay: ___, ...rest } = cur
-    // the agent added has the conversation brought in, or none: one kept for it from before never comes back with it
-    const others = Object.fromEntries(Object.entries(cur.threads ?? {}).filter(([t]) => t !== tool)) as { claude?: Thread; codex?: Thread }
-    const threads = { ...others, ...(thread === undefined ? {} : { [tool]: { ...thread, since: now } }) }
-    // a purpose: the relay passes the cues from now (as for a pair made with one); else it stays as it was
-    const relay = purpose !== '' ? { mode: 'auto' as const, since: now, streak: 0 } : cur.relay
-    added = { ...rest, ...(threads.claude === undefined && threads.codex === undefined ? {} : { threads }), ...(relay === undefined ? {} : { relay }) }
-    const changed = list.map(w => (w.id === cur.id ? added! : w))
-    // the conversation goes on here alone, and is no longer listed as assigned anywhere
-    return withThreads(member === undefined ? changed : assigned(changed, member, ''), cur.id, threads)
-  })
-  if (!saved || added === undefined) {
-    const resume = thread === undefined ? '' : `; to go on with what was closed: ${tool === 'claude' ? `claude --resume ${thread.id}` : `codex resume ${thread.id}`} (in ${thread.dir})`
-    return fail(`${UNREADABLE}${resume}`)
-  }
-  const made: Workspace = added
-  const isBrought = thread !== undefined
-  if (purpose !== '') {
-    // the agent that was there goes on with its conversation, told it no longer works alone; one with none kept starts
-    // new, as in a pair made new
-    const isKept = made.threads?.[there] !== undefined
-    const fresh = (t: 'claude' | 'codex') => (made.threads?.[t] !== undefined ? joinPrompt(made, t) : t === 'claude' ? setupPrompt(made) : peerPrompt(made))
-    await $.fs.write(promptPath(home, made.id, there), isKept ? addedPrompt(made, there, { isNew: false, isBrought }) : fresh(there))
-    await $.fs.write(promptPath(home, made.id, tool), isKept ? addedPrompt(made, tool, { isNew: true, isBrought }) : fresh(tool))
-  } else {
-    await removePrompts($, home, made.id)
-  }
-  await refresh($, 0)
-  const opened = await openWorkspace($, made)
-  const who = `${isBrought ? `${brought!.label} goes on there in its own conversation` : `${NAME[tool]} starts new there`}, beside ${NAME[there]}`
-  const how = purpose === '' ? '' : '; Claude gets peer coding ready, and the relay passes each hand-over'
-  return {
-    isAdded: true,
-    text: opened.isOpen ? `Added ${NAME[tool]} to ${made.name}: ${who}${how}. ${opened.text}` : `Added ${NAME[tool]} to ${made.name}, but it was not opened: ${opened.text}`,
+    const brought = checked.bring[0]
+    let thread: Thread | undefined
+    if (brought !== undefined) {
+      const taken = await takeOver($, home, brought)
+      // left as it was: the workspace too
+      if (!('thread' in taken)) return await asItWas(`${brought.label} ${taken.why.replace(/^it /, '')}`)
+      thread = taken.thread
+    }
+    const now = await $.clock.now()
+    const purpose = kept.purpose?.trim() ?? ''
+    let added: Workspace | undefined
+    const saved = await changeWorkspaces($, home, list => {
+      const cur = list.find(w => w.id === kept.id)
+      if (cur === undefined) return list
+      const { only: _, threads: __, relay: ___, ...rest } = cur
+      // the agent added has the conversation brought in, or none: one kept for it from before never comes back with it
+      const others = Object.fromEntries(Object.entries(cur.threads ?? {}).filter(([t]) => t !== tool)) as { claude?: Thread; codex?: Thread }
+      const threads = { ...others, ...(thread === undefined ? {} : { [tool]: { ...thread, since: now } }) }
+      // a purpose: the relay passes the cues from now (as for a pair made with one); else it stays as it was
+      const relay = purpose !== '' ? { mode: 'auto' as const, since: now, streak: 0 } : cur.relay
+      added = { ...rest, ...(threads.claude === undefined && threads.codex === undefined ? {} : { threads }), ...(relay === undefined ? {} : { relay }) }
+      const changed = list.map(w => (w.id === cur.id ? added! : w))
+      // the conversation goes on here alone, and is no longer listed as assigned anywhere
+      return withThreads(member === undefined ? changed : assigned(changed, member, ''), cur.id, threads)
+    })
+    if (!saved || added === undefined) {
+      const resume = thread === undefined ? '' : `; ${brought!.label} was closed: to go on with it, ${tool === 'claude' ? `claude --resume ${thread.id}` : `codex resume ${thread.id}`} (in ${thread.dir})`
+      return await asItWas(`${saved ? `${kept.name} was removed meanwhile` : UNREADABLE}${resume}`)
+    }
+    const made: Workspace = added
+    const isBrought = thread !== undefined
+    if (purpose !== '') {
+      // the agent that was there goes on with its conversation, told it no longer works alone; one with none kept starts
+      // new, as in a pair made new
+      const isKept = made.threads?.[there] !== undefined
+      const fresh = (t: 'claude' | 'codex') => (made.threads?.[t] !== undefined ? joinPrompt(made, t) : t === 'claude' ? setupPrompt(made) : peerPrompt(made))
+      await $.fs.write(promptPath(home, made.id, there), isKept ? addedPrompt(made, there, { isNew: false, isBrought }) : fresh(there))
+      await $.fs.write(promptPath(home, made.id, tool), isKept ? addedPrompt(made, tool, { isNew: true, isBrought }) : fresh(tool))
+    } else {
+      await removePrompts($, home, made.id)
+    }
+    await unmark()
+    await refresh($, 0)
+    const opened = await openWorkspace($, made)
+    const who = `${isBrought ? `${brought!.label} goes on there in its own conversation` : `${NAME[tool]} starts new there`}, beside ${NAME[there]}`
+    const how = purpose === '' ? '' : '; Claude gets peer coding ready, and the relay passes each hand-over'
+    return {
+      isAdded: true,
+      text: opened.isOpen ? `Added ${NAME[tool]} to ${made.name}: ${who}${how}. ${opened.text}` : `Added ${NAME[tool]} to ${made.name}, but it was not opened: ${opened.text}`,
+    }
+  } finally {
+    await unmark()
   }
 }
 
@@ -1468,6 +1498,15 @@ type Bring = { tool: 'claude' | 'codex'; label: string; runs?: { tty: string; pi
  * not resumed: it would run twice.
  */
 async function takeOver($: EngineInterface, home: string, b: Bring): Promise<{ thread: Thread } | { why: string }> {
+  // a Codex terminal still known for certain to run that conversation, as everything reads now (a /new or /resume since)
+  if (b.tool === 'codex' && b.runs !== undefined) {
+    await refreshNow($)
+    const snap = await read($, snapshot)
+    const row = snap.codex.find(c => c.surface === 'terminal' && c.tty === b.runs!.tty && c.pid === b.runs!.pid)
+    if (row === undefined || row.key !== b.thread.id || !isKnownCodex(snap, row) || !(await isSureCodex($, `${home}/.${row.profile}`, row))) {
+      return { why: 'it is no longer known for certain to run that conversation (a /new or /resume inside it); it was left as it was' }
+    }
+  }
   const live = b.tool === 'claude' && b.runs !== undefined ? await liveClaude($, home, b.runs.pid, b.profile, b.thread.id) : undefined
   const busy = typeof live === 'string' ? live : b.rollout === undefined ? undefined : await codexBusy($, b.rollout)
   if (busy !== undefined) return { why: `it ${busy}; it was left as it was` }
@@ -2964,7 +3003,7 @@ export const register: Register = on => {
                     : []),
                   // the other agent, to a workspace of one (it closes and opens again: never from its own Claude)
                   ...(ws.only !== undefined && ownSession !== `ws-${ws.key}`
-                    ? [<Button key={`add ${ws.key}`} label={`Add ${ws.only === 'claude' ? 'Codex' : 'Claude'} (a)`} hotkey="a" {...(addingTo === ws.key ? { variant: 'primary' as const } : {})} onPress={() => void update($, adding, now => (now === ws.key ? '' : ws.key))} />]
+                    ? [<Button key={`add ${ws.key}`} label={`Add ${ws.only === 'claude' ? 'Codex' : 'Claude'}`} {...(addingTo === ws.key ? { variant: 'primary' as const } : {})} onPress={() => void update($, adding, now => (now === ws.key ? '' : ws.key))} />]
                     : []),
                   // the relay, the compaction at a hand-off and the drift check all go by hand-offs: one agent makes none
                   ...(ws.only !== undefined

@@ -741,7 +741,7 @@ const tmux = (...args) => run(['tmux', ...(SOCKET === undefined ? [] : ['-L', SO
  */
 const REQUESTS = w.requestsDir(HOME)
 const UNTAKEN_MS = 12_000
-/** How long a taken request is waited on (closing waits for each agent to exit, 20 s at most). */
+/** How long a taken request is waited on (closing waits for each agent to exit, 20 s at most; opening, for Codex to let a conversation go, 90 s at most). */
 const ANSWER_MAX_MS = 120_000
 let pending
 function ask(action, ws) {

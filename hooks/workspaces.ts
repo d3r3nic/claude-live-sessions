@@ -123,6 +123,13 @@ export function answerFrom(raw: unknown): Answer | undefined {
 /** How long a request waits to be taken; older ones are dropped untaken. */
 export const REQUEST_MAX_AGE_MS = 30_000
 
+/**
+ * Where a workspace an agent is being added to is marked (`{at}`), so that no session opens it meanwhile with its one
+ * agent; a mark older than ADDING_MAX_AGE_MS (a session gone mid-way) holds nothing back.
+ */
+export const addingPath = (home: string, id: string) => `${home}/Library/Application Support/live-sessions/adding/${id}.json`
+export const ADDING_MAX_AGE_MS = 5 * 60_000
+
 /** The file a terminal runs (`/bin/sh <file>`) to open a workspace: its command line, in POSIX sh whatever the login shell. */
 export const openScriptPath = (home: string, id: string) => `${home}/Library/Application Support/live-sessions/open/${id}.sh`
 
@@ -923,7 +930,7 @@ export function addedPrompt(ws: Pick<Workspace, 'name' | 'purpose' | 'checkout' 
       '',
       leanWork(true),
       '',
-      `Nothing to do until then: reply with one short line saying you are ready. When Claude's hand-off comes, align with it, and add what you know from ${o.isNew ? 'your own work above' : 'your work here'} that it does not say.`,
+      `Nothing to do until then: reply with one short line saying you are ready. When Claude's hand-off comes, align with it${o.isNew && !o.isBrought ? '.' : `, and add what you know from ${o.isNew ? 'your own work above' : 'your work here'} that it does not say.`}`,
     ].join('\n')
   }
   const known = o.isNew ? 'the work Codex has done here' : 'your work here'

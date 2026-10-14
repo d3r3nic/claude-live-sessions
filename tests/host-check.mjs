@@ -237,6 +237,35 @@ if (process.argv.includes('--slow')) {
   console.log('skip move exit 4 (20 s): run with --slow')
 }
 
+// 5b. HOLDERS_SCRIPT on a throwaway process named codex (node, by a link of that name, as pgrep -x finds it) holding a
+// rollout-named file open: who holds a conversation, asked once or until it is let go
+{
+  const scratch = mkdtempSync(join(tmpdir(), 'live-sessions-holders-'))
+  const id = `0000aaaa-1111-4222-8333-${String(process.pid).padStart(12, '0')}`
+  const rollout = join(scratch, `rollout-2026-10-14T10-00-00-${id}.jsonl`)
+  writeFileSync(rollout, '{}\n')
+  const codex = join(scratch, 'codex')
+  symlinkSync(process.execPath, codex)
+  const holder = spawn(codex, ['-e', 'require("node:fs").openSync(process.argv[1], "r"); setInterval(() => {}, 1000)', rollout], { stdio: 'ignore' })
+  await new Promise(res => setTimeout(res, 500))
+  const holders = (who, seconds) => spawnSync('/bin/sh', ['-c', b.HOLDERS_SCRIPT, 'sh', who, String(seconds)], { encoding: 'utf8', timeout: 60_000 }).stdout.trim()
+  check('holders: the process holding a conversation\'s rollout open', holders(id, 0) === `held ${holder.pid}`, holders(id, 0))
+  check('holders: a conversation nothing holds is free; part of an id is no id', holders(id.replace(/^0000/, '9999'), 0) === 'free' && holders(id.slice(4), 0) === 'free')
+  const at = Date.now()
+  check('holders: still held after the wait asked for', holders(id, 2) === `held ${holder.pid}` && Date.now() - at >= 2_000, `${Date.now() - at} ms`)
+  const waited = new Promise(res => {
+    const t0 = Date.now()
+    const child = spawn('/bin/sh', ['-c', b.HOLDERS_SCRIPT, 'sh', id, '20'], { stdio: ['ignore', 'pipe', 'ignore'] })
+    let out = ''
+    child.stdout.on('data', d => { out += d })
+    child.on('close', () => res({ out: out.trim(), ms: Date.now() - t0 }))
+  })
+  setTimeout(() => holder.kill('SIGKILL'), 2_000)
+  const { out, ms } = await waited
+  check('holders: free as soon as it is let go, within the wait', out === 'free' && ms >= 1_500 && ms < 8_000, `${out} after ${ms} ms`)
+  rmSync(scratch, { recursive: true, force: true })
+}
+
 // 6. A workspace's tmux session, on a private tmux server (never the person's own): one window, Claude
 // on the left and Codex on the right, each pane marked, both in its folder, each agent started under the
 // workspace's environment without Claude Code's session markers, able to work in the worktrees folder,
