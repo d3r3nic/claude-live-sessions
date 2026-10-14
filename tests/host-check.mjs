@@ -544,6 +544,39 @@ except ChildProcessError: pass
   }
 }
 
+// 6d. A workspace's window takes the background of the tab it is opened from: an agent asking the terminal for its
+// background (OSC 11, as Codex does at its start to blend its input line) is answered with it, though no window is
+// attached yet. On a private tmux server, the agent a stand-in that asks and records the answer.
+{
+  const socket = `live-sessions-bg-${process.pid}`
+  const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'live-sessions-bg-')))
+  const asker = join(scratch, 'ask.py')
+  writeFileSync(asker, [
+    'import os, sys, termios, tty, select, time',
+    'fd = sys.stdin.fileno(); old = termios.tcgetattr(fd); tty.setraw(fd)',
+    "os.write(sys.stdout.fileno(), b'\\x1b]11;?\\x1b\\\\')",
+    "end = time.time() + 3; got = b''",
+    'while time.time() < end and not got.endswith(b"\\\\"):',
+    '    r, _, _ = select.select([fd], [], [], 0.2)',
+    '    if r: got += os.read(fd, 100)',
+    'termios.tcsetattr(fd, termios.TCSADRAIN, old)',
+    "open(sys.argv[1], 'w').write(got.decode('latin-1'))",
+  ].join('\n'))
+  const answered = join(scratch, 'answer')
+  const ws = { id: 'bgcheck', env: '', dir: scratch, createdAt: 77, only: 'codex' }
+  try {
+    const line = w.openCommand(ws, join(scratch, 'home'), { socket, attach: false, background: '#0A0B0C', bins: { claude: 'true', codex: `python3 '${asker}' '${answered}'; sleep 5; true` } })
+    spawnSync('/bin/sh', ['-c', line], { encoding: 'utf8' })
+    for (let i = 0; i < 30 && !(existsSync(answered) && readFileSync(answered, 'utf8') !== ''); i++) await new Promise(r => setTimeout(r, 200))
+    const got = existsSync(answered) ? readFileSync(answered, 'utf8') : ''
+    check('workspace: its agents are told the background of the tab it is opened from (OSC 11), no window attached yet', got.includes(']11;rgb:0a0a/0b0b/0c0c'), JSON.stringify(got))
+  } finally {
+    spawnSync('tmux', ['-L', socket, '-f', '/dev/null', 'kill-server'])
+    rmSync(join(process.env.TMUX_TMPDIR ?? '/tmp', `tmux-${process.getuid()}`, socket), { force: true })
+    rmSync(scratch, { recursive: true, force: true })
+  }
+}
+
 // 6b. A workspace of one agent, on a private tmux server: that agent alone in its one pane, marked, given its
 // first prompt; the other agent never started. Stand-ins record their arguments.
 {

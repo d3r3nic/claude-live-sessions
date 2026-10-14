@@ -488,14 +488,19 @@ export const OWNER_OPTION = '@live-sessions-workspace'
  * and Codex on the right, or the one agent the owner chose, in its folder,
  * each pane marked with its agent and leaving a shell when its agent exits),
  * then attaches. Closing that
- * terminal detaches; the agents keep running in tmux. `socket` (a private
- * server that reads no tmux.conf) and `bins` are for tests; `attach: false`
- * only creates.
+ * terminal detaches; the agents keep running in tmux. Its window's own
+ * background is `background` (`#rrggbb`: that of the tab it is opened from,
+ * whose profile the window takes), set before its agents ask for it: tmux
+ * answers an agent's question for the terminal's background (OSC 11) with it,
+ * and Codex blends its input line and the owner's messages from it, once, at
+ * its start; without it tmux answers with a colour left from another window,
+ * or none. `socket` (a private server that reads no tmux.conf) and `bins` are
+ * for tests; `attach: false` only creates.
  */
 export function openCommand(
   ws: Pick<Workspace, 'id' | 'env' | 'dir' | 'createdAt' | 'checkout' | 'threads' | 'only'> & { name?: string },
   home: string,
-  o: { socket?: string; bins?: { claude: string; codex: string }; attach?: boolean } = {},
+  o: { socket?: string; bins?: { claude: string; codex: string }; attach?: boolean; background?: string } = {},
 ): string {
   // a test's private server reads no tmux.conf: the person's plugins (a session restore) never run in it
   const tmux = o.socket === undefined ? 'tmux' : `tmux -L ${shellWord(o.socket)} -f /dev/null`
@@ -508,6 +513,8 @@ export function openCommand(
   const create = [
     `${tmux} has-session -t ${shellWord(`=${name}`)} 2>/dev/null ||`,
     `${tmux} new-session -d -s ${shellWord(name)} -c ${dir} -n peers ${pane(first!)}`,
+    // (its window, before the second agent is started, and long before the first has started enough to ask)
+    ...(o.background !== undefined && /^#[0-9a-fA-F]{6}$/.test(o.background) ? [`\\; set-window-option window-style ${shellWord(`bg=${o.background.toLowerCase()}`)}`] : []),
     `\\; set-option -p ${AGENT_OPTION} ${first}`,
     ...(second === undefined ? [] : [`\\; split-window -h -c ${dir} ${pane(second)}`, `\\; set-option -p ${AGENT_OPTION} ${second}`]),
     // set-option takes no `=` exact-match target; the session was just made under this exact name

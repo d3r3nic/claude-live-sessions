@@ -989,13 +989,15 @@ async function openWorkspace($: EngineInterface, ws: Workspace, at?: { window: s
   }
   // a terminal's login shell may be any shell: it is only given `/bin/sh <file>`, the file holding the command
   const file = openScriptPath(home, ws.id)
-  await $.fs.write(file, `${openCommand(ws, home)}\n`)
+  // its window's background that of this tab, whose profile it takes (as Terminal reports it; none when not known)
+  const tabBackground = (await read($, background)) || undefined
+  await $.fs.write(file, `${openCommand(ws, home, { background: tabBackground })}\n`)
   const command = `/bin/sh ${shellQuote(file)}`
   const term = await $.env.get('TERM_PROGRAM')
   if (term === 'tmux') {
     // from inside tmux: create it if need be, then switch this terminal to it
     const made = await $.process
-      .run(['/bin/sh', '-c', openCommand(ws, home, { attach: false })], { timeoutMs: 20_000 })
+      .run(['/bin/sh', '-c', openCommand(ws, home, { attach: false, background: tabBackground })], { timeoutMs: 20_000 })
       .catch((error: unknown) => ({ exitCode: -1, stdout: '', stderr: message(error) }))
     if (made.exitCode === 0 && !wasRunning) await prepareWhenMade($, home, ws)
     const switched = made.exitCode === 0 ? await tmux(['switch-client', '-t', `=${name}`]) : made

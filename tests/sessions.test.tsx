@@ -2018,6 +2018,23 @@ describe('workspaces', () => {
     expect(runs.some(r => r[0] === '/bin/mv')).toBe(false)
   })
 
+  test('a workspace window takes the background of the tab it is opened from, before its agents ask for it', async ($, on) => {
+    // this session's tab (WEB CONSOLE, ttys004) has a dark background (#1e1e1e)
+    const { files } = engine(on, machine, { termProgram: 'Apple_Terminal', selfId: 'session-101' })
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [practice] }))
+    await $.session.start(START)
+    for (let i = 0; i < 10; i++) await $.command.run(SESSIONS)
+    expect((await $.command.run({ ...SESSIONS, command: 'workspace', args: 'open practice-rbac' })).text).toBe('Opened ws-practice-rbac in a new Terminal window.')
+    const line = files.get(openScriptPath(HOME, 'practice-rbac'))!
+    // set right after the session (its first pane) is made, before the second agent's pane
+    expect(line.indexOf("\; set-window-option window-style 'bg=#1e1e1e'")).toBeGreaterThan(line.indexOf('new-session'))
+    expect(line.indexOf("\; set-window-option window-style 'bg=#1e1e1e'")).toBeLessThan(line.indexOf('split-window'))
+    // none known (not a colour, or no tab read): none set
+    expect(openCommand(practice, HOME)).not.toContain('window-style')
+    expect(openCommand(practice, HOME, { background: 'red; rm -rf' })).not.toContain('window-style')
+    expect(openCommand(practice, HOME, { background: '#ABCDEF' })).toContain("window-style 'bg=#abcdef'")
+  })
+
   test('inside tmux it creates the session if need be and switches this terminal to it', async ($, on) => {
     const { files, runs } = engine(on, machine, { termProgram: 'tmux' })
     files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [practice] }))
