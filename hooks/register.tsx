@@ -40,6 +40,9 @@ import {
   absoluteDir,
   checkoutResult,
   chatsPurpose,
+  processStart,
+  PROCESS_START,
+  type WaitFor,
   peerPrompt,
   openScriptPath,
   addingPath,
@@ -992,7 +995,7 @@ async function codexLetsGo($: EngineInterface, id: string, what: string): Promis
  * conversation (brought in from here): it runs it still, and the Claude pane
  * waits for it to close.
  */
-async function openWorkspace($: EngineInterface, ws: Workspace, at?: { window: string; pane?: string }, o: { waitFor?: number } = {}): Promise<{ isOpen: boolean; text: string }> {
+async function openWorkspace($: EngineInterface, ws: Workspace, at?: { window: string; pane?: string }, o: { waitFor?: WaitFor } = {}): Promise<{ isOpen: boolean; text: string }> {
   const home = (await $.env.get('HOME')) ?? ''
   const name = tmuxName(ws)
   const tmux = (args: string[]) =>
@@ -1031,7 +1034,7 @@ async function openWorkspace($: EngineInterface, ws: Workspace, at?: { window: s
     const now = await $.clock.now()
     // only the agents it runs: a conversation kept for one it does not run is never resumed
     const runs = agentsOf(ws)
-    const claude = ws.threads.claude === undefined || !runs.includes('claude') ? undefined : snap.claude.find(s => s.sessionId === ws.threads!.claude!.id && s.pid !== o.waitFor)
+    const claude = ws.threads.claude === undefined || !runs.includes('claude') ? undefined : snap.claude.find(s => s.sessionId === ws.threads!.claude!.id && s.pid !== o.waitFor?.pid)
     // a Codex conversation open in a terminal, or written a moment ago anywhere (the desktop app, an exec run)
     const codex = ws.threads.codex === undefined || !runs.includes('codex') ? undefined : snap.codex.find(s => s.key === ws.threads!.codex!.id && (s.surface === 'terminal' || now - s.updatedAt < WORKING_MS))
     // and one any Codex holds open (a terminal, its shared server, the desktop app), however it was started
@@ -1320,11 +1323,10 @@ async function makeWorkspace($: EngineInterface, w: NewWorkspace): Promise<{ isC
   // a workspace of one agent takes in a session of that agent only
   const stranger = checked.bring.find(b => !agentsOf(w).includes(b.tool))
   if (stranger !== undefined) return fail(`${stranger.label} is not ${w.only === 'claude' ? 'Claude' : 'Codex'}, the one agent this workspace runs`)
-  // a pair with conversations brought in and no purpose said goes on with their work: each is told what is next, the
-  // one brought in bringing a new peer up to speed
-  const purpose = w.purpose.trim() || (w.only === undefined && checked.bring.length > 0 ? chatsPurpose(checked.bring.map(b => b.tool)) : '')
-  // in a folder in no repository the agents find the one the purpose concerns as they get ready
-  if (purpose !== '' && 'error' in place && place.isOutside !== true) return fail(place.error)
+  // made for a purpose (one said, or, for a pair with chats brought in, theirs: below): in a folder in no repository the
+  // agents find the one the purpose concerns as they get ready; checked before anything closes
+  const said = w.purpose.trim()
+  if ((said !== '' || (w.only === undefined && checked.bring.length > 0)) && 'error' in place && place.isOutside !== true) return fail(place.error)
   const threads: { claude?: Thread; codex?: Thread } = {}
   const notBrought: string[] = []
   const createdAt = await $.clock.now()
@@ -1333,6 +1335,12 @@ async function makeWorkspace($: EngineInterface, w: NewWorkspace): Promise<{ isC
     if ('thread' in taken) threads[b.tool] = { ...taken.thread, since: createdAt }
     else notBrought.push(`${b.label} (${taken.why}, and the workspace's ${b.tool === 'claude' ? 'Claude' : 'Codex'} starts new)`)
   }
+  // a pair with conversations brought in and no purpose said goes on with their work: each is told what is next, the
+  // one brought in bringing a new peer up to speed (only those that came: one left where it was has no work here)
+  const came = (['claude', 'codex'] as const).filter(t => threads[t] !== undefined)
+  const purpose = said || (w.only === undefined && came.length > 0 ? chatsPurpose(came) : '')
+  // this session, brought in: not closed until the workspace has opened
+  const selfThread = checked.bring.find(b => b.isSelf === true)?.thread.id
   // never the name of a tmux session already running: a new workspace never takes over an old one
   const running = Object.values(snap.tmux.panes).map(p => p.session).filter(s => s.startsWith('ws-')).map(s => s.slice(3))
   let ws: Workspace | undefined
@@ -1350,8 +1358,8 @@ async function makeWorkspace($: EngineInterface, w: NewWorkspace): Promise<{ isC
     return withThreads([...now, ws], ws.id, threads)
   })
   if (!saved || ws === undefined) {
-    const closed = Object.entries(threads).map(([tool, t]) => `${tool === 'claude' ? `claude --resume ${t.id}` : `codex resume ${t.id}`} (in ${t.dir})`)
-    return fail(`${UNREADABLE}${closed.length > 0 ? `; to go on with what was closed: ${closed.join(', ')}` : ''}`)
+    const closed = Object.entries(threads).filter(([, t]) => t.id !== selfThread).map(([tool, t]) => `${tool === 'claude' ? `claude --resume ${t.id}` : `codex resume ${t.id}`} (in ${t.dir})`)
+    return fail(`${UNREADABLE}${closed.length > 0 ? `; to go on with what was closed: ${closed.join(', ')}` : ''}${selfThread !== undefined && threads.claude?.id === selfThread ? '; this session was not closed' : ''}`)
   }
   const made: Workspace = ws
   if (purpose !== '' && made.only === undefined) {
@@ -1366,7 +1374,7 @@ async function makeWorkspace($: EngineInterface, w: NewWorkspace): Promise<{ isC
   const label = `${made.name} (${made.env || 'default'}, ${made.dir})`
   // this session, brought in: it runs its conversation until the workspace has opened, whose Claude waits for it
   const self = checked.bring.find(b => b.isSelf === true && made.threads?.claude?.id === b.thread.id)
-  const opened = await openWorkspace($, made, undefined, self?.runs === undefined ? {} : { waitFor: self.runs.pid })
+  const opened = await openWorkspace($, made, undefined, await waitForSelf($, self))
   const goOn = checked.bring.filter(b => made.threads?.[b.tool] !== undefined).map(b => b.label)
   const alone = made.only === undefined ? undefined : made.only === 'claude' ? 'Claude' : 'Codex'
   const onBranch = made.branch === undefined ? '' : `, going on with ${made.branch}`
@@ -1470,7 +1478,8 @@ async function addTo($: EngineInterface, ws: Workspace, tool: 'claude' | 'codex'
       return withThreads(member === undefined ? changed : assigned(changed, member, ''), cur.id, threads)
     })
     if (!saved || added === undefined) {
-      const resume = thread === undefined ? '' : `; ${brought!.label} was closed: to go on with it, ${tool === 'claude' ? `claude --resume ${thread.id}` : `codex resume ${thread.id}`} (in ${thread.dir})`
+      // (this session was not closed: it goes on as it was)
+      const resume = thread === undefined || brought?.isSelf === true ? '' : `; ${brought!.label} was closed: to go on with it, ${tool === 'claude' ? `claude --resume ${thread.id}` : `codex resume ${thread.id}`} (in ${thread.dir})`
       return await asItWas(`${saved ? `${kept.name} was removed meanwhile` : UNREADABLE}${resume}`, saved)
     }
     const made: Workspace = added
@@ -1489,7 +1498,7 @@ async function addTo($: EngineInterface, ws: Workspace, tool: 'claude' | 'codex'
     await refresh($, 0)
     // this session, brought in: as when making a workspace with it
     const self = brought?.isSelf === true && isBrought ? brought : undefined
-    const opened = await openWorkspace($, made, undefined, self?.runs === undefined ? {} : { waitFor: self.runs.pid })
+    const opened = await openWorkspace($, made, undefined, await waitForSelf($, self))
     const closing = self === undefined ? '' : await selfAfterOpen($, home, self, opened.isOpen)
     const who = `${isBrought ? `${brought!.label} goes on there in its own conversation` : `${NAME[tool]} starts new there`}, beside ${NAME[there]}`
     const how = purpose === '' ? '' : '; Claude gets peer coding ready, and the relay passes each hand-over'
@@ -1546,6 +1555,17 @@ async function takeOver($: EngineInterface, home: string, b: Bring): Promise<{ t
 }
 
 /**
+ * What the workspace's Claude waits for when it goes on with this session's conversation: this session's process, by
+ * its pid and start time. None when that cannot be read: the workspace is then not opened while it runs.
+ */
+async function waitForSelf($: EngineInterface, b: Bring | undefined): Promise<{ waitFor?: WaitFor }> {
+  if (b?.runs === undefined) return {}
+  const out = await $.process.run(['/bin/sh', '-c', `${PROCESS_START} -p "$1"`, 'sh', String(b.runs.pid)], { timeoutMs: 10_000 }).catch(() => ({ stdout: '' }))
+  const since = processStart(out.stdout)
+  return since === undefined ? {} : { waitFor: { pid: b.runs.pid, since } }
+}
+
+/**
  * This session, brought into a workspace: once the workspace has opened (its Claude waiting for this session to
  * close), it closes, checked again just before as any session brought in (one that began a turn since is left
  * running); its conversation then goes on there. What to say when it does not close (when it does, nothing reads it).
@@ -1554,6 +1574,8 @@ async function selfAfterOpen($: EngineInterface, home: string, b: Bring, isOpen:
   const then = 'the workspace\'s Claude goes on with its conversation then'
   if (!isOpen || b.runs === undefined) return ` Close this session (/exit), then open the workspace: its Claude goes on with this conversation.`
   const live = await liveClaude($, home, b.runs.pid, b.profile, b.thread.id, 'close it (/exit)')
+  // (a /clear or /resume here: it runs another conversation now, and the workspace's Claude stops waiting for it)
+  if (live === ENDED) return ' This session was not closed: it no longer shows as running that conversation (a /clear or /resume there); the workspace\'s Claude goes on with it once no session runs it.'
   if (typeof live === 'string') return ` This session ${live}; ${then}.`
   const out = await $.process
     .run(['/bin/sh', '-c', STOP_SCRIPT, 'sh', b.runs.tty, JOB_COMMANDS.claude, String(b.runs.pid)], { timeoutMs: 30_000 })
@@ -1607,6 +1629,9 @@ async function checkBring($: EngineInterface, home: string, snap: Snapshot, memb
   return { bring }
 }
 
+/** Why a Claude session cannot be brought in or closed: it is not the one checked any more. */
+const ENDED = 'has ended or its process changed'
+
 /**
  * A Claude session as it runs now, by its registry entry and process: between turns, in front of its terminal; else why
  * not, said for what was `asked` of it.
@@ -1617,7 +1642,7 @@ async function liveClaude($: EngineInterface, home: string, pid: number, profile
   const procs = parsePs(ps.stdout)
   const proc = procs.get(pid)
   const still = claudeFromRegistry(raw, profile, procs, home)
-  if (proc === undefined || still === undefined || still.sessionId !== id || !isClaudeProcess(proc.args)) return 'has ended or its process changed'
+  if (proc === undefined || still === undefined || still.sessionId !== id || !isClaudeProcess(proc.args)) return ENDED
   const state = claudeState(still, await $.clock.now())
   if (state === 'background') return `has background work running: ${asked} once it has ended`
   if (state === 'waiting') return `waits on you: answer it, then ${asked}`
@@ -1667,8 +1692,16 @@ async function submitDraft($: EngineInterface) {
   const found = await read($, worktrees)
   const isPlaced = found.dir !== '' && found.dir === d.dir
   const goOn = isPlaced && d.bring.length === 0 ? found.list.find(w => w.path === d.goOn) : undefined
+  let folder = goOn?.path ?? project
+  if (d.bring.length > 0) {
+    // with chats chosen, a folder typed is taken as it is (a file in one, or a search's pick: where it was placed)
+    const named = typedPath(d.query)
+    const typed = named !== undefined && !named.isRelative ? absoluteDir(named.path, (await $.env.get('HOME')) ?? '') : undefined
+    const isDir = typed !== undefined && (await $.fs.stat(typed).then(f => f.kind === 'dir').catch(() => false))
+    folder = isDir ? typed : d.goOn || project
+  }
   const made = await createWorkspace($, {
-    name: d.name, dir: goOn?.path ?? project, env: d.env, purpose: d.purpose, bring: d.bring,
+    name: d.name, dir: folder, env: d.env, purpose: d.purpose, bring: d.bring,
     ...(only === undefined ? {} : { only }),
     ...(goOn === undefined ? {} : { goOn: true, goOnBranch: goOn.branch }),
   })
@@ -2585,7 +2618,15 @@ export const register: Register = on => {
       const folder = !isChats ? {} : first === undefined ? { query: '', dir: '', chatDir: '' } : { query: tilde(first.dir), dir: first.dir, chatDir: first.member }
       return { ...d, bring, ...folder, ...(isChats ? { goOn: '', choices: [] } : {}), error: '' }
     }
-    const chooseChat = (b: Bringable) => update($, draft, d => ({ ...withChats(d, toggled(d.bring, b.member)), ...(d.bring.includes(b.member) ? {} : { env: b.env }) }))
+    const chooseChat = (b: Bringable) => update($, draft, d => {
+      const next = { ...withChats(d, toggled(d.bring, b.member)), ...(d.bring.includes(b.member) ? {} : { env: b.env }) }
+      // a workspace runs under one environment: chats of two, said at once
+      const [one, other] = offeredAll.filter(o => next.bring.includes(o.member))
+      const envName = (e: string) => e || 'default'
+      return one !== undefined && other !== undefined && one.env !== other.env
+        ? { ...next, error: `${one.label} runs under the ${envName(one.env)} environment and ${other.label} under the ${envName(other.env)} one: a workspace runs under one, so choose chats of one environment` }
+        : next
+    })
     const matches = form.isOpen ? rankProjects(await read($, projects), [...snap.claude, ...snap.codex].map(s => ({ cwd: s.cwd, at: 'lastActive' in s ? s.lastActive : s.since })), form.dir === '' ? form.query : '', home) : []
     const pending = await read($, pendingMove)
     const isPending = (key: string) => pending.key === key && now - pending.at < CONFIRM_MS

@@ -172,7 +172,7 @@ export const promptPath = (home: string, id: string, tool: 'claude' | 'codex') =
  * from the folder it ran in, bypassed the same way, whatever mode it ran in
  * before.
  */
-function paneScript(tool: 'claude' | 'codex', ws: Pick<Workspace, 'id' | 'env' | 'checkout' | 'threads' | 'only'>, home: string, bin?: string, waitFor?: number): string {
+function paneScript(tool: 'claude' | 'codex', ws: Pick<Workspace, 'id' | 'env' | 'checkout' | 'threads' | 'only'>, home: string, bin?: string, waitFor?: WaitFor): string {
   // (an id from the workspaces file reaches the line only as threadFrom read it: letters, digits, dashes)
   const thread = ws.threads?.[tool]
   const addDir = ws.checkout === undefined ? '' : ` --add-dir ${shellWord(`${ws.checkout}-worktrees`)}`
@@ -191,9 +191,12 @@ function paneScript(tool: 'claude' | 'codex', ws: Pick<Workspace, 'id' | 'env' |
       : tool === 'claude'
         // a Claude conversation is kept under the folder it started in: resumed from there, unless a live Claude
         // session has it open (its registry entry, its process there): then it says so and leaves a shell. Brought in
-        // from the session that opened the workspace (`waitFor`, its process), it first waits for that one to close
-        ? (waitFor === undefined || !Number.isInteger(waitFor) || waitFor <= 1 ? '' :
-          `w=; while kill -0 ${waitFor} 2>/dev/null && grep -q '"sessionId":"${thread.id}"' ${shellWord(`${claudeHome}/sessions/${waitFor}.json`)} 2>/dev/null; do ` +
+        // from the session that opened the workspace (`waitFor`), it first waits while that very process runs (its pid,
+        // started when it was: never another given its pid), unless that session's registry entry names another
+        // conversation twice in a row (a /clear or /resume there: it no longer runs this one)
+        ? (!isWaitFor(waitFor) ? '' :
+          `w=; n=0; while [ "$(echo $(${PROCESS_START} -p ${waitFor.pid} 2>/dev/null))" = ${shellWord(waitFor.since)} ]; do ` +
+          `if grep -q '"sessionId":"' ${shellWord(`${claudeHome}/sessions/${waitFor.pid}.json`)} 2>/dev/null && ! grep -q '"sessionId":"${thread.id}"' ${shellWord(`${claudeHome}/sessions/${waitFor.pid}.json`)} 2>/dev/null; then n=$((n + 1)); [ "$n" -ge 2 ] && break; else n=0; fi; ` +
           `[ -n "$w" ] || echo 'Waiting for the Claude session this conversation was brought in from to close; it goes on here then.'; w=1; sleep 0.5; done; `) +
           `open=; for f in ${shellWord(claudeHome)}/sessions/*.json; do grep -q '"sessionId":"${thread.id}"' "$f" 2>/dev/null && kill -0 "$(basename "$f" .json)" 2>/dev/null && open=1; done; ` +
           `if [ -n "$open" ]; then echo 'This conversation is open in another Claude session; close it there, then open the workspace again.'; ` +
@@ -203,6 +206,20 @@ function paneScript(tool: 'claude' | 'codex', ws: Pick<Workspace, 'id' | 'env' |
   return `/bin/sh -c ${shellWord(`${run}; exec "$SHELL" -l`)}`
 }
 const UPDATE_OFF = '-c check_for_update_on_startup=false'
+
+/**
+ * A process to wait for: its pid, and when it started as PROCESS_START prints it (words one space apart), so that a
+ * process given its pid later is never taken for it.
+ */
+export type WaitFor = { pid: number; since: string }
+/** When the process `-p <pid>` started, the same wherever it is asked (`Tue Oct 13 18:27:10 2026`, in UTC). */
+export const PROCESS_START = 'LC_ALL=C TZ=UTC /bin/ps -o lstart='
+/** PROCESS_START's answer as a WaitFor's `since`: its words one space apart, or undefined when it is not a start time. */
+export function processStart(stdout: string): string | undefined {
+  const since = stdout.trim().split(/\s+/).join(' ')
+  return /^[A-Z][a-z]{2} [A-Z][a-z]{2} \d{1,2} \d\d:\d\d:\d\d \d{4}$/.test(since) ? since : undefined
+}
+const isWaitFor = (w: WaitFor | undefined): w is WaitFor => w !== undefined && Number.isInteger(w.pid) && w.pid > 1 && processStart(w.since) === w.since
 /**
  * A workspace's Codex runs its conversation itself, never in Codex's shared background server: it holds the
  * conversation's rollout open, which is how which conversation it runs is known for certain (CodexMatch `held`), and
@@ -529,13 +546,13 @@ export const OWNER_OPTION = '@live-sessions-workspace'
  * its start; without it tmux answers with a colour left from another window,
  * or none. `waitFor`: the process of the Claude session whose conversation
  * its Claude resumes (the session that opened it, bringing itself in), which
- * it waits to see closed first. `socket` (a private server that reads no
+ * it waits to see closed first (or running another conversation). `socket` (a private server that reads no
  * tmux.conf) and `bins` are for tests; `attach: false` only creates.
  */
 export function openCommand(
   ws: Pick<Workspace, 'id' | 'env' | 'dir' | 'createdAt' | 'checkout' | 'threads' | 'only'> & { name?: string },
   home: string,
-  o: { socket?: string; bins?: { claude: string; codex: string }; attach?: boolean; background?: string; waitFor?: number } = {},
+  o: { socket?: string; bins?: { claude: string; codex: string }; attach?: boolean; background?: string; waitFor?: WaitFor } = {},
 ): string {
   // a test's private server reads no tmux.conf: the person's plugins (a session restore) never run in it
   const tmux = o.socket === undefined ? 'tmux' : `tmux -L ${shellWord(o.socket)} -f /dev/null`
@@ -846,6 +863,15 @@ const setUpStep = (ws: Pick<Workspace, 'checkout' | 'dir'>) =>
     ? `1. The workspace's folder, ${ws.dir}, is in no git repository: work in the repository the purpose concerns (the one your work above is in, if any). If it is not set up for peer coding in the current layout, set it up. Record the owner's decisions you already know and ask for the rest with NEEDS USER.`
     : '1. If this repository is not set up for peer coding in the current layout, set it up. Record the owner\'s decisions you already know and ask for the rest with NEEDS USER.'
 
+/**
+ * The steps of a new Claude whose peer, Codex, has the work under way, in a workspace whose folder is in no repository:
+ * Claude has no work of its own to tell which repository it is, so it asks Codex before it sets anything up.
+ */
+const askCodexFirst = (ws: Pick<Workspace, 'dir'>) => [
+  `1. The workspace's folder, ${ws.dir}, is in no git repository, and the work under way is Codex's: find out from Codex first which repository and branch it is in. Make your alignment move asking it, and end your turn with the line the rules' cue prints; set nothing up before it answers.`,
+  '2. Once it answers: if that repository is not set up for peer coding in the current layout, set it up (record the owner\'s decisions you already know and ask for the rest with NEEDS USER), and go on with Codex\'s branch there, or start one for this purpose (named from the purpose by the settings\' branch naming, never from the workspace\'s name) in its own worktree beside the repository\'s main checkout (<checkout>-worktrees/).',
+]
+
 /** Step 2 of a first prompt when the owner chose the branch: go on with it there, and start no other. */
 const goOnStep = (ws: Pick<Workspace, 'branch' | 'dir'>) =>
   `Go on with the branch the owner chose, ${ws.branch}, in its worktree ${ws.dir}: the work there is under way. Start no other branch.`
@@ -866,11 +892,15 @@ export function setupPrompt(ws: Pick<Workspace, 'name' | 'purpose' | 'checkout' 
     `You are Claude, one of two peers here; ${codex}. ${RELAY_FOR_CLAUDE}`,
     '',
     'Get the workspace ready for peer coding, using the peer-coding skill and the rules it leads to:',
-    setUpStep(ws),
-    ws.branch !== undefined
-      ? `2. ${goOnStep(ws)}`
-      : `2. ${isBrought ? 'If Codex\'s work is on a branch, go on with it (ask Codex in your alignment brief if the repository does not show which). Otherwise start' : 'Start'} a branch for this purpose: name it from the purpose by the settings' branch naming, never from the workspace's name, in its own worktree in ${worktreesOf(ws)}.`,
-    `3. Make your alignment move for that branch${isBrought ? ', asking Codex where its work stands,' : ''} and end your turn with the line the rules' cue prints.`,
+    ...(isBrought && ws.checkout === undefined && ws.branch === undefined
+      ? askCodexFirst(ws)
+      : [
+          setUpStep(ws),
+          ws.branch !== undefined
+            ? `2. ${goOnStep(ws)}`
+            : `2. ${isBrought ? 'If Codex\'s work is on a branch, go on with it (ask Codex in your alignment brief if the repository does not show which). Otherwise start' : 'Start'} a branch for this purpose: name it from the purpose by the settings' branch naming, never from the workspace's name, in its own worktree in ${worktreesOf(ws)}.`,
+          `3. Make your alignment move for that branch${isBrought ? ', asking Codex where its work stands,' : ''} and end your turn with the line the rules' cue prints.`,
+        ]),
   ].join('\n')
 }
 
@@ -978,11 +1008,16 @@ export function addedPrompt(ws: Pick<Workspace, 'name' | 'purpose' | 'checkout' 
     leanWork(true),
     '',
     'From here, work as a peer under the peer-coding rules, using the peer-coding skill:',
-    setUpStep(ws),
-    ws.branch !== undefined
-      ? `2. ${goOnStep(ws)}`
-      : `2. If ${known} is on a branch, go on with it${o.isNew ? ' (ask Codex in your alignment brief if the repository does not show which)' : ''}. Otherwise start one for this purpose: name it from the purpose by the settings' branch naming, never from the workspace's name, in its own worktree in ${worktreesOf(ws)}.${o.isNew && !o.isBrought ? '' : ' Work not committed yet stays where it is: ask the owner with NEEDS USER before moving any of it.'}`,
-    `3. Make your alignment move for that branch, ${o.isNew ? 'asking Codex where its work stands' : 'telling Codex where the work stands'}, and end your turn with the line the rules' cue prints.`,
+    // (a new Claude with no work of its own, in a folder in no repository: Codex says which one first)
+    ...(o.isNew && !o.isBrought && ws.checkout === undefined && ws.branch === undefined
+      ? askCodexFirst(ws)
+      : [
+          setUpStep(ws),
+          ws.branch !== undefined
+            ? `2. ${goOnStep(ws)}`
+            : `2. If ${known} is on a branch, go on with it${o.isNew ? ' (ask Codex in your alignment brief if the repository does not show which)' : ''}. Otherwise start one for this purpose: name it from the purpose by the settings' branch naming, never from the workspace's name, in its own worktree in ${worktreesOf(ws)}.${o.isNew && !o.isBrought ? '' : ' Work not committed yet stays where it is: ask the owner with NEEDS USER before moving any of it.'}`,
+          `3. Make your alignment move for that branch, ${o.isNew ? 'asking Codex where its work stands' : 'telling Codex where the work stands'}, and end your turn with the line the rules' cue prints.`,
+        ]),
   ].join('\n')
 }
 

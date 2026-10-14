@@ -73,6 +73,8 @@ import {
   assigned,
   checkoutResult,
   chatsPurpose,
+  processStart,
+  PROCESS_START,
   CHECKOUT_SCRIPT,
   openScriptPath,
   addingPath,
@@ -218,6 +220,8 @@ const world = {
   openFails: false,
   /** Done as OPEN_SCRIPT opens a window (a session beginning a turn meanwhile). */
   onOpen: () => {},
+  /** When a process started cannot be read (PROCESS_START prints nothing). */
+  startFails: false,
   /** A file that turns unreadable right after it is read once (another writer). */
   spoilsAfterRead: '',
   /** A file that is there but cannot be read (too large, no permission). */
@@ -305,6 +309,7 @@ const resetWorld = () => {
   world.tmuxOwner = ''
   world.openFails = false
   world.onOpen = () => {}
+  world.startFails = false
   world.spoilsAfterRead = ''
   world.unreadable = ''
   world.turns = {}
@@ -397,6 +402,11 @@ function machine(argv: readonly string[], env: unknown): Run {
         // closed: the processes in front of that terminal have exited
         if (answer === 'stopped') for (const [pid, line] of Object.entries(PS_LINES)) if (line.includes(` ${args[0]} `)) world.exited.add(Number(pid))
         return ok(`${answer}\n`)
+      }
+      if (argv[2] === `${PROCESS_START} -p "$1"`) {
+        // as ps prints it (in UTC, a day of the month padded)
+        const line = world.exited.has(Number(args[0])) || world.startFails ? '' : PS_LINES[Number(args[0])] ?? ''
+        return ok(`${/[A-Z][a-z]{2} [A-Z][a-z]{2} +\d+ \d\d:\d\d:\d\d \d{4}/.exec(line)?.[0] ?? ''}\n`)
       }
       if (argv[2] === HOLDERS_SCRIPT) {
         world.heldAsked.push(`${args[0]} ${args[1]}`)
@@ -3168,8 +3178,9 @@ describe('bringing running sessions into a workspace', () => {
     // its Claude waits for this very process (its registry entry, naming this conversation) to be gone, then resumes
     const line = files.get(openScriptPath(HOME, 'console'))!
     const nested = (fragment: string) => fragment.replace(/'/g, `'\\''`).replace(/'/g, `'\\''`)
-    expect(line).toContain(nested(`w=; while kill -0 101 2>/dev/null && grep -q '"sessionId":"session-101"' '/Users/u/.claude/sessions/101.json' 2>/dev/null; do `))
-    expect(line.indexOf('while kill -0 101')).toBeLessThan(line.indexOf('--resume session-101'))
+    expect(line).toContain(nested(`w=; n=0; while [ "$(echo $(LC_ALL=C TZ=UTC /bin/ps -o lstart= -p 101 2>/dev/null))" = 'Fri Oct 9 15:33:30 2026' ]; do `))
+    expect(line).toContain(nested(`if grep -q '"sessionId":"' '/Users/u/.claude/sessions/101.json' 2>/dev/null && ! grep -q '"sessionId":"session-101"' '/Users/u/.claude/sessions/101.json' 2>/dev/null; then n=$((n + 1)); [ "$n" -ge 2 ] && break; else n=0; fi; `))
+    expect(line.indexOf('-p 101 2>')).toBeLessThan(line.indexOf('--resume session-101'))
     expect(toasts.at(-1)).toMatch(/^Created Console .* Opened ws-console in a new Terminal window\.$/)
     await ui.unmount()
   })
@@ -3186,7 +3197,7 @@ describe('bringing running sessions into a workspace', () => {
     world.onOpen = () => files.set(registry, JSON.stringify({ ...JSON.parse(idle), status: 'busy', statusUpdatedAt: NOW }))
     expect(await run('add Practice RBAC claude session-101')).toBe('Added Claude to Practice RBAC: Claude · WEB CONSOLE (this session) goes on there in its own conversation, beside Codex. Opened ws-practice-rbac in a new Terminal window. This session is working: close it (/exit) once its turn is done; the workspace\'s Claude goes on with its conversation then.')
     expect(world.stopped).toEqual([])
-    expect(files.get(openScriptPath(HOME, 'practice-rbac'))).toContain('while kill -0 101 ')
+    expect(files.get(openScriptPath(HOME, 'practice-rbac'))).toContain('/bin/ps -o lstart= -p 101 ')
     // a window that does not open: not closed; the workspace keeps the conversation, and opens once this session has closed
     files.set(registry, idle)
     world.onOpen = () => {}
