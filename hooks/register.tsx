@@ -1363,7 +1363,7 @@ async function makeWorkspace($: EngineInterface, w: NewWorkspace): Promise<{ isC
  * there going on with its conversation, each told (when the workspace has a purpose) that they now work as peers,
  * Claude getting peer coding ready, and the relay passing each hand-over. One at a time, as making one.
  */
-async function addAgent($: EngineInterface, ws: Workspace, member?: string): Promise<{ isAdded: boolean; text: string }> {
+async function addAgent($: EngineInterface, ws: Workspace, tool: 'claude' | 'codex', member?: string): Promise<{ isAdded: boolean; text: string }> {
   let isMine = false
   await update($, creating, now => {
     isMine = !now
@@ -1371,20 +1371,20 @@ async function addAgent($: EngineInterface, ws: Workspace, member?: string): Pro
   })
   if (!isMine) return { isAdded: false, text: 'Not added: a workspace is being made or changed already.' }
   try {
-    return await addTo($, ws, member)
+    return await addTo($, ws, tool, member)
   } finally {
     await update($, creating, () => false)
   }
 }
 
-async function addTo($: EngineInterface, ws: Workspace, member?: string): Promise<{ isAdded: boolean; text: string }> {
+async function addTo($: EngineInterface, ws: Workspace, tool: 'claude' | 'codex', member?: string): Promise<{ isAdded: boolean; text: string }> {
   const home = (await $.env.get('HOME')) ?? ''
   const NAME = { claude: 'Claude', codex: 'Codex' } as const
   const fail = (why: string) => ({ isAdded: false, text: `Not added: ${why}.` })
   if (ws.only === undefined) return fail(`${ws.name} runs Claude and Codex already`)
   const there = ws.only
-  const tool = there === 'claude' ? 'codex' : 'claude'
-  if (member !== undefined && member.split(':')[0] !== tool) return fail(`${ws.name} runs ${NAME[there]}: what it can take is ${NAME[tool]}`)
+  if (tool === there) return fail(`${ws.name} runs ${NAME[there]} already: what it can take is ${NAME[there === 'claude' ? 'codex' : 'claude']}`)
+  if (member !== undefined && member.split(':')[0] !== tool) return fail(`that session is not ${NAME[tool]}`)
   if (!(await readWorkspaces($, home)).isReadable) return fail(UNREADABLE)
   await refresh($, 0)
   const snap = await read($, snapshot)
@@ -1417,7 +1417,9 @@ async function addTo($: EngineInterface, ws: Workspace, member?: string): Promis
     const cur = list.find(w => w.id === kept.id)
     if (cur === undefined) return list
     const { only: _, threads: __, relay: ___, ...rest } = cur
-    const threads = { ...cur.threads, ...(thread === undefined ? {} : { [tool]: { ...thread, since: now } }) }
+    // the agent added has the conversation brought in, or none: one kept for it from before never comes back with it
+    const others = Object.fromEntries(Object.entries(cur.threads ?? {}).filter(([t]) => t !== tool)) as { claude?: Thread; codex?: Thread }
+    const threads = { ...others, ...(thread === undefined ? {} : { [tool]: { ...thread, since: now } }) }
     // a purpose: the relay passes the cues from now (as for a pair made with one); else it stays as it was
     const relay = purpose !== '' ? { mode: 'auto' as const, since: now, streak: 0 } : cur.relay
     added = { ...rest, ...(threads.claude === undefined && threads.codex === undefined ? {} : { threads }), ...(relay === undefined ? {} : { relay }) }
@@ -2324,7 +2326,7 @@ export const register: Register = on => {
     await $.command.register({
       name: 'workspace',
       description: 'Named workspaces: a folder, an environment, Claude and Codex (or one of them) in one tmux session',
-      argumentHint: 'new <folder> <env> <name> [--only claude|codex] [--go-on] [--for <purpose>] | open <name> | close <name> | rm <name>',
+      argumentHint: 'new <folder> <env> <name> [--only claude|codex] [--go-on] [--for <purpose>] | open <name> | close <name> | add <name> claude|codex [<session id>] | rm <name>',
     })
     const kept = await $.store.get('windowMs')
     if (typeof kept === 'number' && kept >= 0) await update($, activeWindow, () => kept)
@@ -2391,7 +2393,7 @@ export const register: Register = on => {
       case 'add': {
         const ws = findWorkspace(list, command.ref)
         if (ws === undefined) return { text: `No workspace named "${command.ref}".` }
-        return { text: (await addAgent($, ws, command.id === undefined ? undefined : `${command.tool}:${command.id}`)).text }
+        return { text: (await addAgent($, ws, command.tool, command.id === undefined ? undefined : `${command.tool}:${command.id}`)).text }
       }
       case 'rm': {
         const ws = findWorkspace(list, command.ref)
@@ -2522,10 +2524,10 @@ export const register: Register = on => {
     }
     // Add, to a workspace of one: the other agent, new or a running session going on there
     const addingTo = await read($, adding)
-    const pressAdd = (id: string, member?: string) => async () => {
+    const pressAdd = (id: string, tool: 'claude' | 'codex', member?: string) => async () => {
       await update($, adding, () => '')
       const ws = (await read($, snapshot)).workspaces.find(w => w.id === id)
-      if (ws !== undefined) await toast($, (await addAgent($, ws, member)).text, { timeoutMs: 20_000 })
+      if (ws !== undefined) await toast($, (await addAgent($, ws, tool, member)).text, { timeoutMs: 20_000 })
     }
     const pressMove = (key: string, move: NonNullable<Item['move']>) => async () => {
       const at = await $.clock.now()
@@ -2984,9 +2986,9 @@ export const register: Register = on => {
                   <Box key={`ws-add ${ws.key}`} flexDirection="column" width={inner - 2} marginLeft={2}>
                     <Text dimColor wrap="wrap">{`Add ${other === 'claude' ? 'Claude' : 'Codex'}: ${ws.name} closes (its agent between turns) and opens again with both; one you bring in closes where it runs and goes on here, in its own conversation.`}</Text>
                     <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
-                      <Button key={`add-new ${ws.key}`} label="Start new" onPress={() => void pressAdd(ws.key)()} />
+                      <Button key={`add-new ${ws.key}`} label="Start new" onPress={() => void pressAdd(ws.key, other)()} />
                       {offers.filter(b => b.blocked === undefined).map(b => (
-                        <Button key={`add ${ws.key} ${b.member}`} label={`${b.label}${b.isIdle ? '' : ' (working)'}`} onPress={() => void pressAdd(ws.key, b.member)()} />
+                        <Button key={`add ${ws.key} ${b.member}`} label={`${b.label}${b.isIdle ? '' : ' (working)'}`} onPress={() => void pressAdd(ws.key, other, b.member)()} />
                       ))}
                       <Button key={`add-back ${ws.key}`} label="Back" onPress={() => void update($, adding, () => '')} />
                     </Box>

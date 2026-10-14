@@ -43,6 +43,7 @@ import {
   windowLabel,
   codexProcFrom,
   codexSessions,
+  codexServers,
   codexTerminals,
   decodePs,
   parseEnv,
@@ -94,6 +95,7 @@ import {
   setupPrompt,
   joinPrompt,
   soloPrompt,
+  addedPrompt,
   agentsOf,
   branchFrom,
   BRANCH_SCRIPT,
@@ -738,6 +740,49 @@ describe('collect', () => {
     expect(match([row('A', 115, 5), row('B', 55, 30)])).toEqual(['ttys001=A', 'ttys002=B'])
     // an old thread resumed from inside the terminal: matched by when it was written
     expect(match([row('A', 7 * 1440, 1)])).toEqual(['ttys001=session (thread not found)', 'ttys002=A'])
+  })
+
+  test('a terminal that runs its conversation in Codex\'s shared server: matched by what the server holds, certain only while they pair off', async () => {
+    // the server: an app-server started as the managed daemon, on no terminal (the fixture's plain app-server, 204, is not one)
+    const daemon = '  304 ??       Ss Fri Oct  9 15:00:00 2026     /Users/u/.codex/packages/app-server-daemon/releases/0.162.1/bin/codex app-server --listen unix:// --managed-daemon'
+    const procs = parsePs([...Object.values(PS_LINES), daemon].join('\n'))
+    const pids = new Set([...codexPids(), 304])
+    expect(codexServers(procs, pids).map(p => p.pid)).toEqual([304])
+    expect(codexTerminals(procs, pids).map(p => p.pid)).not.toContain(304)
+    const term = (pid: number, minutesAgo: number, o: Partial<CodexProc> = {}): CodexProc => ({
+      pid, tty: `ttys0${pid}`, startedAt: NOW - minutesAgo * 60_000, codexHome: '/h', cwd: '/x', isExec: false, held: [], ...o,
+    })
+    const row = (id: string, createdAgo: number, writtenAgo: number, cwd = '/x'): ThreadRow => ({
+      id, title: id, name: '', cwd, source: 'vscode', originator: 'codex-tui', rollout_path: '',
+      created_at_ms: NOW - createdAgo * 60_000, updated_at_ms: NOW - writtenAgo * 60_000, agents: 0,
+    })
+    // 41 resumed A; 42 made B in its folder since it started; 43 went on with an old C from inside it (written since);
+    // 44 runs its own conversation (it holds it); 45 is an exec run
+    const terminals = [term(41, 10, { resumeId: 'A' }), term(42, 60), term(43, 120, { cwd: '/y' }), term(44, 30, { held: ['F'] }), term(45, 5, { isExec: true })]
+    const threads = [row('A', 9000, 1), row('B', 55, 2), row('C', 40 * 1440, 3, '/y'), row('F', 25, 4), row('D', 9000, 600)]
+    const matches = (held: string[], list = terminals, rows = threads) =>
+      codexSessions({ terminals: list, threads: new Map([['/h', rows]]), now: NOW, servers: new Map([['/h', [{ pid: 304, held }]]]) })
+        .filter(r => r.surface === 'terminal').map(r => `${r.tty}=${r.title}${r.match === undefined ? '' : `:${r.match}`}${r.loadedBy === undefined ? '' : `@${r.loadedBy}`}`).sort()
+    // the server holds their three conversations (and a subagent's, no top-level thread): each one theirs, for certain
+    expect(matches(['A', 'B', 'C', 'sub-1'])).toEqual(['ttys041=A:loaded@304', 'ttys042=B:loaded@304', 'ttys043=C:loaded@304', 'ttys044=F:held', 'ttys045=session (thread not found)'])
+    // it holds another conversation besides (D: none of its terminals was matched to it): none of theirs is certain
+    expect(matches(['A', 'B', 'C', 'D'])).toEqual(['ttys041=A:resume', 'ttys042=B:folder', 'ttys043=C:folder', 'ttys044=F:held', 'ttys045=session (thread not found)'])
+    // 41 started anew inside (/new): the server holds E, made in its folder since it started, and no longer A
+    expect(matches(['E', 'B', 'C'], terminals, [...threads, row('E', 5, 1)])).toEqual(['ttys041=E:loaded@304', 'ttys042=B:loaded@304', 'ttys043=C:loaded@304', 'ttys044=F:held', 'ttys045=session (thread not found)'])
+    // a terminal of the server's with nothing found for it (one yet to write): none of the others is certain either
+    expect(matches(['A', 'B', 'C'], [...terminals, term(46, 1, { cwd: '/z' })])).toContain('ttys041=A:resume')
+    // certain for bringing in, closing and keeping, as one that holds its own
+    const rows = codexSessions({ terminals, threads: new Map([['/h', threads]]), now: NOW, servers: new Map([['/h', [{ pid: 304, held: ['A', 'B', 'C'] }]]]) })
+    expect(rows.filter(r => r.surface === 'terminal' && !r.key.startsWith('pid-')).map(r => isKnownCodex({ codex: rows }, r))).toEqual([true, true, true, true])
+    // with no server, as before: by the command line and the folder, not certain
+    expect(matches([], terminals).slice(0, 3)).toEqual(['ttys041=A:resume', 'ttys042=B:folder', 'ttys043=C:folder'])
+  })
+
+  test('who holds a Codex conversation open: free, or the process', () => {
+    expect([holderOf('free\n'), holderOf('held 91352\n'), holderOf(''), holderOf('held x')]).toEqual(['free', 91352, undefined, undefined])
+    // every Codex process asked, a rollout found by the end of its name, asked again a few times while one holds it
+    expect(HOLDERS_SCRIPT).toContain('/usr/bin/pgrep -x codex')
+    expect(HOLDERS_SCRIPT).toContain('-v end="-$id.jsonl"')
   })
 
   test('ps escapes, environment lines and lsof output parse', async () => {
@@ -3083,6 +3128,64 @@ describe('bringing running sessions into a workspace', () => {
     await ui.unmount()
   })
 
+  test('a Codex terminal whose conversation runs in Codex\'s shared server is brought in: matched by what the server holds, resumed once nothing holds it', async ($, on) => {
+    const { files, toasts, clock } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    // of ~/.codex's terminals only 207 is left, and it runs its conversation in the shared server (204, started as the
+    // managed daemon), which holds the rollout open; 207 holds none itself
+    for (const pid of [201, 208, 209, 211]) world.exited.add(pid)
+    world.args.set(204, '/Users/u/.codex/packages/app-server-daemon/releases/0.162.1/bin/codex app-server --listen unix:// --managed-daemon')
+    world.lsof = ['p204', 'f31', `n/Users/u/.codex/sessions/2026/10/08/rollout-2026-10-08T10-00-00-${RESUMED_A}.jsonl`, 'p207', 'f3', 'n/dev/ttys045', ''].join('\n')
+    // 'Ship the console' was written since it started: by Codex's records alone it would not be certain; its own last
+    // write a while ago (between turns)
+    await clock.advance(120_000)
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const snap = JSON.parse(files.get(SHARED) ?? '{}').snapshot as Snapshot
+    const row = snap.codex.find(c => c.pid === 207)
+    expect([row?.key, row?.match, row?.loadedBy]).toEqual([RESUMED_A, 'loaded', 204])
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    const create = async (name: string) => {
+      if ((await ui.find({ key: 'new-from:/Users/u/dev/web-app' })) === undefined) await reveal(ui, 'tree:/Users/u/dev/web-app')
+      await ui.press({ key: 'new-from:/Users/u/dev/web-app' })
+      await ui.press({ key: `form:bring codex:${RESUMED_A}` })
+      await ui.input({ key: 'form:name', text: name, kind: 'change' })
+      await ui.press({ key: 'form:create' })
+    }
+    // the server still holds it after the terminal closed (another of its terminals resumed it too): not resumed here
+    world.holders[RESUMED_A] = 204
+    await create('Reports')
+    expect(world.stopped).toEqual(['ttys045 codex|node 207'])
+    expect(world.heldAsked).toEqual([`${RESUMED_A} 20`])
+    expect(JSON.parse(files.get(WORKSPACES)!).workspaces[0].threads).toBeUndefined()
+    expect(toasts.at(-1)).toContain(`Not brought in: Codex · Find the report writer (it closed in ttys045, but another Codex (process 204) has its conversation open still, so it was not resumed here, and the workspace's Codex starts new).`)
+    await ui.unmount()
+  })
+
+  test('a Codex terminal whose conversation runs in Codex\'s shared server goes on in the workspace once the server lets it go', async ($, on) => {
+    const { files, runs, clock } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    for (const pid of [201, 208, 209, 211]) world.exited.add(pid)
+    await clock.advance(120_000)
+    world.args.set(204, '/Users/u/.codex/packages/app-server-daemon/releases/0.162.1/bin/codex app-server --listen unix:// --managed-daemon')
+    world.lsof = ['p204', 'f31', `n/Users/u/.codex/sessions/2026/10/08/rollout-2026-10-08T10-00-00-${RESUMED_A}.jsonl`, 'p207', 'f3', 'n/dev/ttys045', ''].join('\n')
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    await reveal(ui, 'tree:/Users/u/dev/web-app')
+    await ui.press({ key: 'new-from:/Users/u/dev/web-app' })
+    await ui.press({ key: `form:bring codex:${RESUMED_A}` })
+    await ui.input({ key: 'form:name', text: 'Reports', kind: 'change' })
+    await ui.press({ key: 'form:create' })
+    // checked fresh against the server before it is closed, closed, then asked until nothing holds it; asked once more
+    // as the workspace opens and resumes it
+    expect(runs.some(r => r.join(' ') === '/usr/sbin/lsof -n -P -a -p 204 -Fpn')).toBe(true)
+    expect(world.stopped).toEqual(['ttys045 codex|node 207'])
+    expect(world.heldAsked).toEqual([`${RESUMED_A} 20`, `${RESUMED_A} 1`])
+    const [saved] = JSON.parse(files.get(WORKSPACES)!).workspaces
+    expect(saved.threads.codex.id).toBe(RESUMED_A)
+    await ui.unmount()
+  })
+
   test('a Codex conversation the owner closed is brought in as it is: nothing to close, resumed in the workspace', async ($, on) => {
     const { files, clock } = engine(on, machine, { termProgram: 'Apple_Terminal' })
     // Codex terminal 207 closed by the owner; the account's other terminals are gone too but 201 (it holds its rollout)
@@ -3168,8 +3271,12 @@ describe('bringing running sessions into a workspace', () => {
     world.exited.add(207)
     await clock.advance(4_000)
     expect(await open()).toMatch(/^Not opened: its agents go on with their own conversations, and Codex's was written a moment ago \(\w+\)\. Close it there first\.$/)
-    // one written 5 minutes ago, open in no terminal: opened
+    // one written 5 minutes ago, open in no terminal, but held open by a Codex (a shared server, the desktop app): not yet
     files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, threads: { codex: { id: 'b', dir: '/Users/u/projects', since: 1 } } }] }))
+    world.holders.b = 304
+    expect(await open()).toBe('Not opened: its agents go on with their own conversations, and Codex\'s is open in another Codex (process 304). Close it there first.')
+    // held open by none: opened
+    delete world.holders.b
     expect(await open()).toBe('Opened ws-practice-rbac in a new Terminal window.')
     // resumed anew: the relay types into it only once it is at its prompt
     expect(JSON.parse(files.get(WORKSPACES)!).workspaces[0].threads.codex.since).toBeGreaterThan(NOW)
@@ -3980,7 +4087,7 @@ describe('a workspace of one agent', () => {
     const { files } = engine(on, machine, { termProgram: 'Apple_Terminal' })
     await $.session.start(START)
     // the command's hint and its usage say how
-    expect(world.commands.find(c => c.name === 'workspace')?.argumentHint).toBe('new <folder> <env> <name> [--only claude|codex] [--go-on] [--for <purpose>] | open <name> | close <name> | rm <name>')
+    expect(world.commands.find(c => c.name === 'workspace')?.argumentHint).toBe('new <folder> <env> <name> [--only claude|codex] [--go-on] [--for <purpose>] | open <name> | close <name> | add <name> claude|codex [<session id>] | rm <name>')
     expect((await $.command.run({ ...SESSIONS, command: 'workspace', args: 'new' })).text).toContain('<name> [--only claude | codex] [--go-on: with the branch checked out in <folder>] [--for')
     const text = (await $.command.run({ ...SESSIONS, command: 'workspace', args: 'new ~/dev/web-app work Solo --only codex --for roles and permissions' })).text
     expect(text).toContain('Codex starts alone in tmux session ws-solo; it gets ready for the purpose, says where things stand and waits for you.')
@@ -4118,6 +4225,128 @@ describe('a workspace of one agent', () => {
     expect((await $.command.run({ ...SESSIONS, command: 'workspace', args: 'open solo-claude' })).text).toBe('Opened ws-solo-claude in a new Terminal window.')
     expect(files.get(openScriptPath(HOME, 'solo-claude'))).not.toContain(RESUMED_A)
     expect(runs.filter(r => r[0] === '/usr/bin/osascript' && r[4] === OPEN_SCRIPT)).toHaveLength(2)
+  })
+
+  test('/workspace add: the name, the agent, a running session\'s id; the first prompts when the other agent joins', async () => {
+    expect(parseWorkspaceArgs('add Career Move codex', [], HOME)).toEqual({ action: 'add', ref: 'Career Move', tool: 'codex' })
+    expect(parseWorkspaceArgs(`add "Practice RBAC" Codex ${HELD}`, [], HOME)).toEqual({ action: 'add', ref: 'Practice RBAC', tool: 'codex', id: HELD })
+    expect(parseWorkspaceArgs('add solo claude session-101', [], HOME)).toEqual({ action: 'add', ref: 'solo', tool: 'claude', id: 'session-101' })
+    for (const bad of ['add', 'add solo', 'add codex', 'add solo gemini x']) {
+      expect(parseWorkspaceArgs(bad, [], HOME)).toEqual({ action: 'help', error: 'add needs a workspace, then claude or codex, then (to go on with a running session) its id' })
+    }
+    expect(parseWorkspaceArgs('add solo codex -rf', [], HOME)).toEqual({ action: 'help', error: '"-rf" is not a session\'s id' })
+    const ws = { ...practice, checkout: '/Users/u/dev/web-app', purpose: 'career moves' }
+    // the agent that was there goes on, no longer alone; Claude gets peer coding ready, going on with its branch
+    const stays = addedPrompt(ws, 'claude', { isNew: false, isBrought: true })
+    expect(stays.startsWith('This is the workspace "Practice RBAC". What it is for: career moves\n\nThe owner added Codex to this workspace, in its own conversation, brought in from elsewhere: you no longer work here alone, but as one of two peers, Codex in the pane beside you.')).toBe(true)
+    expect(stays).toContain('2. If your work here is on a branch, go on with it. Otherwise start one for this purpose')
+    expect(stays).toContain('3. Make your alignment move for that branch, telling Codex where the work stands, and end your turn with the line the rules\' cue prints.')
+    // the one joining keeps what it knows, and waits for Claude's hand-off
+    const joins = addedPrompt(ws, 'codex', { isNew: true, isBrought: true })
+    expect(joins).toContain('The owner moved this conversation into the workspace: everything above stays yours. You join Claude, who has worked here alone until now')
+    expect(joins).toContain('Claude is getting peer coding ready now, under the peer-coding rules.')
+    expect(joins.endsWith('When Claude\'s hand-off comes, align with it, and add what you know from your own work above that it does not say.')).toBe(true)
+    // a new Claude joining a Codex: it asks Codex where its work stands
+    const claude = addedPrompt(ws, 'claude', { isNew: true, isBrought: false })
+    expect(claude).toContain('You join Codex, who has worked here alone until now')
+    expect(claude).toContain('asking Codex where its work stands')
+    expect(claude).not.toContain('moved this conversation')
+    // the branch the owner chose, said as it is
+    expect(addedPrompt({ ...ws, branch: 'feat/x', dir: '/Users/u/dev/web-app-worktrees/feat-x' }, 'claude', { isNew: false, isBrought: false })).toContain('2. Go on with the branch the owner chose, feat/x')
+  })
+
+  test('/workspace add: a workspace of one gets the other agent, new; it closes between turns and opens again with both, the relay on', async ($, on) => {
+    const { files } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    // Claude alone, running WEB CONSOLE's conversation in its pane; a Codex conversation kept from long before
+    const solo = { ...practice, env: '', only: 'claude', purpose: 'roles', checkout: '/Users/u/dev/web-app', threads: { claude: { id: 'session-101', dir: '/Users/u/dev/web-app' }, codex: { id: 'old-1', dir: '/a' } } }
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [solo, { ...practice, id: 'pair', name: 'Pair' }] }))
+    world.tmuxPanes = `ws-practice-rbac\tpeers\t/dev/ttys004\t%1\tclaude\t${NOW}\n`
+    world.tmuxOwner = String(NOW)
+    world.leftover = '/dev/ttys004\t9004\tclaude\t"/bin/sh -c x"\n'
+    await $.session.start(START)
+    const run = async (args: string) => (await $.command.run({ ...SESSIONS, command: 'workspace', args })).text
+    expect(await run('add Pair codex')).toBe('Not added: Pair runs Claude and Codex already.')
+    expect(await run('add Practice RBAC claude')).toBe('Not added: Practice RBAC runs Claude already: what it can take is Codex.')
+    // Claude mid-turn: nothing closed, nothing changed
+    expect(await run('add Practice RBAC codex')).toBe('Not added: Practice RBAC closes first, to start again with both. Not closed: Claude is working: close the workspace once its turn is done.')
+    expect([world.stopped, world.killed, JSON.parse(files.get(WORKSPACES)!).workspaces[0]]).toEqual([[], [], solo])
+    // between turns: closed (Claude, that very process), then opened again with both
+    files.set('/Users/u/.claude/sessions/101.json', JSON.stringify({ ...JSON.parse(files.get('/Users/u/.claude/sessions/101.json')!), status: 'idle', statusUpdatedAt: NOW - 60_000 }))
+    expect(await run('add Practice RBAC codex')).toBe('Added Codex to Practice RBAC: Codex starts new there, beside Claude; Claude gets peer coding ready, and the relay passes each hand-over. Opened ws-practice-rbac in a new Terminal window.')
+    expect([world.stopped, world.killed]).toEqual([['ttys004 claude 101'], ['=ws-practice-rbac']])
+    const [saved] = JSON.parse(files.get(WORKSPACES)!).workspaces
+    // no longer of one agent; Claude's conversation kept, the old Codex one let go (it starts new); the relay on
+    expect(saved.only).toBeUndefined()
+    expect(Object.keys(saved.threads)).toEqual(['claude'])
+    expect(saved.threads.claude.id).toBe('session-101')
+    expect(saved.relay).toEqual({ mode: 'auto', since: expect.any(Number), streak: 0 })
+    expect(files.get(promptPath(HOME, 'practice-rbac', 'claude'))).toBe(addedPrompt(saved, 'claude', { isNew: false, isBrought: false }))
+    expect(files.get(promptPath(HOME, 'practice-rbac', 'codex'))).toBe(addedPrompt(saved, 'codex', { isNew: true, isBrought: false }))
+    const line = files.get(openScriptPath(HOME, 'practice-rbac'))!
+    expect(line).toBe(`${openCommand(saved, HOME)}\n`)
+    expect(line).toContain('split-window')
+    expect(line).toContain('--resume session-101')
+    expect(line).not.toContain('old-1')
+  })
+
+  test('Add Codex in a workspace\'s actions: a running Codex terminal, from any folder, goes on there in its own conversation', async ($, on) => {
+    const { files, toasts } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    // Claude alone, not running now; the Codex terminal holding HELD (ttys000) assigned to it, not brought in
+    const solo = { ...practice, env: '', only: 'claude', purpose: 'roles', dir: '/Users/u/dev/api', checkout: '/Users/u/dev/api', threads: { claude: { id: 'session-900', dir: '/Users/u/dev/api' } }, members: [`codex:${HELD}`] }
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [solo, { ...practice, id: 'pair', name: 'Pair' }] }))
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    await reveal(ui, 'ws:pair')
+    expect(await ui.find({ key: 'add pair' })).toBeUndefined()
+    await reveal(ui, 'ws:practice-rbac')
+    expect((await ui.find({ key: 'add practice-rbac' }))?.props.label).toBe('Add Codex (a)')
+    await ui.press({ key: 'add practice-rbac' })
+    // new, or a Codex of its account: the one holding its conversation offered; the uncertain one shown, not offered;
+    // the other account's not at all
+    expect(await ui.find({ key: 'add-new practice-rbac' })).toBeDefined()
+    expect((await ui.find({ key: `add practice-rbac codex:${HELD}` }))?.props.label).toBe('Codex · Execute research')
+    const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')
+    expect(texts).toContain('Codex · the terminal in ttys045 · not offered: which conversation it runs is not certain')
+    expect(await ui.find({ key: `add practice-rbac codex:${RESUMED}` })).toBeUndefined()
+    await ui.press({ key: 'add-back practice-rbac' })
+    expect(await ui.find({ key: 'add-new practice-rbac' })).toBeUndefined()
+    await ui.press({ key: 'add practice-rbac' })
+    await ui.press({ key: `add practice-rbac codex:${HELD}` })
+    expect(toasts.at(-1)).toBe('Added Codex to Practice RBAC: Codex · Execute research goes on there in its own conversation, beside Claude; Claude gets peer coding ready, and the relay passes each hand-over. Opened ws-practice-rbac in a new Terminal window.')
+    // closed where it ran (that very process), let go of by every Codex, resumed with the workspace
+    expect(world.stopped).toEqual(['ttys000 codex|node 201'])
+    expect(world.heldAsked).toEqual([`${HELD} 20`, `${HELD} 1`])
+    const [saved] = JSON.parse(files.get(WORKSPACES)!).workspaces
+    expect([saved.only, saved.members, saved.threads.claude.id, saved.threads.codex.id, saved.threads.codex.dir]).toEqual([undefined, undefined, 'session-900', HELD, '/Users/u/dev/web-app'])
+    expect(files.get(promptPath(HOME, 'practice-rbac', 'claude'))).toBe(addedPrompt(saved, 'claude', { isNew: false, isBrought: true }))
+    expect(files.get(promptPath(HOME, 'practice-rbac', 'codex'))).toBe(addedPrompt(saved, 'codex', { isNew: true, isBrought: true }))
+    expect(files.get(openScriptPath(HOME, 'practice-rbac'))).toContain(`-- ${HELD}`)
+    await ui.unmount()
+  })
+
+  test('Add is left undone, the workspace opened again as it was, when the session cannot go on there', async ($, on) => {
+    const { files } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    const solo = { ...practice, env: '', only: 'claude', purpose: 'roles', checkout: '/Users/u/dev/web-app', threads: { claude: { id: 'session-101', dir: '/Users/u/dev/web-app' } } }
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [solo] }))
+    world.tmuxPanes = `ws-practice-rbac\tpeers\t/dev/ttys004\t%1\tclaude\t${NOW}\n`
+    world.tmuxOwner = String(NOW)
+    world.leftover = '/dev/ttys004\t9004\tclaude\t"/bin/sh -c x"\n'
+    files.set('/Users/u/.claude/sessions/101.json', JSON.stringify({ ...JSON.parse(files.get('/Users/u/.claude/sessions/101.json')!), status: 'idle', statusUpdatedAt: NOW - 60_000 }))
+    await $.session.start(START)
+    const run = async (args: string) => (await $.command.run({ ...SESSIONS, command: 'workspace', args })).text
+    // a session of the other agent, or one at work, is refused before anything closes
+    expect(await run('add Practice RBAC codex session-104')).toMatch(/^Not added: that Codex terminal cannot be brought in: it has ended, runs in the background or in a workspace already, or is this session\.$/)
+    world.codexTask = '"type":"task_started"\n'
+    expect(await run(`add Practice RBAC codex ${HELD}`)).toBe('Not added: Codex · Execute research is working: bring it in once its turn is done.')
+    expect([world.stopped, world.killed]).toEqual([[], []])
+    // closed in its terminal, but another Codex still holds its conversation: not resumed; the workspace back as it was
+    world.codexTask = '"type":"task_complete"\n'
+    world.holders[HELD] = 304
+    expect(await run(`add Practice RBAC codex ${HELD}`)).toBe('Not added: Codex · Execute research closed in ttys000, but another Codex (process 304) has its conversation open still, so it was not resumed here. Practice RBAC was opened again as it was. Opened ws-practice-rbac in a new Terminal window.')
+    expect(world.stopped).toEqual(['ttys004 claude 101', 'ttys000 codex|node 201'])
+    expect(JSON.parse(files.get(WORKSPACES)!).workspaces[0]).toEqual({ ...solo, threads: { claude: { ...solo.threads.claude, since: expect.any(Number) } } })
+    expect(files.get(openScriptPath(HOME, 'practice-rbac'))).not.toContain('split-window')
   })
 })
 
