@@ -385,6 +385,7 @@ function machine(argv: readonly string[], env: unknown): Run {
         // the command line makes the session, marked with its owner
         const made = /new-session -d -s '([^']+)'[\s\S]*@live-sessions-workspace '(\d+)'/.exec(argv[2])
         if (made !== null && !world.tmuxPanes.includes(`${made[1]}\t`)) world.started.set(made[1]!, made[2]!)
+        if (made !== null) world.onOpen()
         return ok('')
       }
       if (argv[2] === MOVE_SCRIPT) return world.move === 0 ? ok('typed') : { exitCode: Number(world.move), stdout: '', stderr: '' }
@@ -3033,6 +3034,14 @@ describe('bringing running sessions into a workspace', () => {
     expect(withCodex).toContain('2. If Codex\'s work is on a branch, go on with it (ask Codex in your alignment brief if the repository does not show which). Otherwise start a branch for this purpose')
     expect(withCodex).toContain('3. Make your alignment move for that branch, asking Codex where its work stands, and end your turn')
     expect(setupPrompt({ ...ws, threads: undefined })).toContain('2. Start a branch for this purpose')
+    // in a folder in no repository, a new Claude with no work of its own asks Codex which repository first
+    const outside = { ...ws, checkout: undefined, dir: '/Users/u/dev' }
+    const first = '1. The workspace\'s folder, /Users/u/dev, is in no git repository, and the work under way is Codex\'s: find out from Codex first which repository and branch it is in. Make your alignment move asking it, and end your turn with the line the rules\' cue prints; set nothing up before it answers.'
+    expect(setupPrompt({ ...outside, threads: { codex: { id: 'b', dir: '/y' } } })).toContain(first)
+    expect(addedPrompt(outside, 'claude', { isNew: true, isBrought: false })).toContain(first)
+    // one with work of its own finds it in that work
+    expect(addedPrompt(outside, 'claude', { isNew: true, isBrought: true })).toContain('1. The workspace\'s folder, /Users/u/dev, is in no git repository: work in the repository the purpose concerns (the one your work above is in, if any).')
+    expect(setupPrompt({ ...outside, threads: undefined })).not.toContain('the work under way is Codex\'s')
     expect(setupPrompt({ ...ws, threads: undefined })).toContain('You are Claude, one of two peers here; Codex runs in the pane beside you. The owner turned on')
   })
 
@@ -3210,6 +3219,108 @@ describe('bringing running sessions into a workspace', () => {
     world.openFails = false
     expect(await run('open Practice RBAC')).toBe('Not opened: its agents go on with their own conversations, and Claude\'s runs in ttys004. Close it there first.')
     void toasts
+  })
+
+  test('this session brought in: inside tmux the session made waits for it too; its start not readable, nothing opens or closes; a /clear meanwhile, said', async ($, on) => {
+    const { files, runs } = engine(on, machine, { termProgram: 'tmux', selfId: 'session-101' })
+    const registry = '/Users/u/.claude/sessions/101.json'
+    const idle = JSON.stringify({ ...JSON.parse(files.get(registry)!), status: 'idle', statusUpdatedAt: NOW - 60_000 })
+    files.set(registry, idle)
+    await $.session.start(START)
+    const run = async (args: string) => (await $.command.run({ ...SESSIONS, command: 'workspace', args })).text
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, env: '', only: 'codex' }] }))
+    expect(await run('add Practice RBAC claude session-101')).toBe('Added Claude to Practice RBAC: Claude · WEB CONSOLE (this session) goes on there in its own conversation, beside Codex. Switched to ws-practice-rbac.')
+    const made = runs.find(r => r[0] === '/bin/sh' && r[2]?.startsWith('tmux has-session'))?.[2] ?? ''
+    expect(made).toContain('/bin/ps -o lstart= -p 101 ')
+    expect(world.stopped).toEqual(['ttys004 claude 101'])
+    // its start cannot be read: not opened (it runs that conversation), not closed
+    world.exited.clear()
+    world.stopped = []
+    world.startFails = true
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, env: '', only: 'codex' }] }))
+    expect(await run('add Practice RBAC claude session-101')).toBe('Added Claude to Practice RBAC, but it was not opened: Not opened: its agents go on with their own conversations, and Claude\'s runs in ttys004. Close it there first. Close this session (/exit), then open the workspace: its Claude goes on with this conversation.')
+    expect(world.stopped).toEqual([])
+    // a /clear as the workspace opens: this session runs another conversation now; not closed, and said so
+    world.startFails = false
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, env: '', only: 'codex' }] }))
+    world.onOpen = () => files.set(registry, JSON.stringify({ ...JSON.parse(idle), sessionId: 'session-new' }))
+    expect(await run('add Practice RBAC claude session-101')).toMatch(/^Added Claude to Practice RBAC: .* Switched to ws-practice-rbac\. This session was not closed: it no longer shows as running that conversation \(a \/clear or \/resume there\); the workspace's Claude goes on with it once no session runs it\.$/)
+    expect(world.stopped).toEqual([])
+  })
+
+  test('this session brought in, and the workspace cannot be saved: never told to resume its conversation elsewhere', async ($, on) => {
+    const { files } = engine(on, machine, { termProgram: 'Apple_Terminal', selfId: 'session-101' })
+    files.set('/Users/u/.claude/sessions/101.json', JSON.stringify({ ...JSON.parse(files.get('/Users/u/.claude/sessions/101.json')!), status: 'idle', statusUpdatedAt: NOW - 60_000 }))
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, env: '', only: 'codex' }] }))
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    await reveal(ui, 'item:claude-101')
+    await ui.press({ key: 'bring claude-101' })
+    await ui.input({ key: 'form:name', text: 'Console', kind: 'change' })
+    // the list goes bad once read (another writer)
+    world.spoilsAfterRead = WORKSPACES
+    await ui.press({ key: 'form:create' })
+    const said = (await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')
+    expect(said).toMatch(/Not done: its list cannot be read.*; this session was not closed\./)
+    expect(said).not.toContain('claude --resume session-101')
+    expect(world.stopped).toEqual([])
+    await ui.unmount()
+  })
+
+  test('the brief by default is the chats that came: one left where it was gets none; a workspace of one agent gets none', async ($, on) => {
+    const { files } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    const create = async (name: string, only?: 'claude') => {
+      await ui.press({ key: 'workspace:new' })
+      if (only !== undefined) await ui.select({ key: 'form:agents', value: only })
+      await ui.press({ key: only === undefined ? `form:bring codex:${HELD}` : 'form:bring claude:session-101' })
+      await ui.input({ key: 'form:name', text: name, kind: 'change' })
+      await ui.press({ key: 'form:create' })
+      return JSON.parse(files.get(WORKSPACES)!).workspaces.at(-1)
+    }
+    // the Codex chosen closes, but another Codex holds its conversation still: it starts new, and nobody is told to go
+    // on with work that did not come
+    world.holders[HELD] = 304
+    const pair = await create('Pair')
+    expect([pair.threads, pair.purpose, pair.relay]).toEqual([undefined, undefined, undefined])
+    expect(files.has(promptPath(HOME, 'pair', 'claude'))).toBe(false)
+    // Claude alone, its chat brought in, nothing said: no brief (it goes on in its conversation)
+    files.set('/Users/u/.claude/sessions/101.json', JSON.stringify({ ...JSON.parse(files.get('/Users/u/.claude/sessions/101.json')!), status: 'idle', statusUpdatedAt: NOW - 60_000 }))
+    const solo = await create('Solo', 'claude')
+    expect([solo.only, solo.threads?.claude?.id, solo.purpose]).toEqual(['claude', 'session-101', undefined])
+    expect(files.has(promptPath(HOME, 'solo', 'claude'))).toBe(false)
+    await ui.unmount()
+  })
+
+  test('with a chat chosen: a worktree typed is the folder as it is, the branch picked before not taken; chats of two environments said at once', async ($, on) => {
+    const { files } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    files.set('/Users/u/.claude/sessions/101.json', JSON.stringify({ ...JSON.parse(files.get('/Users/u/.claude/sessions/101.json')!), status: 'idle', statusUpdatedAt: NOW - 60_000 }))
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    await ui.press({ key: 'workspace:new' })
+    // fix/build's worktree typed: placed, and its branch chosen to go on with
+    await ui.input({ key: 'form:project', text: '~/dev/build', kind: 'change' })
+    expect((await ui.find({ key: 'form:branch' }))?.props.value).toBe('/Users/u/dev/build')
+    // a chat chosen: no branch asked or taken; the folder as typed
+    await ui.press({ key: 'form:bring claude:session-101' })
+    expect((await ui.find({ key: 'form:project' }))?.props.value).toBe('~/dev/build')
+    expect(await ui.find({ key: 'form:branch' })).toBeUndefined()
+    await ui.input({ key: 'form:name', text: 'Build', kind: 'change' })
+    await ui.press({ key: 'form:create' })
+    const [saved] = JSON.parse(files.get(WORKSPACES)!).workspaces
+    expect([saved.dir, saved.branch, saved.threads?.claude?.id]).toEqual(['/Users/u/dev/build', undefined, 'session-101'])
+    await ui.press({ key: 'workspace:new' })
+    // chats of one environment: nothing said; a Claude chat of another (WORKER, work) with the Codex one: said now
+    const texts = async () => (await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')
+    await ui.press({ key: `form:bring codex:${HELD}` })
+    expect(await texts()).not.toContain('a workspace runs under one')
+    await ui.press({ key: 'form:bring claude:session-104' })
+    expect(await texts()).toMatch(/(Claude · WORKER runs under the work environment and Codex · Execute research under the default one|Codex · Execute research runs under the default environment and Claude · WORKER under the work one): a workspace runs under one, so choose chats of one environment/)
+    await ui.unmount()
   })
 
   test('the only Codex terminal of its account is brought in once Codex\'s own records show no other conversation since it started', async ($, on) => {
