@@ -211,7 +211,7 @@ export const STOP_SCRIPT = [
  * Whether any Codex process (a terminal, a shared background server, the
  * desktop app's) holds the rollout of the conversation "$1" open, asked once a
  * second for up to "$2" seconds (0: once) until none does. Prints `free`, or
- * `held <pid>` when one still holds it.
+ * `held <pid> [<pid>...]`: every process that still holds it.
  */
 export const HOLDERS_SCRIPT = [
   'id=$1; end=$(( $(/bin/date +%s) + $2 ))',

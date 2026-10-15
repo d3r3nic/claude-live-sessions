@@ -3028,7 +3028,7 @@ describe('bringing running sessions into a workspace', () => {
     // Codex with no sandbox needs no folder added
     // Codex once no Codex holds its conversation open (asked once; else waited for, saying so, PANE_LETS_GO_S at most)
     expect(line).toContain(nested(`; h=$(/bin/sh -c "$hs" sh ${RESUMED_A} 0); if [ "$h" != free ]; then echo '${CODEX_WAIT_LINE}'; h=$(/bin/sh -c "$hs" sh ${RESUMED_A} ${PANE_LETS_GO_S}); fi; if [ "$h" = free ]; then env `))
-    expect(line).toContain(nested(` codex resume -c check_for_update_on_startup=false --no-daemon --dangerously-bypass-approvals-and-sandbox -C '/Users/u/dev/web-app' -- ${RESUMED_A} \${p:+"$p"}; else echo "This conversation is still open in another Codex (process \${h#held }): close it there, then close this workspace and open it again."; fi; exec`))
+    expect(line).toContain(nested(` codex resume -c check_for_update_on_startup=false --no-daemon --dangerously-bypass-approvals-and-sandbox -C '/Users/u/dev/web-app' -- ${RESUMED_A} \${p:+"$p"}; else echo "This conversation is still open in another Codex (its process: \${h#held }): close it there, then close this workspace and open it again."; fi; exec`))
     expect(line).toContain(nested(`hs=${shellQuote(HOLDERS_SCRIPT)}; `))
     expect(PANE_LETS_GO_S).toBe(180)
     expect(line).not.toMatch(/--sandbox|--ask-for-approval|--permission-mode/)

@@ -207,7 +207,7 @@ function paneScript(tool: 'claude' | 'codex', ws: Pick<Workspace, 'id' | 'env' |
         : `hs=${shellWord(HOLDERS_SCRIPT)}; h=$(/bin/sh -c "$hs" sh ${thread.id} 0); ` +
           `if [ "$h" != free ]; then echo ${shellWord(CODEX_WAIT_LINE)}; h=$(/bin/sh -c "$hs" sh ${thread.id} ${PANE_LETS_GO_S}); fi; ` +
           `if [ "$h" = free ]; then ${start} resume ${UPDATE_OFF} ${NO_DAEMON}${flags} -C ${shellWord(thread.dir)} -- ${thread.id} \${p:+"$p"}; ` +
-          `else echo "This conversation is still open in another Codex (process \${h#held }): close it there, then close this workspace and open it again."; fi`
+          `else echo "This conversation is still open in another Codex (its process: \${h#held }): close it there, then close this workspace and open it again."; fi`
   const run = `p=$(cat ${prompt} 2>/dev/null) && rm -f ${prompt}; ${agent}`
   return `/bin/sh -c ${shellWord(`${run}; exec "$SHELL" -l`)}`
 }
