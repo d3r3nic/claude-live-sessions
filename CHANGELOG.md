@@ -2,6 +2,9 @@
 
 What each version changed, newest first. Each links its pull request, which holds the details, the checks and the reviews. After updating, run `/reload-plugins` in your sessions.
 
+## 0.32.2 — 2026-10-14 ([#47](https://github.com/d3r3nic/claude-live-sessions/pull/47))
+- **Hand-offs to a resumed Codex no longer held back by what Codex wrote:** the relay waits until Codex is at its prompt, and took any "sign in" or "import" (any case, "important" too) on Codex's screen for one of its start-up questions. A resumed Codex shows its last message, so one that mentioned signing in held every hand-off back (seen: a workspace stalled for a day, Claude waiting for Codex and Codex at its prompt). It now looks for Codex's questions in Codex's own words, at the bottom of its screen only, and for Codex at work by its status line's shape anywhere on it (details, tips and queued follow-ups go under that line, far from the bottom). Seen on this Mac: two workspaces held back this way.
+
 ## 0.32.1 — 2026-10-14 ([#45](https://github.com/d3r3nic/claude-live-sessions/pull/45))
 - **Agents' chats open in your light theme again:** a workspace's window, and a background session's, open in Terminal's default profile (Novel, light, on this Mac), no longer in the profile of the tab you open them from (since 0.28.1 a dark `/sessions` or ops tab made them dark). A workspace's tmux panes take that profile's text and background colours, so they look the same in any window, and Codex starting there colours its input line for them. A workspace running already takes them the next time it is opened, from /sessions or the ops screen (colours that cannot be read take away those set before, so its panes follow the window showing them); a Codex already running keeps its colours until it is stopped and started again (`■` then `►`). The ops screen still opens in the profile of the tab you open it from.
 

@@ -62,7 +62,7 @@ import {
 } from '../hooks/collect'
 import type { CodexProc, ThreadRow } from '../hooks/collect'
 import type { ClaudeSession, CodexSession, Snapshot, Workspace } from '../types'
-import { afterOwner, afterStep, claudeKeep, screenReady, COMPACT_FROM, cueOf, cutBytes, eventOf, EVENT_SCRIPT, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_MAX_AGE_MS, TURN_SCRIPT, tokensSaid } from '../hooks/relay'
+import { afterOwner, afterStep, claudeKeep, CODEX_AT_WORK, CODEX_BOTTOM, CODEX_DIALOG, screenReady, COMPACT_FROM, cueOf, cutBytes, eventOf, EVENT_SCRIPT, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_MAX_AGE_MS, TURN_SCRIPT, tokensSaid } from '../hooks/relay'
 import type { Side } from '../hooks/relay'
 import { branchOf, checkDue, checkFrom, driftRequest, isDueAfterCompaction, parseVerdict, recordFolderOf, RECORDS_SCRIPT } from '../hooks/drift'
 import { accountOfFile, applyScan, claudeCost, claudeLimits, clockSaid, codexUnits, currentLimits, EMPTY_USAGE, limitSaid, markKey, mergeLimits, offsetOf, OFFSETS_SCRIPT, parseContexts, priceOf, rankUsage, scanInput, sharedLimitsFrom, usageFrom, USAGE_FILES_SCRIPT, USAGE_KEEP_MS, wholeFiles } from '../hooks/usage'
@@ -3150,6 +3150,47 @@ describe('bringing running sessions into a workspace', () => {
     // a narrow pane wraps the question: read as one
     expect(screenReady('claude', '  2. Resume full\n     session as-is\n')).toBe(false)
     expect(screenReady('codex', '› Ask Codex to do anything\n  GPT-6 · ~/x\n  ? for shortcuts      ⚠ 1 warning\n\n\n')).toBe(true)
+    // what Codex wrote above its prompt is its own: words of its start-up questions there never hold a hand-off back
+    // (a resumed Codex shows its last message: one saying "sign in" held a workspace's hand-off back for a day)
+    const wrote = [
+      '• The account is ready. On first sign-in, choose your own password; you can sign in with the temporary one.',
+      '  Important: imports from the old service are done. Import settings from the old config are not needed.',
+      '  It said Working (6m 33s • esc to interrupt) while it ran, and is done.',
+      '  Workspace access is separate from sign in.', '', '', '', '', '', '', '',
+      '─ Worked for 2m 10s ─', '',
+      '› Ask Codex to do anything', '',
+      '  GPT-6-Astra xhigh · ~/dev/web-app · Review the docs',
+      '  ? for shortcuts                       ⚠ 1 warning · f2 to vi',
+    ].join('\n')
+    expect(screenReady('codex', wrote)).toBe(true)
+    // its own questions and its work, at the bottom, still do
+    for (const bottom of ['• Working (12s • esc to interrupt)', '  Trust this folder? Codex can read, edit, and run files here', '  › 1. Trust and continue', '  Import skills from claude-code', '  Sign in with ChatGPT to use Codex as part of your paid plan']) {
+      expect(screenReady('codex', `${wrote.split('\n').slice(0, -6).join('\n')}\n${bottom}\n\n› Ask Codex to do anything\n\n  GPT-6 · ~/x\n  ? for shortcuts`)).toBe(false)
+    }
+    expect(CODEX_BOTTOM).toBe(5)
+    // at work, its status line far above the prompt (details, a tip, queued follow-ups and a question under it), as
+    // Codex 0.162.1 lays them out: never ready
+    const footer = '\n\n› Ask Codex to do anything\n\n  GPT-6 · ~/x\n  ? for shortcuts'
+    for (const working of [
+      '• Waiting for background terminal (41s • esc to interrupt)\n  └ npm test -- --run\n  └ Tip: Use /keymap to configure keyboard shortcuts.',
+      '• Working (2m 30s • esc to interrupt)\n\n  ↳ Queued follow-up inputs\n    please also check the docs\n  ? 1 question · ⇧← to answer',
+      'Working (1h 2m 3s • esc to interrupt)\n  └ cargo build\n  └ Tip: …\n  ↳ Queued follow-up inputs\n    one more',
+      'Working (10m 33s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close\n• Queued follow-up inputs\n  ? 1 question\n    ⇧← to answer',
+    ]) {
+      expect(screenReady('codex', `• Done earlier.${'\n'}${working}${footer}`)).toBe(false)
+    }
+    // ...a line saying so in what it wrote is not its status
+    expect(screenReady('codex', `• It showed "Working (2m 30s • esc to interrupt)" before.\n─ Worked for 3m ─${footer}`)).toBe(true)
+    expect(CODEX_AT_WORK.test('  Waiting for background terminal (12s • esc to interrupt)')).toBe(true)
+    // its status line's header is free (its reasoning summary, MCP servers starting as a resumed Codex starts): only
+    // the timer and the end are read
+    for (const header of ['• Checking screenReady() callers', '• Starting MCP servers (1/3): docs, issues', '• `relay.ts` read', '• 3 files left', `• ${'a long reasoning summary '.repeat(6)}`]) {
+      expect(screenReady('codex', `• Done earlier.\n${header} (12s • esc to interrupt)${footer}`)).toBe(false)
+      expect(screenReady('codex', `• Done earlier.\n${header} (1h 02m 03s • esc to interrupt) · 1 background terminal running\n  └ Tip: …\n  ↳ Queued follow-up inputs${footer}`)).toBe(false)
+    }
+    // a dialog in the middle of its screen, over its prompt (its footer still at the bottom): never ready
+    expect(screenReady('codex', `• Done earlier.\n\n        Resume paused goal?\n        › 1. Resume goal\n          2. Leave it paused\n\n\n\n${footer}`)).toBe(false)
+    expect(CODEX_DIALOG.test('Resume paused goal?')).toBe(true)
     for (const asked of ['  Trust this folder?\n  ? for shortcuts', '  Try new model\n  Use existing model\n  ? for shortcuts', '  Import settings from claude-code?\n  ? for shortcuts', '  Sign in with ChatGPT\n', '• Working (5s • esc to interrupt)\n› \n  ? for shortcuts', '› \n  ? for shortcuts\n  more\n  lines\n  below']) {
       expect(screenReady('codex', asked)).toBe(false)
     }

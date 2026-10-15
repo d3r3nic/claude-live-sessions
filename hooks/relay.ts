@@ -153,19 +153,39 @@ export const CLAUDE_IDLE_MS = 3_000
 export const RESUME_QUESTION = /Resume from summary|Resume full session as-is/
 /** Codex at its prompt, as its pane shows it: the footer under its input line. */
 export const CODEX_AT_PROMPT = /\? for shortcuts/
-/** What Codex may show at its start instead of its prompt (trust, a model to switch to, another agent's settings to import, sign-in), or while it works. */
-export const CODEX_QUESTION = /Trust this folder|Open restricted|Try new model|Use existing model|Import|Sign in|esc to interrupt/i
+/**
+ * What Codex may show instead of its prompt, in its own words (Codex 0.162.1's: trust, a model to switch to, another
+ * agent's settings to import, sign-in; at work: CODEX_AT_WORK; a dialog in the middle: CODEX_DIALOG); looked for at the bottom of its screen only (CODEX_BOTTOM),
+ * not in what it wrote further up, where a word such as "sign in" or "import" held every hand-off back. (Most of these
+ * screens are drawn full-screen, without the prompt's footer, which already keeps the relay off them.)
+ */
+export const CODEX_QUESTION = /Trust this folder\?|Trust and continue|Open restricted|Try new model|Use existing model|Import (?:enabled plugins|memory files|skills|settings) from|Sign in with ChatGPT/i
+/**
+ * How many of the last lines of Codex's screen (not empty) the question words are looked for in: its footer (two), its
+ * prompt, and the two lines above it (a status, a question's choices, or the end of what it wrote last).
+ */
+export const CODEX_BOTTOM = 5
+/**
+ * Codex at work, by its status line anywhere on its screen (details, tips, queued follow-ups and a pending question go
+ * under it, far from the bottom): a line ending with how long it has been at it and `• esc to interrupt`, in
+ * brackets, then perhaps more of its own after a `·`. What goes before the bracket is free (Codex's reasoning summary,
+ * `Starting MCP servers (1/3): docs, issues`), so only the end is read: `• Working (2m 30s • esc to interrupt)`,
+ * `Waiting for background terminal (12s • esc to interrupt) · 1 background terminal running · /ps to view`.
+ */
+export const CODEX_AT_WORK = /\(\d+[hms](?: \d+[hms]){0,2} • esc to interrupt\)(?: · [^\n]*)?$/m
+/** A dialog Codex shows in the middle of its screen, over its prompt, in its own words: looked for anywhere on it. */
+export const CODEX_DIALOG = /Resume paused goal\?/
 
 /**
  * Whether an agent's pane (`tmux capture-pane -p`) shows it at its prompt with no question of its own: Claude not at its
  * resume question; Codex with its prompt's footer in its last lines and none of what it may ask at its start (nor at
- * work). A narrow pane's wrapped lines are read as one.
+ * work) at the bottom of its screen. A narrow pane's wrapped lines are read as one.
  */
 export function screenReady(tool: Tool, screen: string): boolean {
   const lines = screen.split('\n').map(l => l.trimEnd()).filter(l => l.trim() !== '')
   const all = lines.join(' ').replace(/\s+/g, ' ')
   if (tool === 'claude') return !RESUME_QUESTION.test(all)
-  return CODEX_AT_PROMPT.test(lines.slice(-3).join(' ')) && !CODEX_QUESTION.test(all)
+  return CODEX_AT_PROMPT.test(lines.slice(-3).join(' ')) && !CODEX_AT_WORK.test(lines.join('\n')) && !CODEX_DIALOG.test(all) && !CODEX_QUESTION.test(lines.slice(-CODEX_BOTTOM).join(' ').replace(/\s+/g, ' '))
 }
 
 /**
