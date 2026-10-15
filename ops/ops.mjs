@@ -829,6 +829,10 @@ function open(target, snap) {
   // not running, or what runs under its name is not its own (a session restore's empty shells, which /sessions ends)
   if (tmux('has-session', '-t', `=${name}`).status !== 0) return ask('open', ws)
   if (tmux('show-options', '-t', name, '-qv', w.OWNER_OPTION).stdout.trim() !== String(ws.createdAt)) return ask('open', ws)
+  // its panes in the colours of a window of agents (Terminal's default profile's, which a window opened here takes), or
+  // none when they cannot be read, as /sessions sets them
+  const listed = tmux('list-windows', '-t', `=${name}`, '-F', '#{window_id}').stdout
+  for (const args of w.windowColors(listed, w.paneStyle(c.parseColors(run([OSASCRIPT, '-l', 'JavaScript', '-e', c.DEFAULT_COLORS_SCRIPT]).stdout)))) tmux(...args)
   const pane = Object.values(snap.tmux.panes).find(p => p.session === name && p.window === target.agent)?.pane
   if (pane !== undefined && /^%\d+$/.test(pane)) {
     tmux('select-window', '-t', pane)

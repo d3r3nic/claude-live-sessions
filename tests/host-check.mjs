@@ -1309,6 +1309,8 @@ except ChildProcessError: pass
     t('new-session', '-d', '-s', 'ws-opsx', '-n', 'peers', 'sleep 600')
     t('split-window', '-h', '-t', '=ws-opsx:peers', 'sleep 600')
     t('set-option', '-t', 'ws-opsx', '@live-sessions-workspace', '1')
+    // (a background alone, as versions before 0.32.1 set the opener tab's: a dark one)
+    t('set-window-option', '-t', '=ws-opsx:peers', 'window-style', 'bg=#000000')
     const [left, right] = t('list-panes', '-t', '=ws-opsx:peers', '-F', '#{pane_id}').stdout.trim().split('\n')
     const now = Date.now()
     const snapshot = (fields = {}) => JSON.stringify({ version: c.SHARED_VERSION, snapshot: {
@@ -1337,7 +1339,7 @@ except ChildProcessError: pass
     const asked = join(scratch, 'osascript.log')
     const stub = join(scratch, 'osascript')
     // (its screens: one, the menu bar's 30 points left out; a terminal tab asked about is in 12 points, none in 0)
-    writeFileSync(stub, `#!/bin/sh\nscript=$4\nshift 4\ncase $script in *NSScreen*) case $1 in ttys[0-9]*) size=12;; *) size=0;; esac; echo '{"screens":[{"x":0,"y":30,"width":2560,"height":1410}],"fontSize":'$size'}';; *doScript*) printf 'OPEN %s %s\\n' "$1" "$2" >> '${asked}'; echo opened;; *) printf 'FOCUS %s\\n' "$1" >> '${asked}';; esac\n`)
+    writeFileSync(stub, `#!/bin/sh\nscript=$4\nshift 4\ncase $script in *NSScreen*) case $1 in ttys[0-9]*) size=12;; *) size=0;; esac; echo '{"screens":[{"x":0,"y":30,"width":2560,"height":1410}],"fontSize":'$size'}';; *doScript*) printf 'OPEN %s %s\\n' "$1" "$2" >> '${asked}'; echo opened;; *defaultSettings*) echo '000000 dfdbc3';; *) printf 'FOCUS %s\\n' "$1" >> '${asked}';; esac\n`)
     execFileSync('/bin/chmod', ['+x', stub])
     const env = { ...process.env, LIVE_SESSIONS_SNAPSHOT: snapFile, LIVE_SESSIONS_EVENTS: events, LIVE_SESSIONS_TMUX_SOCKET: socket, LIVE_SESSIONS_OSASCRIPT: stub, HOME: scratch }
     // the workspaces each in full (the detailed view), as these checks read them; the compact view's own follow
@@ -1768,6 +1770,9 @@ except ChildProcessError: pass
         return drawn.slice(drawn.lastIndexOf('LIVE//SESSIONS', close), close + 1)
       }
       const opensAfter = existsSync(askedHere) ? readFileSync(askedHere, 'utf8').trim().split('\n').filter(Boolean) : []
+      // its panes in the colours of Terminal's default profile, which the window opened takes, set before it opened
+      const styled = t('show-window-options', '-t', '=ws-opsx:peers', '-v', 'window-style').stdout.trim()
+      check('ops: a running workspace opened from it takes the colours of a window of agents (Terminal\'s default profile\'s), never a dark background left from before', styled === 'fg=#000000,bg=#dfdbc3', styled)
       const keptView = JSON.parse(readFileSync(join(prefsDir(compactHome), 'ops.json'), 'utf8')).view
       check('ops, compact, live: a click on a tile shows its details and esc closes them; its 📁 opens its window; v shows each in full, kept',
         lastFrame(pressed, pressed.indexOf('<<DETAILS>>')).includes('[>_ open window]') && !lastFrame(pressed, pressed.indexOf('<<CLOSED>>')).includes('[>_ open window]') &&

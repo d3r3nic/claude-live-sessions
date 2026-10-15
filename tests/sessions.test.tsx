@@ -74,6 +74,7 @@ import {
   leanWork,
   assigned,
   checkoutResult,
+  windowColors,
   chatsPurpose,
   ASK_WHERE,
   processStart,
@@ -2129,7 +2130,7 @@ describe('workspaces', () => {
     expect(runs.some(r => r[0] === '/bin/mv')).toBe(false)
   })
 
-  test('a workspace\'s panes take the colours of Terminal\'s default profile (its window\'s), never this tab\'s, before its agents ask; opened again, a running one too', async ($, on) => {
+  test('a workspace\'s panes take the colours of Terminal\'s default profile (its window\'s), never this tab\'s, before its agents ask; opened again, a running one too (or none when not known)', async ($, on) => {
     // this session's tab (WEB CONSOLE, ttys004) is dark (#1e1e1e); Terminal's default profile is Novel (black on beige)
     const { files, runs } = engine(on, machine, { termProgram: 'Apple_Terminal', selfId: 'session-101' })
     world.defaultColors = '000000 dfdbc3\n'
@@ -2142,16 +2143,20 @@ describe('workspaces', () => {
     expect(line.indexOf("\; set-window-option window-style 'fg=#000000,bg=#dfdbc3'")).toBeGreaterThan(line.indexOf('new-session'))
     expect(line.indexOf("\; set-window-option window-style 'fg=#000000,bg=#dfdbc3'")).toBeLessThan(line.indexOf('split-window'))
     expect(line).not.toContain('1e1e1e')
-    // its window opened in no profile of this tab's: Terminal's default one
-    expect(runs.filter(r => r[4] === OPEN_SCRIPT).map(r => (r[6] === undefined ? {} : JSON.parse(r[6])).profile)).toEqual([undefined])
     // running already, opened again: each of its windows takes them
     world.tmuxPanes = `ws-practice-rbac\tpeers\t/dev/ttys050\t%1\tclaude\t${NOW}\n`
     world.tmuxOwner = String(NOW)
     await $.command.run({ ...SESSIONS, command: 'workspace', args: 'open practice-rbac' })
-    expect(runs.filter(r => r[0] === 'tmux' && r[1] === 'set-window-option' && r[4] === 'window-style').map(r => r.slice(1))).toEqual([
+    const styled = () => runs.filter(r => r[0] === 'tmux' && r[1] === 'set-window-option' && r.includes('window-style')).map(r => r.slice(1))
+    expect(styled()).toEqual([
       ['set-window-option', '-t', '@1', 'window-style', 'fg=#000000,bg=#dfdbc3'],
       ['set-window-option', '-t', '@2', 'window-style', 'fg=#000000,bg=#dfdbc3'],
     ])
+    // colours not known (Terminal not answering): those set before taken away, each pane in its window's colours
+    world.defaultColors = ''
+    await $.command.run({ ...SESSIONS, command: 'workspace', args: 'open practice-rbac' })
+    expect(styled().slice(2)).toEqual([['set-window-option', '-u', '-t', '@1', 'window-style'], ['set-window-option', '-u', '-t', '@2', 'window-style']])
+    expect(windowColors('@3\n@4\n\nnot-a-window\n', 'fg=#000000,bg=#dfdbc3')).toEqual([['set-window-option', '-t', '@3', 'window-style', 'fg=#000000,bg=#dfdbc3'], ['set-window-option', '-t', '@4', 'window-style', 'fg=#000000,bg=#dfdbc3']])
     // none known (not colours, or Terminal not running): none set, here or in a running one
     expect(openCommand(practice, HOME)).not.toContain('window-style')
     expect(openCommand(practice, HOME, { colors: { fg: 'red; rm -rf', bg: '#dfdbc3' } })).not.toContain('window-style')

@@ -65,6 +65,7 @@ import {
   WORKTREES_SCRIPT,
   agentPlacement,
   paneStyle,
+  windowColors,
   screensFrom,
   workspacePlacement,
   hideBinding,
@@ -637,11 +638,11 @@ async function refreshNow($: EngineInterface): Promise<void> {
 
 /**
  * The colours of Terminal's default profile, which a window of agents takes (agentPlacement), for its tmux panes
- * (paneStyle): read where this session runs in Terminal (or in tmux, in it or not; the script never starts Terminal).
+ * (paneStyle): read where this session runs in Terminal itself (inside tmux, whose terminal may be another app, none:
+ * its panes then show the colours of the window showing them); the script never starts Terminal.
  */
 async function agentColors($: EngineInterface): Promise<{ fg: string; bg: string } | undefined> {
-  const term = await $.env.get('TERM_PROGRAM')
-  if (term !== 'Apple_Terminal' && term !== 'tmux') return undefined
+  if ((await $.env.get('TERM_PROGRAM')) !== 'Apple_Terminal') return undefined
   const out = await $.process.run(['/usr/bin/osascript', '-l', 'JavaScript', '-e', DEFAULT_COLORS_SCRIPT], { timeoutMs: 5_000 }).catch(() => undefined)
   return parseColors(out?.stdout ?? '')
 }
@@ -780,7 +781,7 @@ async function move($: EngineInterface, scope: string, shown: readonly string[],
  * each of its windows, with its status bar's Hide: hide.sh written, and the
  * click bound unless the person bound that click to something of their own.
  */
-async function prepareSession($: EngineInterface, home: string, name: string, title: string, style?: string) {
+async function prepareSession($: EngineInterface, home: string, name: string, title: string) {
   const tmux = (args: string[]) =>
     $.process.run(['tmux', ...args], { timeoutMs: 10_000 }).catch((error: unknown) => ({ exitCode: -1, stdout: '', stderr: message(error) }))
   const path = hidePath(home)
@@ -792,7 +793,7 @@ async function prepareSession($: EngineInterface, home: string, name: string, ti
   // what tmux.conf runs from the bar's right end, carried on this bar's own
   const right = await tmux(['show-options', '-gv', 'status-right'])
   // (not read: the right end left to tmux.conf, never one that drops what it runs)
-  for (const args of sessionSetup(name, windows, canHide, title, right.exitCode === 0 ? statusJobs(right.stdout.replace(/\n$/, '')) : undefined, style)) await tmux(args)
+  for (const args of sessionSetup(name, windows, canHide, title, right.exitCode === 0 ? statusJobs(right.stdout.replace(/\n$/, '')) : undefined)) await tmux(args)
 }
 
 /**
@@ -1033,9 +1034,12 @@ async function openWorkspace($: EngineInterface, ws: Workspace, at?: { window: s
   // its panes in the colours of Terminal's default profile, which its window takes (paneStyle)
   const colors = await agentColors($)
   if (wasRunning) {
-    // one made before the mouse, the side labels and Hide were set up gets them now, in each of its windows; and the
-    // colours of a window of agents (an agent already running keeps colours it worked out from others until it starts again)
-    await prepareSession($, home, name, ws.name, paneStyle(colors))
+    // one made before the mouse, the side labels and Hide were set up gets them now, in each of its windows
+    await prepareSession($, home, name, ws.name)
+    // and the colours of a window of agents, or none when they are not known (an agent already running keeps colours
+    // it worked out from others until it starts again)
+    const listed = (await tmux(['list-windows', '-t', `=${name}`, '-F', '#{window_id}'])).stdout
+    for (const args of windowColors(listed, paneStyle(colors))) await tmux(args)
     // its agent's pane (a workspace made before panes were marked has a window per agent)
     if (at?.pane !== undefined && /^%\d+$/.test(at.pane)) {
       await tmux(['select-window', '-t', at.pane])

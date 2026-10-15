@@ -254,7 +254,7 @@ export const BORDER_FORMAT =
  * each side's border naming its agent. tmux.conf and other sessions are left
  * as they are.
  */
-export function sessionSetup(name: string, windows: readonly string[], canHide = false, title = '', jobs?: string, style?: string): string[][] {
+export function sessionSetup(name: string, windows: readonly string[], canHide = false, title = '', jobs?: string): string[][] {
   // the workspace's own name (tmux reads `#` in it as a format: doubled), cut to the bar's left end
   const shown = [...title].length > TITLE_MAX ? `${[...title].slice(0, TITLE_MAX - 1).join('')}…` : title
   return [
@@ -268,8 +268,6 @@ export function sessionSetup(name: string, windows: readonly string[], canHide =
       ? [['set-option', '-u', '-t', name, 'status-right'], ['set-option', '-u', '-t', name, 'status-right-length']]
       : [['set-option', '-t', name, 'status-right-length', '60'], ['set-option', '-t', name, 'status-right', `${canHide ? HIDE_LABEL : KEEPS_LABEL}${jobs}`]]),
     ...windows.flatMap(window => [
-      // (its panes' colours: Terminal's default profile's, paneStyle)
-      ...(style === undefined ? [] : [['set-window-option', '-t', window, 'window-style', style]]),
       ['set-window-option', '-t', window, 'pane-border-status', 'top'],
       ['set-window-option', '-t', window, 'pane-border-format', BORDER_FORMAT],
       // one window (its agents side by side): no window list, whose `0:peers*` says nothing
@@ -481,6 +479,17 @@ export function agentPlacement(screen: Screen, fontSize: number): Placement {
 export function paneStyle(colors: { fg: string; bg: string } | undefined): string | undefined {
   const isHex = (c: string) => /^#[0-9a-fA-F]{6}$/.test(c)
   return colors !== undefined && isHex(colors.fg) && isHex(colors.bg) ? `fg=${colors.fg.toLowerCase()},bg=${colors.bg.toLowerCase()}` : undefined
+}
+
+/**
+ * The tmux commands that give a running workspace's windows (`tmux list-windows -F '#{window_id}'` as it printed them)
+ * its panes' colours as it is opened again (from /sessions or the ops screen): paneStyle; or, when they are not known,
+ * none, taking away colours set before (a background alone, as versions before 0.32.1 set the opener tab's), so each
+ * pane shows the colours of the window showing it, never black text on a black background set for another window.
+ */
+export function windowColors(listed: string, style: string | undefined): string[][] {
+  const windows = listed.split('\n').map(id => id.trim()).filter(id => /^@\d+$/.test(id))
+  return windows.map(window => (style === undefined ? ['set-window-option', '-u', '-t', window, 'window-style'] : ['set-window-option', '-t', window, 'window-style', style]))
 }
 
 /**
