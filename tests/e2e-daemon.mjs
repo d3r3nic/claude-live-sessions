@@ -2,10 +2,11 @@
 // Codex terminal started as the person starts one (`codex`, no options), which runs its conversation in Codex's shared
 // background server while that server runs, takes one turn. The plugin's own collection must match it to its
 // conversation through what that server holds open, for certain (`loaded`); closed where it runs (STOP_SCRIPT), the
-// server must let the conversation go (HOLDERS_SCRIPT); resumed in a workspace's pane by the plugin's own command
-// line, it must go on in the same conversation, run it itself (--no-daemon: it holds the rollout) and be matched
-// `held`. The prompts ask only for one fixed line back; the conversation is archived at the end.
-// Needs Codex's shared server for ~/.codex running (any Codex terminal started without options starts it); run from,
+// workspace's pane is made at once by the plugin's own command line, while the server still holds the conversation:
+// its Codex must wait, saying so, until the server lets it go (HOLDERS_SCRIPT), then go on in the same conversation, run
+// it itself (--no-daemon: it holds the rollout) and be matched `held`; never two Codex processes holding it. The prompts ask only for one fixed line back; the conversation is archived at the end.
+// Needs Codex's shared server for ~/.codex running (any Codex terminal started without options starts it), and no other
+// Codex terminal of that server working in the same folder (two in one folder are, rightly, not certain); run from,
 // or point E2E_TRUSTED_DIR at, a folder Codex already trusts:
 //   E2E_TRUSTED_DIR=~/some/trusted/dir node --experimental-strip-types tests/e2e-daemon.mjs
 import { spawnSync } from 'node:child_process'
@@ -88,6 +89,9 @@ const ws = { id: `e2e-daemon-${process.pid}`, name: 'e2e daemon', env: '', dir: 
 const ttyOf = target => tmux('display-message', '-p', '-t', target, '#{pane_tty}').stdout.trim().slice(5)
 let codexId
 
+// (how many Codex processes held the conversation at once, watched from the workspace's making)
+let most = 0
+let watching = false
 try {
   const server = collected().servers.get(CODEX_HOME)?.[0]
   check('Codex\'s shared server for ~/.codex runs (a Codex terminal started without options started it)', server !== undefined)
@@ -117,18 +121,33 @@ try {
   check('the terminal runs its conversation in the shared server, which holds it open', row?.pid !== undefined && sh(b.HOLDERS_SCRIPT, codexId ?? 'none', '1').trim() === `held ${server.pid}`, `${row?.pid} ${sh(b.HOLDERS_SCRIPT, codexId ?? 'none', '1').trim()}`)
   check('the plugin matches it to its conversation through the server, for certain', row?.key === codexId && row?.match === 'loaded' && row?.loadedBy === server.pid && b.isKnownCodex({ codex: rows }, row), `${row?.key} ${row?.match} ${row?.loadedBy}`)
 
-  // closed where it runs; then the server lets the conversation go
+  // closed where it runs: the server still holds the conversation
   const stopped = sh(b.STOP_SCRIPT, codexTty, b.JOB_COMMANDS.codex, String(row?.pid)).trim()
   const at = Date.now()
-  const holder = sh(b.HOLDERS_SCRIPT, codexId ?? 'none', String(b.CODEX_LETS_GO_S)).trim()
-  check('closed where it ran; the shared server lets its conversation go', stopped === 'stopped' && holder === 'free', `${stopped} ${holder} after ${Date.now() - at} ms`)
+  const stillHeld = sh(b.HOLDERS_SCRIPT, codexId ?? 'none', '0').trim()
+  check('closed where it ran; the shared server holds its conversation still', stopped === 'stopped' && stillHeld === `held ${server.pid}`, `${stopped} ${stillHeld}`)
 
-  // resumed in a workspace's pane by the plugin's own command line, with its first prompt there
+  // the workspace made at once by the plugin's own command line, with its first prompt there: its Codex waits, saying
+  // so, while the server holds the conversation, and goes on once it is let go; never two Codex processes holding it
   mkdirSync(dirname(w.promptPath(HOME, ws.id, 'codex')), { recursive: true })
   writeFileSync(w.promptPath(HOME, ws.id, 'codex'), exactly(AGAIN))
   const threads = { codex: { id: codexId, dir: b.codexDir(sh(b.CODEX_FOLDER_SCRIPT, rollout ?? '/none')) ?? TRUSTED } }
   spawnSync('/bin/sh', ['-c', w.openCommand({ ...ws, threads }, HOME, { socket, attach: false })], { encoding: 'utf8' })
-  const again = await waitFor('Codex\'s turn in the workspace', 180_000, () => {
+  const paneId = () => Object.values(w.parsePanes(tmux('list-panes', '-a', '-F', w.PANES_FORMAT).stdout)).find(p => p.session === w.tmuxName(ws))?.pane ?? ''
+  const holdersOf = () => {
+    const pids = spawnSync('/usr/bin/pgrep', ['-x', 'codex'], { encoding: 'utf8' }).stdout.trim().split('\n').filter(Boolean).join(',')
+    return pids === '' ? 0 : new Set(c.parseRollouts(spawnSync('/usr/sbin/lsof', ['-n', '-P', '-a', '-p', pids, '-Fpn'], { encoding: 'utf8' }).stdout).entries().filter(([, held]) => held.includes(codexId)).map(([pid]) => pid)).size
+  }
+  watching = true
+  void (async () => {
+    while (watching) {
+      most = Math.max(most, holdersOf())
+      await sleep(500)
+    }
+  })()
+  const waiting = await waitFor('the wait line', 20_000, () => tmux('capture-pane', '-p', '-t', paneId()).stdout.includes(w.CODEX_WAIT_LINE.slice(0, 40)))
+  check('workspace: opened at once, its Codex waiting while the server holds the conversation', waiting === true && Date.now() - at < 30_000, `${Date.now() - at} ms after the close`)
+  const again = await waitFor('Codex\'s turn in the workspace', 240_000, () => {
     const t = turnOf(rollout)
     return t?.state === 'done' && t.cue?.line === AGAIN ? t : undefined
   })
@@ -139,7 +158,11 @@ try {
   const inWorkspace = collected().rows.find(s => s.surface === 'terminal' && s.tty === pane?.[0])
   check('workspace: it runs the conversation itself (--no-daemon), holding it open: matched for certain as held',
     /codex .*resume .*--no-daemon/.test(args) && inWorkspace?.key === codexId && inWorkspace?.match === 'held', `${inWorkspace?.key} ${inWorkspace?.match}`)
+  watching = false
+  await sleep(600)
+  check('never two Codex processes holding the conversation', most === 1, `at most ${most}`)
 } finally {
+  watching = false
   // the agents end with their panes: a hang-up first (as closing them would), then a kill for one that stays
   const ttys = tmux('list-panes', '-a', '-F', '#{pane_tty}').stdout.trim().split('\n').filter(t => t.startsWith('/dev/'))
   const agents = ttys.flatMap(t => spawnSync('/bin/ps', ['-t', t.slice(5), '-o', 'pid=,comm='], { encoding: 'utf8' }).stdout.trim().split('\n'))
