@@ -254,7 +254,7 @@ export const BORDER_FORMAT =
  * each side's border naming its agent. tmux.conf and other sessions are left
  * as they are.
  */
-export function sessionSetup(name: string, windows: readonly string[], canHide = false, title = '', jobs?: string): string[][] {
+export function sessionSetup(name: string, windows: readonly string[], canHide = false, title = '', jobs?: string, style?: string): string[][] {
   // the workspace's own name (tmux reads `#` in it as a format: doubled), cut to the bar's left end
   const shown = [...title].length > TITLE_MAX ? `${[...title].slice(0, TITLE_MAX - 1).join('')}…` : title
   return [
@@ -268,6 +268,8 @@ export function sessionSetup(name: string, windows: readonly string[], canHide =
       ? [['set-option', '-u', '-t', name, 'status-right'], ['set-option', '-u', '-t', name, 'status-right-length']]
       : [['set-option', '-t', name, 'status-right-length', '60'], ['set-option', '-t', name, 'status-right', `${canHide ? HIDE_LABEL : KEEPS_LABEL}${jobs}`]]),
     ...windows.flatMap(window => [
+      // (its panes' colours: Terminal's default profile's, paneStyle)
+      ...(style === undefined ? [] : [['set-window-option', '-t', window, 'window-style', style]]),
       ['set-window-option', '-t', window, 'pane-border-status', 'top'],
       ['set-window-option', '-t', window, 'pane-border-format', BORDER_FORMAT],
       // one window (its agents side by side): no window list, whose `0:peers*` says nothing
@@ -391,7 +393,8 @@ export const HIDE_SCRIPT = [
 
 /**
  * Where a window goes, as hide.sh keeps a workspace's: its position and size (points, from the top left) and font
- * size; and, for one being opened, the Terminal profile (settings set) it takes: that of the tab it is opened from.
+ * size; and, for one being opened, the Terminal profile (settings set) it takes (the ops screen: that of the tab it is
+ * opened from; a window of agents takes none, so Terminal's default profile).
  */
 export type Placement = { x: number; y: number; width: number; height: number; fontSize: number; profile?: string }
 
@@ -441,8 +444,8 @@ export function screensFrom(stdout: string): { screens: Screen[]; fontSize: numb
  * A workspace's window, opened from /sessions or the ops screen (agentPlacement): on the screen it was on when last
  * hidden (`kept`), while that is still there, else on the screen in use.
  */
-export function workspacePlacement(seen: { screens: readonly Screen[]; fontSize: number; profile?: string }, kept: Placement | undefined): Placement {
-  return agentPlacement((kept === undefined ? undefined : screenShowing(kept, seen.screens)) ?? seen.screens[0]!, seen.fontSize, seen.profile)
+export function workspacePlacement(seen: { screens: readonly Screen[]; fontSize: number }, kept: Placement | undefined): Placement {
+  return agentPlacement((kept === undefined ? undefined : screenShowing(kept, seen.screens)) ?? seen.screens[0]!, seen.fontSize)
 }
 
 /**
@@ -459,14 +462,25 @@ export const AGENT_WINDOW_SHARE = 0.6
 /**
  * A window of agents this plugin opens (a workspace's, a session opened in the background's): 60% of the screen's free
  * part (what the menu bar and Dock leave) across and down, centred, a little smaller than the font of the window it is
- * opened from (openedFontSize), in that window's profile (its colours, not Terminal's default profile, which may be
- * another; that one when the profile is not known); never a profile's small default window, nor the size and font it
- * had before.
+ * opened from (openedFontSize), in Terminal's default profile (the owner's choice: an agent's chat in the profile new
+ * windows get, light here, never that of the tab it is opened from); never a profile's small default window, nor the
+ * size and font it had before.
  */
-export function agentPlacement(screen: Screen, fontSize: number, profile = ''): Placement {
+export function agentPlacement(screen: Screen, fontSize: number): Placement {
   const width = Math.round(screen.width * AGENT_WINDOW_SHARE)
   const height = Math.round(screen.height * AGENT_WINDOW_SHARE)
-  return { x: Math.round(screen.x + (screen.width - width) / 2), y: Math.round(screen.y + (screen.height - height) / 2), width, height, fontSize: openedFontSize(fontSize), ...(profile === '' ? {} : { profile }) }
+  return { x: Math.round(screen.x + (screen.width - width) / 2), y: Math.round(screen.y + (screen.height - height) / 2), width, height, fontSize: openedFontSize(fontSize) }
+}
+
+/**
+ * The colours of a workspace's tmux panes, as tmux's window-style takes them (`fg=#000000,bg=#dfdbc3`): those of
+ * Terminal's default profile, its windows' own, so its panes look the same in any window (one switched to from inside
+ * tmux, one opened before), and an agent asking the terminal for them (OSC 10 and 11: Codex blends its input line and
+ * the owner's messages from them, once, at its start) is told them; undefined unless both are `#rrggbb`.
+ */
+export function paneStyle(colors: { fg: string; bg: string } | undefined): string | undefined {
+  const isHex = (c: string) => /^#[0-9a-fA-F]{6}$/.test(c)
+  return colors !== undefined && isHex(colors.fg) && isHex(colors.bg) ? `fg=${colors.fg.toLowerCase()},bg=${colors.bg.toLowerCase()}` : undefined
 }
 
 /**
@@ -539,12 +553,12 @@ export const OWNER_OPTION = '@live-sessions-workspace'
  * each pane marked with its agent and leaving a shell when its agent exits),
  * then attaches. Closing that
  * terminal detaches; the agents keep running in tmux. Its window's own
- * background is `background` (`#rrggbb`: that of the tab it is opened from,
- * whose profile the window takes), set before its agents ask for it: tmux
- * answers an agent's question for the terminal's background (OSC 11) with it,
- * and Codex blends its input line and the owner's messages from it, once, at
- * its start; without it tmux answers with a colour left from another window,
- * or none. `waitFor`: the process of the Claude session whose conversation
+ * colours are `colors` (paneStyle: Terminal's default profile's, which the
+ * window takes), set before its agents ask for them: tmux answers an agent's
+ * question for the terminal's colours (OSC 10, 11) with them, and Codex blends
+ * its input line and the owner's messages from them, once, at its start;
+ * without them tmux answers with a colour left from another window, or none.
+ * `waitFor`: the process of the Claude session whose conversation
  * its Claude resumes (the session that opened it, bringing itself in), which
  * it waits to see closed first (or running another conversation). `socket` (a private server that reads no
  * tmux.conf) and `bins` are for tests; `attach: false` only creates.
@@ -552,7 +566,7 @@ export const OWNER_OPTION = '@live-sessions-workspace'
 export function openCommand(
   ws: Pick<Workspace, 'id' | 'env' | 'dir' | 'createdAt' | 'checkout' | 'threads' | 'only'> & { name?: string },
   home: string,
-  o: { socket?: string; bins?: { claude: string; codex: string }; attach?: boolean; background?: string; waitFor?: WaitFor } = {},
+  o: { socket?: string; bins?: { claude: string; codex: string }; attach?: boolean; colors?: { fg: string; bg: string }; waitFor?: WaitFor } = {},
 ): string {
   // a test's private server reads no tmux.conf: the person's plugins (a session restore) never run in it
   const tmux = o.socket === undefined ? 'tmux' : `tmux -L ${shellWord(o.socket)} -f /dev/null`
@@ -562,11 +576,12 @@ export function openCommand(
   const dir = shellWord(ws.dir.replace(/#/g, '##'))
   // each command in the sequence acts on the pane the one before made
   const [first, second] = agentsOf(ws)
+  const style = paneStyle(o.colors)
   const create = [
     `${tmux} has-session -t ${shellWord(`=${name}`)} 2>/dev/null ||`,
     `${tmux} new-session -d -s ${shellWord(name)} -c ${dir} -n peers ${pane(first!)}`,
     // (its window, before the second agent is started, and long before the first has started enough to ask)
-    ...(o.background !== undefined && /^#[0-9a-fA-F]{6}$/.test(o.background) ? [`\\; set-window-option window-style ${shellWord(`bg=${o.background.toLowerCase()}`)}`] : []),
+    ...(style === undefined ? [] : [`\\; set-window-option window-style ${shellWord(style)}`]),
     `\\; set-option -p ${AGENT_OPTION} ${first}`,
     ...(second === undefined ? [] : [`\\; split-window -h -c ${dir} ${pane(second)}`, `\\; set-option -p ${AGENT_OPTION} ${second}`]),
     // set-option takes no `=` exact-match target; the session was just made under this exact name

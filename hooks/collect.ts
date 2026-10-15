@@ -86,12 +86,24 @@ export const ENV_SCRIPT = [
 ].join('\n')
 
 /**
+ * A Terminal.app colour (calibrated RGB, as it reports one) as sRGB hex (`dfdbc3`): the colour a 24-bit one paints.
+ */
+const TERMINAL_HEX = [
+  "ObjC.import('AppKit')",
+  'function hex([r, g, b]) {',
+  '  const c = $.NSColor.colorWithCalibratedRedGreenBlueAlpha(r, g, b, 1).colorUsingColorSpace($.NSColorSpace.sRGBColorSpace)',
+  '  return [c.redComponent, c.greenComponent, c.blueComponent]',
+  "    .map(x => Math.round(Math.min(1, Math.max(0, x)) * 255).toString(16).padStart(2, '0'))",
+  "    .join('')",
+  '}',
+]
+
+/**
  * Asks Terminal.app for the background of the tab on the tty in argv[0], as
- * sRGB hex (`dfdbc3`), or prints nothing. Terminal reports the color in
- * calibrated RGB; converted, it is the color a 24-bit background paints.
+ * sRGB hex (`dfdbc3`), or prints nothing.
  */
 export const BACKGROUND_SCRIPT = [
-  "ObjC.import('AppKit')",
+  ...TERMINAL_HEX,
   'function run(argv) {',
   "  const want = '/dev/' + argv[0]",
   "  const windows = Application('Terminal').windows",
@@ -99,15 +111,31 @@ export const BACKGROUND_SCRIPT = [
   '  for (let w = 0; w < ttys.length; w++) {',
   '    const j = ttys[w].indexOf(want)',
   '    if (j < 0) continue',
-  '    const [r, g, b] = windows[w].tabs[j].backgroundColor()',
-  '    const c = $.NSColor.colorWithCalibratedRedGreenBlueAlpha(r, g, b, 1).colorUsingColorSpace($.NSColorSpace.sRGBColorSpace)',
-  '    return [c.redComponent, c.greenComponent, c.blueComponent]',
-  "      .map(x => Math.round(Math.min(1, Math.max(0, x)) * 255).toString(16).padStart(2, '0'))",
-  "      .join('')",
+  '    return hex(windows[w].tabs[j].backgroundColor())',
   '  }',
   "  return ''",
   '}',
 ].join('\n')
+
+/**
+ * The colours of Terminal.app's default profile (the one a new window takes), as `<text> <background>` in sRGB hex
+ * (`000000 dfdbc3`); nothing while Terminal is not running (it is never started for this).
+ */
+export const DEFAULT_COLORS_SCRIPT = [
+  ...TERMINAL_HEX,
+  'function run() {',
+  "  const terminal = Application('Terminal')",
+  "  if (!terminal.running()) return ''",
+  '  const settings = terminal.defaultSettings()',
+  "  return hex(settings.normalTextColor()) + ' ' + hex(settings.backgroundColor())",
+  '}',
+].join('\n')
+
+/** DEFAULT_COLORS_SCRIPT's answer: the text and background colours (`#000000`, `#dfdbc3`), or undefined. */
+export function parseColors(stdout: string): { fg: string; bg: string } | undefined {
+  const m = /^([0-9a-f]{6}) ([0-9a-f]{6})$/i.exec(stdout.trim())
+  return m === null ? undefined : { fg: `#${m[1]!.toLowerCase()}`, bg: `#${m[2]!.toLowerCase()}` }
+}
 
 /**
  * Brings Terminal.app's tab on the tty in argv[0] to the front (its window

@@ -64,6 +64,7 @@ import {
   WHERE_SCRIPT,
   WORKTREES_SCRIPT,
   agentPlacement,
+  paneStyle,
   screensFrom,
   workspacePlacement,
   hideBinding,
@@ -78,6 +79,8 @@ import {
   ACTIVE_MS,
   AGENT_MS,
   BACKGROUND_SCRIPT,
+  DEFAULT_COLORS_SCRIPT,
+  parseColors,
   ENV_SCRIPT,
   FOCUS_SCRIPT,
   HAS_TAB_SCRIPT,
@@ -632,6 +635,17 @@ async function refreshNow($: EngineInterface): Promise<void> {
   await refresh($, 0)
 }
 
+/**
+ * The colours of Terminal's default profile, which a window of agents takes (agentPlacement), for its tmux panes
+ * (paneStyle): read where this session runs in Terminal (or in tmux, in it or not; the script never starts Terminal).
+ */
+async function agentColors($: EngineInterface): Promise<{ fg: string; bg: string } | undefined> {
+  const term = await $.env.get('TERM_PROGRAM')
+  if (term !== 'Apple_Terminal' && term !== 'tmux') return undefined
+  const out = await $.process.run(['/usr/bin/osascript', '-l', 'JavaScript', '-e', DEFAULT_COLORS_SCRIPT], { timeoutMs: 5_000 }).catch(() => undefined)
+  return parseColors(out?.stdout ?? '')
+}
+
 /** Reads this session's Terminal.app tab background, where the session runs in one. */
 async function learnBackground($: EngineInterface) {
   if ((await $.env.get('TERM_PROGRAM')) !== 'Apple_Terminal') return
@@ -766,7 +780,7 @@ async function move($: EngineInterface, scope: string, shown: readonly string[],
  * each of its windows, with its status bar's Hide: hide.sh written, and the
  * click bound unless the person bound that click to something of their own.
  */
-async function prepareSession($: EngineInterface, home: string, name: string, title: string) {
+async function prepareSession($: EngineInterface, home: string, name: string, title: string, style?: string) {
   const tmux = (args: string[]) =>
     $.process.run(['tmux', ...args], { timeoutMs: 10_000 }).catch((error: unknown) => ({ exitCode: -1, stdout: '', stderr: message(error) }))
   const path = hidePath(home)
@@ -778,7 +792,7 @@ async function prepareSession($: EngineInterface, home: string, name: string, ti
   // what tmux.conf runs from the bar's right end, carried on this bar's own
   const right = await tmux(['show-options', '-gv', 'status-right'])
   // (not read: the right end left to tmux.conf, never one that drops what it runs)
-  for (const args of sessionSetup(name, windows, canHide, title, right.exitCode === 0 ? statusJobs(right.stdout.replace(/\n$/, '')) : undefined)) await tmux(args)
+  for (const args of sessionSetup(name, windows, canHide, title, right.exitCode === 0 ? statusJobs(right.stdout.replace(/\n$/, '')) : undefined, style)) await tmux(args)
 }
 
 /**
@@ -1016,9 +1030,12 @@ async function openWorkspace($: EngineInterface, ws: Workspace, at?: { window: s
   if (wasRunning && owner !== String(ws.createdAt)) {
     return { isOpen: false, text: `Not opened: tmux session ${name} was not started for this workspace; end it (tmux kill-session -t ${name}) or remove this workspace.` }
   }
+  // its panes in the colours of Terminal's default profile, which its window takes (paneStyle)
+  const colors = await agentColors($)
   if (wasRunning) {
-    // one made before the mouse, the side labels and Hide were set up gets them now, in each of its windows
-    await prepareSession($, home, name, ws.name)
+    // one made before the mouse, the side labels and Hide were set up gets them now, in each of its windows; and the
+    // colours of a window of agents (an agent already running keeps colours it worked out from others until it starts again)
+    await prepareSession($, home, name, ws.name, paneStyle(colors))
     // its agent's pane (a workspace made before panes were marked has a window per agent)
     if (at?.pane !== undefined && /^%\d+$/.test(at.pane)) {
       await tmux(['select-window', '-t', at.pane])
@@ -1053,15 +1070,13 @@ async function openWorkspace($: EngineInterface, ws: Workspace, at?: { window: s
   }
   // a terminal's login shell may be any shell: it is only given `/bin/sh <file>`, the file holding the command
   const file = openScriptPath(home, ws.id)
-  // its window's background that of this tab, whose profile it takes (as Terminal reports it; none when not known)
-  const tabBackground = (await read($, background)) || undefined
-  await $.fs.write(file, `${openCommand(ws, home, { background: tabBackground, waitFor: o.waitFor })}\n`)
+  await $.fs.write(file, `${openCommand(ws, home, { colors, waitFor: o.waitFor })}\n`)
   const command = `/bin/sh ${shellQuote(file)}`
   const term = await $.env.get('TERM_PROGRAM')
   if (term === 'tmux') {
     // from inside tmux: create it if need be, then switch this terminal to it
     const made = await $.process
-      .run(['/bin/sh', '-c', openCommand(ws, home, { attach: false, background: tabBackground, waitFor: o.waitFor })], { timeoutMs: 20_000 })
+      .run(['/bin/sh', '-c', openCommand(ws, home, { attach: false, colors, waitFor: o.waitFor })], { timeoutMs: 20_000 })
       .catch((error: unknown) => ({ exitCode: -1, stdout: '', stderr: message(error) }))
     if (made.exitCode === 0 && !wasRunning) await prepareWhenMade($, home, ws)
     const switched = made.exitCode === 0 ? await tmux(['switch-client', '-t', `=${name}`]) : made
@@ -1155,10 +1170,10 @@ async function openSession($: EngineInterface, target: NonNullable<Item['target'
   }
   const command = attachCommand(target.attach, target.profile, (await $.env.get('HOME')) ?? '')
   if (command === undefined) return
-  // 60% of the screen in use, in this tab's font: never the profile's small default window
+  // 60% of the screen in use, in this tab's font, in Terminal's default profile: never the profile's small default window
   const seen = await screens($, (script, ...args) =>
     $.process.run(['/usr/bin/osascript', '-l', 'JavaScript', '-e', script, ...args], { timeoutMs: 10_000 }).catch(() => ({ stdout: '' })))
-  const place = seen === undefined ? undefined : agentPlacement(seen.screens[0]!, seen.fontSize, seen.profile)
+  const place = seen === undefined ? undefined : agentPlacement(seen.screens[0]!, seen.fontSize)
   await $.process.run(['/usr/bin/osascript', '-l', 'JavaScript', '-e', OPEN_SCRIPT, command, ...(place === undefined ? [] : [JSON.stringify(place)])], { timeoutMs: 10_000 })
 }
 
