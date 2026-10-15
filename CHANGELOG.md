@@ -2,6 +2,9 @@
 
 What each version changed, newest first. Each links its pull request, which holds the details, the checks and the reviews. After updating, run `/reload-plugins` in your sessions.
 
+## 0.32.3 — 2026-10-14 ([#46](https://github.com/d3r3nic/claude-live-sessions/pull/46))
+- **Bringing in a Codex no longer holds up the new workspace for a minute:** Codex's shared server keeps a conversation about a minute after its terminal closes, and the workspace used to wait for that before it opened. It now opens at once, Claude starting its work, and the Codex pane waits for the server instead, saying so, then goes on in that conversation (still never in two places: it resumes only once no Codex holds it). Anything other than that server holding it is waited for before opening, as before.
+
 ## 0.32.2 — 2026-10-14 ([#47](https://github.com/d3r3nic/claude-live-sessions/pull/47))
 - **Hand-offs to a resumed Codex no longer held back by what Codex wrote:** the relay waits until Codex is at its prompt, and took any "sign in" or "import" (any case, "important" too) on Codex's screen for one of its start-up questions. A resumed Codex shows its last message, so one that mentioned signing in held every hand-off back (seen: a workspace stalled for a day, Claude waiting for Codex and Codex at its prompt). It now looks for Codex's questions in Codex's own words, at the bottom of its screen only, and for Codex at work by its status line's shape anywhere on it (details, tips and queued follow-ups go under that line, far from the bottom). Seen on this Mac: two workspaces held back this way.
 
