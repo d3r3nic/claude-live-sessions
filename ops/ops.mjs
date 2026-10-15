@@ -90,12 +90,13 @@ const ESC = '\x1b['
 const rgb = (hex, text) => `${ESC}38;2;${parseInt(hex.slice(1, 3), 16)};${parseInt(hex.slice(3, 5), 16)};${parseInt(hex.slice(5, 7), 16)}m${text}${ESC}39m`
 const bold = text => `${ESC}1m${text}${ESC}22m`
 // themes: each paints its own background, so the screen looks the same whatever the terminal's profile
+// (`note`: a workspace's main problem, in a colour none of the others is)
 const THEMES = {
-  MATRIX: { bg: '#020a05', hi: '#39ff14', mid: '#00d26a', lo: '#0f7a35', dim: '#0a4a22', amber: '#ffb000', red: '#ff3b3b', cyan: '#36f9f6' },
-  AMBER: { bg: '#0d0800', hi: '#ffcc33', mid: '#ffb000', lo: '#8a5a00', dim: '#4a3000', amber: '#fff1b8', red: '#ff5533', cyan: '#ffe08a' },
-  CYBER: { bg: '#0a0014', hi: '#ff2bd6', mid: '#36f9f6', lo: '#6b3fa0', dim: '#2a1446', amber: '#fdf500', red: '#ff3b6b', cyan: '#00fff0' },
-  ICE: { bg: '#03101c', hi: '#9be7ff', mid: '#4fc3f7', lo: '#1f5f86', dim: '#0f3350', amber: '#ffd166', red: '#ef476f', cyan: '#e0fbfc' },
-  PAPER: { bg: '#f4f1e8', hi: '#0b3d20', mid: '#14532d', lo: '#6b8f71', dim: '#c8d5c3', amber: '#b45309', red: '#b91c1c', cyan: '#0e7490' },
+  MATRIX: { bg: '#020a05', hi: '#39ff14', mid: '#00d26a', lo: '#0f7a35', dim: '#0a4a22', amber: '#ffb000', red: '#ff3b3b', cyan: '#36f9f6', note: '#f4ecd0' },
+  AMBER: { bg: '#0d0800', hi: '#ffcc33', mid: '#ffb000', lo: '#8a5a00', dim: '#4a3000', amber: '#fff1b8', red: '#ff5533', cyan: '#ffe08a', note: '#f2f2f2' },
+  CYBER: { bg: '#0a0014', hi: '#ff2bd6', mid: '#36f9f6', lo: '#6b3fa0', dim: '#2a1446', amber: '#fdf500', red: '#ff3b6b', cyan: '#00fff0', note: '#f2f2f2' },
+  ICE: { bg: '#03101c', hi: '#9be7ff', mid: '#4fc3f7', lo: '#1f5f86', dim: '#0f3350', amber: '#ffd166', red: '#ef476f', cyan: '#e0fbfc', note: '#ffe8a3' },
+  PAPER: { bg: '#f4f1e8', hi: '#0b3d20', mid: '#14532d', lo: '#6b8f71', dim: '#c8d5c3', amber: '#b45309', red: '#b91c1c', cyan: '#0e7490', note: '#5b21b6' },
 }
 const NAMES = Object.keys(THEMES)
 // what the person chose here, kept for the next screen: the theme, whether the grid and the event log are shown, and
@@ -239,6 +240,22 @@ function cellsOf(plain, from, to) {
 }
 // text from the records, one line: no control characters (C0, C1), no invisible direction or joining controls
 const clean = s => String(s ?? '').replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g, ' ')
+/** Text in lines of at most `n` cells, broken between words (a word longer than a line, cut). */
+function wrap(text, n) {
+  const lines = []
+  let line = ''
+  for (const word of text.split(' ').filter(w => w !== '')) {
+    const longer = line === '' ? word : `${line} ${word}`
+    if (width(longer) <= n) {
+      line = longer
+      continue
+    }
+    if (line !== '') lines.push(line)
+    line = width(word) <= n ? word : cut(word, n)
+  }
+  if (line !== '') lines.push(line)
+  return lines
+}
 const RAIN = 'ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄ01234567890ABCDEF<>/\\|=+*'
 /** The compact view's tiles: at least this many cells wide, and at most this many. */
 const TILE_MIN = 34
@@ -400,9 +417,12 @@ function frame(snap, now, cols, rows, tick, note = '', modal = undefined) {
     const isBackground = ws.items.some(i => i.state === 'background')
     // an agent of it waits on the owner (a permission prompt, a dialog): Claude Code's own `waiting`
     const isWaiting = ws.items.some(i => i.state === 'waiting')
+    // the main problem its Claude last said, and when
+    const problem = typeof raw?.problem?.text === 'string' && Number.isFinite(raw.problem.at) ? raw.problem : undefined
     return {
       ws,
       relay: raw?.relay,
+      problem,
       only,
       needs,
       isWorking,
@@ -618,8 +638,14 @@ function frame(snap, now, cols, rows, tick, note = '', modal = undefined) {
   const details = modal === undefined ? undefined : nodes.find(n => n.isOpenable && n.ws.key === modal)
   const overlay = n => {
     const dir = clean(n.ws.dir)
-    // what it does first: on a small window what is cut is its folder
-    const content = [...nodeRows(n), '', rgb(G.lo, HOME !== '' && dir.startsWith(`${HOME}/`) ? `~${dir.slice(HOME.length)}` : dir)]
+    // what it does, then its folder
+    const about = [...nodeRows(n), '', rgb(G.lo, HOME !== '' && dir.startsWith(`${HOME}/`) ? `~${dir.slice(HOME.length)}` : dir)]
+    // first, the main problem it works on, in plain words, in a colour of its own, as wide as the box (on a small window
+    // what is cut is its folder, then what its agents do)
+    const said = n.problem === undefined
+      ? [rgb(G.lo, n.only === 'codex' ? 'MAIN PROBLEM · none: Codex alone does not say one' : 'MAIN PROBLEM · not said yet: its Claude says it when you next give it something')]
+      : [`${rgb(G.note, bold('MAIN PROBLEM'))} ${rgb(G.lo, `· said ${c.ago(now - n.problem.at)} ago`)}`, ...wrap(hide(clean(n.problem.text)), Math.min(inner - 2, Math.max(64, ...about.map(l => width(l) + 4))) - 4).map(l => rgb(G.note, l))]
+    const content = [...said, '', ...about]
     // its window brought up (stopped: started again), and stopped while it runs; the details themselves go back
     const open = n.ws.isRunning ? '[>_ open window]' : '[► start]'
     const shut = n.ws.isRunning ? '[■ stop]' : ''

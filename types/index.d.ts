@@ -132,6 +132,11 @@ export type Workspace = {
   compacted?: { at: number; tokens: number; isChecked: boolean }
   /** The last drift check: when, and its verdict for the owner. */
   check?: { at: number; status: 'on-track' | 'drifting' | 'unclear-need' | 'needs-owner'; brief: string; ask?: string }
+  /**
+   * The main problem its agents work on, in plain words for the owner coming back to it, as its Claude last said it
+   * (problem.ts), and when.
+   */
+  problem?: { text: string; at: number }
 }
 
 /**

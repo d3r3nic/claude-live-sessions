@@ -3,6 +3,7 @@
 import type { Workspace } from '../types'
 import { HOLDERS_SCRIPT, threadFrom } from './bring'
 import { checkEveryFrom, checkFrom } from './drift'
+import { problemFrom } from './problem'
 
 /** The tmux session a workspace runs in. */
 export const tmuxName = (ws: Pick<Workspace, 'id'>) => `ws-${ws.id}`
@@ -724,11 +725,13 @@ export function workspacesFrom(raw: unknown): Workspace[] {
     // likewise the drift check's interval, and its last verdict (one this does not read is dropped)
     const checkEvery = checkEveryFrom(ws.checkEvery)
     const check = checkFrom(ws.check)
+    // and the main problem its Claude last said (one this does not read is dropped)
+    const problem = problemFrom(ws.problem)
     // an agent this does not read is dropped: Claude and Codex both start
     const only = ws.only === 'claude' || ws.only === 'codex' ? ws.only : undefined
     // a branch only as git names one (it is shown, never run)
     const branch = branchFrom(ws.branch)
-    const { members: _, threads: __, compactAt: ___, compactFrom: ________, compacted: _________, checkEvery: ____, check: _____, only: ______, branch: _______, ...rest } = ws as Workspace & { compactAt?: unknown }
+    const { members: _, threads: __, compactAt: ___, compactFrom: ________, compacted: _________, checkEvery: ____, check: _____, only: ______, branch: _______, problem: __________, ...rest } = ws as Workspace & { compactAt?: unknown }
     return {
       ...rest,
       ...(members !== undefined && members.length > 0 ? { members } : {}),
@@ -737,6 +740,7 @@ export function workspacesFrom(raw: unknown): Workspace[] {
       ...(compacted === undefined ? {} : { compacted }),
       ...(checkEvery === undefined ? {} : { checkEvery }),
       ...(check === undefined ? {} : { check }),
+      ...(problem === undefined ? {} : { problem }),
       ...(only === undefined ? {} : { only }),
       ...(branch === undefined ? {} : { branch }),
     }
