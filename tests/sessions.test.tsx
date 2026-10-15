@@ -3520,6 +3520,20 @@ describe('bringing running sessions into a workspace', () => {
     expect(again.threads.codex.id).toBe(RESUMED_A)
     expect(toasts.at(-1)).toMatch(/^Created Reports again .* Codex goes on in about a minute, once its shared server lets the conversation go: its pane says so\. .*Opened ws-reports-again in a new Terminal window\.$/)
     expect(files.get(openScriptPath(HOME, again.id))).toContain(CODEX_WAIT_LINE.replace(/'/g, `'\\''`).replace(/'/g, `'\\''`))
+    // held by that server as it closed, then, as the workspace opens, by another Codex (a terminal resumed it): that
+    // one is never left to the pane; waited for, still held, the workspace is not opened
+    world.exited.delete(207)
+    world.stopped = []
+    world.heldAsked = []
+    world.holders[RESUMED_A] = 204
+    let asks = 0
+    world.onRun = argv => {
+      if (argv[0] === '/bin/sh' && argv[2] === HOLDERS_SCRIPT && ++asks === 2) world.holders[RESUMED_A] = 304
+    }
+    await clock.advance(60_000)
+    await create('Reports third')
+    expect(world.heldAsked).toEqual([`${RESUMED_A} 0`, `${RESUMED_A} 0`, `${RESUMED_A} 0`, `${RESUMED_A} 60`, `${RESUMED_A} 30`])
+    expect(toasts.at(-1)).toMatch(/^Created Reports third .*, but it was not opened: Not opened: its agents go on with their own conversations, and Codex's is open in another Codex \(process 304\)\. Close it there first\.$/)
     await ui.unmount()
   })
 
