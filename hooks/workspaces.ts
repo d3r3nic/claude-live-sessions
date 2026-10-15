@@ -1,7 +1,7 @@
 // Workspaces: named projects, each a folder, an environment and one tmux
 // session running its agents. Pure: no `$`, so the tests drive it directly.
 import type { Workspace } from '../types'
-import { threadFrom } from './bring'
+import { HOLDERS_SCRIPT, threadFrom } from './bring'
 import { checkEveryFrom, checkFrom } from './drift'
 
 /** The tmux session a workspace runs in. */
@@ -201,11 +201,21 @@ function paneScript(tool: 'claude' | 'codex', ws: Pick<Workspace, 'id' | 'env' |
           `open=; for f in ${shellWord(claudeHome)}/sessions/*.json; do grep -q '"sessionId":"${thread.id}"' "$f" 2>/dev/null && kill -0 "$(basename "$f" .json)" 2>/dev/null && open=1; done; ` +
           `if [ -n "$open" ]; then echo 'This conversation is open in another Claude session; close it there, then open the workspace again.'; ` +
           `else cd ${shellWord(thread.dir)} && ${start} --resume ${thread.id}${flags}${lean}${addDir} \${p:+--} \${p:+"$p"}; fi`
-        : `${start} resume ${UPDATE_OFF} ${NO_DAEMON}${flags} -C ${shellWord(thread.dir)} -- ${thread.id} \${p:+"$p"}`
+        // a Codex conversation is resumed only once no Codex holds it open: Codex's shared server lets one go about a
+        // minute after the terminal it ran closes, so a workspace with a terminal brought in opens at once and its
+        // Codex waits for that here (PANE_LETS_GO_S at most), saying so; still held, it is not resumed, and says by what
+        : `hs=${shellWord(HOLDERS_SCRIPT)}; h=$(/bin/sh -c "$hs" sh ${thread.id} 0); ` +
+          `if [ "$h" != free ]; then echo ${shellWord(CODEX_WAIT_LINE)}; h=$(/bin/sh -c "$hs" sh ${thread.id} ${PANE_LETS_GO_S}); fi; ` +
+          `if [ "$h" = free ]; then ${start} resume ${UPDATE_OFF} ${NO_DAEMON}${flags} -C ${shellWord(thread.dir)} -- ${thread.id} \${p:+"$p"}; ` +
+          `else echo "This conversation is still open in another Codex (process \${h#held }): close it there, then open the workspace again."; fi`
   const run = `p=$(cat ${prompt} 2>/dev/null) && rm -f ${prompt}; ${agent}`
   return `/bin/sh -c ${shellWord(`${run}; exec "$SHELL" -l`)}`
 }
 const UPDATE_OFF = '-c check_for_update_on_startup=false'
+/** What a workspace's Codex pane says while Codex holds the conversation it resumes. */
+export const CODEX_WAIT_LINE = 'Waiting for Codex to let this conversation go (its shared server keeps one about a minute after its terminal closes); it goes on here then.'
+/** How long, in seconds, a workspace's Codex pane waits for its conversation to be let go before it gives up. */
+export const PANE_LETS_GO_S = 180
 
 /**
  * A process to wait for: its pid, and when it started as PROCESS_START prints it (words one space apart), so that a

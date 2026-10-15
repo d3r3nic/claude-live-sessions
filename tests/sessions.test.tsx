@@ -75,6 +75,9 @@ import {
   assigned,
   checkoutResult,
   windowColors,
+  shellQuote,
+  CODEX_WAIT_LINE,
+  PANE_LETS_GO_S,
   chatsPurpose,
   ASK_WHERE,
   processStart,
@@ -3020,7 +3023,11 @@ describe('bringing running sessions into a workspace', () => {
     expect(line).toContain(nested(`if [ -n "$open" ]; then echo 'This conversation is open in another Claude session; close it there, then open the workspace again.'; else cd '/Users/u/dev/web-app/src' && env `))
     expect(line).toContain(nested(` claude --resume session-101 --dangerously-skip-permissions --append-system-prompt '${leanWork(true)}' --add-dir '/Users/u/dev/web-app-worktrees' \${p:+--} \${p:+"$p"}; fi; exec`))
     // Codex with no sandbox needs no folder added
-    expect(line).toContain(nested(` codex resume -c check_for_update_on_startup=false --no-daemon --dangerously-bypass-approvals-and-sandbox -C '/Users/u/dev/web-app' -- ${RESUMED_A} \${p:+"$p"}; exec`))
+    // Codex once no Codex holds its conversation open (asked once; else waited for, saying so, PANE_LETS_GO_S at most)
+    expect(line).toContain(nested(`; h=$(/bin/sh -c "$hs" sh ${RESUMED_A} 0); if [ "$h" != free ]; then echo '${CODEX_WAIT_LINE}'; h=$(/bin/sh -c "$hs" sh ${RESUMED_A} ${PANE_LETS_GO_S}); fi; if [ "$h" = free ]; then env `))
+    expect(line).toContain(nested(` codex resume -c check_for_update_on_startup=false --no-daemon --dangerously-bypass-approvals-and-sandbox -C '/Users/u/dev/web-app' -- ${RESUMED_A} \${p:+"$p"}; else echo "This conversation is still open in another Codex (process \${h#held }): close it there, then open the workspace again."; fi; exec`))
+    expect(line).toContain(nested(`hs=${shellQuote(HOLDERS_SCRIPT)}; `))
+    expect(PANE_LETS_GO_S).toBe(180)
     expect(line).not.toMatch(/--sandbox|--ask-for-approval|--permission-mode/)
     // a named environment's Claude registry
     expect(openCommand({ ...ws, env: 'work' }, HOME)).toContain(nested(`for f in '/Users/u/.claude-work'/sessions/*.json;`))
@@ -3463,7 +3470,7 @@ describe('bringing running sessions into a workspace', () => {
     await ui.unmount()
   })
 
-  test('a Codex terminal whose conversation runs in Codex\'s shared server is brought in: matched by what the server holds, resumed once nothing holds it', async ($, on) => {
+  test('a Codex terminal whose conversation runs in Codex\'s shared server is brought in: the workspace opens at once, its Codex pane waiting for the server; any other holder waited for here', async ($, on) => {
     const { files, toasts, clock } = engine(on, machine, { termProgram: 'Apple_Terminal' })
     // of ~/.codex's terminals only 207 is left, and it runs its conversation in the shared server (204, started as the
     // managed daemon), which holds the rollout open; 207 holds none itself
@@ -3487,16 +3494,32 @@ describe('bringing running sessions into a workspace', () => {
       await ui.input({ key: 'form:name', text: name, kind: 'change' })
       await ui.press({ key: 'form:create' })
     }
-    // the server still holds it after the terminal closed (another of its terminals resumed it too): not resumed here
-    world.holders[RESUMED_A] = 204
+    // held, after the terminal closed, by another Codex than the server that ran it (another terminal resumed it too):
+    // waited for here, asked again for a minute, then 30 s more, saying so each time; still held, not resumed here
+    world.holders[RESUMED_A] = 304
     await create('Reports')
     expect(world.stopped).toEqual(['ttys045 codex|node 207'])
-    // asked, then (held) asked again for a minute, then 30 s more, saying it waits each time
-    expect(world.heldAsked).toEqual([`${RESUMED_A} 0`, `${RESUMED_A} 60`, `${RESUMED_A} 30`])
+    expect(world.heldAsked).toEqual([`${RESUMED_A} 0`, `${RESUMED_A} 0`, `${RESUMED_A} 60`, `${RESUMED_A} 30`])
     expect(toasts).toContain('Codex · Find the report writer: waiting for Codex to let its conversation go (its shared server keeps one about a minute after its terminal closes)…')
     expect(toasts).toContain('Codex · Find the report writer: still waiting for Codex to let its conversation go (30 s more at most)…')
     expect(JSON.parse(files.get(WORKSPACES)!).workspaces[0].threads).toBeUndefined()
-    expect(toasts.at(-1)).toContain(`Not brought in: Codex · Find the report writer (it closed in ttys045, but another Codex (process 204) has its conversation open still, so it was not resumed here, and the workspace's Codex starts new).`)
+    expect(toasts.at(-1)).toContain(`Not brought in: Codex · Find the report writer (it closed in ttys045, but another Codex (process 304) has its conversation open still, so it was not resumed here, and the workspace's Codex starts new).`)
+    // held by the server that ran it, which lets it go about a minute after its terminal closed: nothing waited for
+    // here; the workspace opens with it at once, its Codex pane waiting for the server, and says so
+    world.exited.delete(207)
+    world.stopped = []
+    world.heldAsked = []
+    world.holders[RESUMED_A] = 204
+    const before = toasts.length
+    await clock.advance(60_000)
+    await create('Reports again')
+    expect(world.stopped).toEqual(['ttys045 codex|node 207'])
+    expect(world.heldAsked).toEqual([`${RESUMED_A} 0`, `${RESUMED_A} 0`])
+    expect(toasts.slice(before).some(t => t.includes('waiting for Codex'))).toBe(false)
+    const again = JSON.parse(files.get(WORKSPACES)!).workspaces.at(-1)
+    expect(again.threads.codex.id).toBe(RESUMED_A)
+    expect(toasts.at(-1)).toMatch(/^Created Reports again .* Codex goes on in about a minute, once its shared server lets the conversation go: its pane says so\. .*Opened ws-reports-again in a new Terminal window\.$/)
+    expect(files.get(openScriptPath(HOME, again.id))).toContain(CODEX_WAIT_LINE.replace(/'/g, `'\\''`).replace(/'/g, `'\\''`))
     await ui.unmount()
   })
 

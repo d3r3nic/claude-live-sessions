@@ -989,6 +989,13 @@ async function isSureCodex($: EngineInterface, codexHome: string, s: CodexSessio
  * Held, it is asked again until Codex lets it go, for up to CODEX_LETS_GO_S (a closed terminal's shared server keeps it
  * about a minute), `what` told it waits meanwhile.
  */
+/** Said of a Codex brought in whose shared server still holds its conversation: its pane waits for it. */
+const LATER_SAID = 'Codex goes on in about a minute, once its shared server lets the conversation go: its pane says so.'
+
+/** Which Codex holds a conversation's rollout open now, asked once: free, its process, or unknown. */
+const codexHolder = async ($: EngineInterface, id: string) =>
+  holderOf((await $.process.run(['/bin/sh', '-c', HOLDERS_SCRIPT, 'sh', id, '0'], { timeoutMs: 30_000 }).catch(() => ({ stdout: '' }))).stdout)
+
 async function codexLetsGo($: EngineInterface, id: string, what: string): Promise<'free' | number | undefined> {
   const ask = async (seconds: number) =>
     holderOf((await $.process.run(['/bin/sh', '-c', HOLDERS_SCRIPT, 'sh', id, String(seconds)], { timeoutMs: (seconds + 30) * 1000 }).catch(() => ({ stdout: '' }))).stdout)
@@ -1010,7 +1017,7 @@ async function codexLetsGo($: EngineInterface, id: string, what: string): Promis
  * conversation (brought in from here): it runs it still, and the Claude pane
  * waits for it to close.
  */
-async function openWorkspace($: EngineInterface, ws: Workspace, at?: { window: string; pane?: string }, o: { waitFor?: WaitFor } = {}): Promise<{ isOpen: boolean; text: string }> {
+async function openWorkspace($: EngineInterface, ws: Workspace, at?: { window: string; pane?: string }, o: { waitFor?: WaitFor; letGoBy?: number } = {}): Promise<{ isOpen: boolean; text: string }> {
   const home = (await $.env.get('HOME')) ?? ''
   const name = tmuxName(ws)
   const tmux = (args: string[]) =>
@@ -1059,7 +1066,9 @@ async function openWorkspace($: EngineInterface, ws: Workspace, at?: { window: s
     // a Codex conversation open in a terminal, or written a moment ago anywhere (the desktop app, an exec run)
     const codex = ws.threads.codex === undefined || !runs.includes('codex') ? undefined : snap.codex.find(s => s.key === ws.threads!.codex!.id && (s.surface === 'terminal' || now - s.updatedAt < WORKING_MS))
     // and one any Codex holds open (a terminal, its shared server, the desktop app), however it was started
-    const holder = codex !== undefined || ws.threads.codex === undefined || !runs.includes('codex') ? 'free' : await codexLetsGo($, ws.threads.codex.id, ws.name)
+    // (one the shared server that ran a terminal just brought in still holds, `letGoBy`: its Codex pane waits for it)
+    const isLater = o.letGoBy !== undefined && ws.threads.codex !== undefined && (await codexHolder($, ws.threads.codex.id)) === o.letGoBy
+    const holder = codex !== undefined || ws.threads.codex === undefined || !runs.includes('codex') || isLater ? 'free' : await codexLetsGo($, ws.threads.codex.id, ws.name)
     const elsewhere = [
       ...(claude === undefined ? [] : [`Claude's runs in ${claude.tty === '??' ? 'the background' : claude.tty}`]),
       ...(codex === undefined ? [] : [`Codex's ${codex.surface === 'terminal' ? `runs in ${codex.tty}` : `was written a moment ago (${codex.surface})`}`]),
@@ -1349,10 +1358,13 @@ async function makeWorkspace($: EngineInterface, w: NewWorkspace): Promise<{ isC
   const threads: { claude?: Thread; codex?: Thread } = {}
   const notBrought: string[] = []
   const createdAt = await $.clock.now()
+  // the shared server that ran a Codex terminal brought in, still holding its conversation: its pane waits for it
+  let letGoBy: number | undefined
   for (const b of checked.bring) {
     const taken = await takeOver($, home, b)
     if ('thread' in taken) threads[b.tool] = { ...taken.thread, since: createdAt }
-    else notBrought.push(`${b.label} (${taken.why}, and the workspace's ${b.tool === 'claude' ? 'Claude' : 'Codex'} starts new)`)
+    if ('thread' in taken && taken.letGoBy !== undefined) letGoBy = taken.letGoBy
+    if (!('thread' in taken)) notBrought.push(`${b.label} (${taken.why}, and the workspace's ${b.tool === 'claude' ? 'Claude' : 'Codex'} starts new)`)
   }
   // a pair with conversations brought in and no purpose said goes on with their work: each is told what is next, the
   // one brought in bringing a new peer up to speed (only those that came: one left where it was has no work here)
@@ -1393,7 +1405,7 @@ async function makeWorkspace($: EngineInterface, w: NewWorkspace): Promise<{ isC
   const label = `${made.name} (${made.env || 'default'}, ${made.dir})`
   // this session, brought in: it runs its conversation until the workspace has opened, whose Claude waits for it
   const self = checked.bring.find(b => b.isSelf === true && made.threads?.claude?.id === b.thread.id)
-  const opened = await openWorkspace($, made, undefined, await waitForSelf($, self))
+  const opened = await openWorkspace($, made, undefined, { ...(await waitForSelf($, self)), ...(letGoBy === undefined ? {} : { letGoBy }) })
   const goOn = checked.bring.filter(b => made.threads?.[b.tool] !== undefined).map(b => b.label)
   const alone = made.only === undefined ? undefined : made.only === 'claude' ? 'Claude' : 'Codex'
   const onBranch = made.branch === undefined ? '' : `, going on with ${made.branch}`
@@ -1403,6 +1415,7 @@ async function makeWorkspace($: EngineInterface, w: NewWorkspace): Promise<{ isC
     ? `Claude and Codex start side by side in tmux session ${tmuxName(made)}.`
     : `Claude and Codex start side by side in tmux session ${tmuxName(made)}; Claude gets peer coding ready for it${onBranch}, and the relay passes each hand-over to the other.`) +
     (goOn.length > 0 ? ` ${goOn.join(' and ')} went on there, each in its own conversation${made.threads?.claude === undefined ? '' : ' (if Claude asks how to resume a large conversation, from a summary or in full, answer it in its pane)'}.` : '') +
+    (letGoBy === undefined ? '' : ` ${LATER_SAID}`) +
     (notBrought.length > 0 ? ` Not brought in: ${notBrought.join('; ')}.` : '')
   // (closed, this session reads nothing more: what follows is said only when it does not close)
   const closing = self === undefined ? '' : await selfAfterOpen($, home, self, opened.isOpen)
@@ -1473,11 +1486,13 @@ async function addTo($: EngineInterface, ws: Workspace, tool: 'claude' | 'codex'
     }
     const brought = checked.bring[0]
     let thread: Thread | undefined
+    let letGoBy: number | undefined
     if (brought !== undefined) {
       const taken = await takeOver($, home, brought)
       // left as it was: the workspace too
       if (!('thread' in taken)) return await asItWas(`${brought.label} ${taken.why.replace(/^it /, '')}`)
       thread = taken.thread
+      letGoBy = taken.letGoBy
     }
     const now = await $.clock.now()
     const purpose = kept.purpose?.trim() ?? ''
@@ -1517,9 +1532,9 @@ async function addTo($: EngineInterface, ws: Workspace, tool: 'claude' | 'codex'
     await refresh($, 0)
     // this session, brought in: as when making a workspace with it
     const self = brought?.isSelf === true && isBrought ? brought : undefined
-    const opened = await openWorkspace($, made, undefined, await waitForSelf($, self))
+    const opened = await openWorkspace($, made, undefined, { ...(await waitForSelf($, self)), ...(letGoBy === undefined ? {} : { letGoBy }) })
     const closing = self === undefined ? '' : await selfAfterOpen($, home, self, opened.isOpen)
-    const who = `${isBrought ? `${brought!.label} goes on there in its own conversation` : `${NAME[tool]} starts new there`}, beside ${NAME[there]}`
+    const who = `${isBrought ? `${brought!.label} goes on there in its own conversation` : `${NAME[tool]} starts new there`}, beside ${NAME[there]}${letGoBy === undefined ? '' : ` (${LATER_SAID.replace(/\.$/, '')})`}`
     const how = purpose === '' ? '' : '; Claude gets peer coding ready, and the relay passes each hand-over'
     return {
       isAdded: true,
@@ -1543,8 +1558,9 @@ type Bring = { tool: 'claude' | 'codex'; label: string; runs?: { tty: string; pi
  * then be open in no Codex at all (a terminal's shared server lets it go a moment after the terminal closes), or it is
  * not resumed: it would run twice.
  */
-async function takeOver($: EngineInterface, home: string, b: Bring): Promise<{ thread: Thread } | { why: string }> {
+async function takeOver($: EngineInterface, home: string, b: Bring): Promise<{ thread: Thread; letGoBy?: number } | { why: string }> {
   // a Codex terminal still known for certain to run that conversation, as everything reads now (a /new or /resume since)
+  let server: number | undefined
   if (b.tool === 'codex' && b.runs !== undefined) {
     await refreshNow($)
     const snap = await read($, snapshot)
@@ -1552,6 +1568,8 @@ async function takeOver($: EngineInterface, home: string, b: Bring): Promise<{ t
     if (row === undefined || row.key !== b.thread.id || !isKnownCodex(snap, row) || !(await isSureCodex($, `${home}/.${row.profile}`, row))) {
       return { why: 'it is no longer known for certain to run that conversation (a /new or /resume inside it); it was left as it was' }
     }
+    // (run in its shared server: the server that will let it go)
+    server = row.match === 'loaded' ? row.loadedBy : undefined
   }
   const live = b.tool === 'claude' && b.runs !== undefined ? await liveClaude($, home, b.runs.pid, b.profile, b.thread.id) : undefined
   const busy = typeof live === 'string' ? live : b.rollout === undefined ? undefined : await codexBusy($, b.rollout)
@@ -1564,7 +1582,11 @@ async function takeOver($: EngineInterface, home: string, b: Bring): Promise<{ t
     if (out.stdout.trim() !== 'stopped') return { why: `it did not close in ${b.runs.tty}; it was left as it was` }
   }
   if (b.tool === 'codex') {
-    const holder = await codexLetsGo($, b.thread.id, b.label)
+    // held by the shared server that ran it alone, which lets it go about a minute after its terminal closed: the
+    // workspace's Codex pane waits for that, so the workspace opens at once; anything else holding it is waited for here
+    const first = await codexHolder($, b.thread.id)
+    if (server !== undefined && first === server) return { thread: b.thread, letGoBy: server }
+    const holder = first === 'free' ? first : await codexLetsGo($, b.thread.id, b.label)
     if (holder !== 'free') {
       const other = `another Codex${typeof holder === 'number' ? ` (process ${holder})` : ''}`
       return { why: b.runs === undefined ? `it is open in ${other}; it was left as it was` : `it closed in ${b.runs.tty}, but ${other} has its conversation open still, so it was not resumed here` }
