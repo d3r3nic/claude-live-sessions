@@ -685,7 +685,7 @@ function frame(snap, now, cols, rows, tick, note = '', modal = undefined) {
     const shownIds = new Set(snap.workspaces.map(x => x.id))
     const events = allEvents().filter(e => account === c.ALL_ACCOUNTS || e.target?.kind !== 'workspace' || shownIds.has(e.target.id))
     for (const e of events.slice(0, room)) {
-      const color = /ALERT|NEEDS|WAITS|DRIFT|FAILED/.test(e.kind) ? G.red : /RELAY|PASS|NOTIFY|BG WORK/.test(e.kind) ? G.cyan : /WORKING|COMPACT/.test(e.kind) ? G.amber : G.mid
+      const color = /ALERT|NEEDS|WAITS|DRIFT|FAILED/.test(e.kind) ? G.red : /RELAY|PASS|NOTIFY|BG WORK|CHECKIN/.test(e.kind) ? G.cyan : /WORKING|COMPACT/.test(e.kind) ? G.amber : G.mid
       line(` ${rgb(G.lo, new Date(e.at).toTimeString().slice(0, 8))}  ${rgb(color, pad(e.kind, 7))} ${rgb(G.mid, cut(e.text, inner - 22))}${e.target !== undefined ? rgb(G.lo, ' ›') : ''}`, e.target)
     }
   }

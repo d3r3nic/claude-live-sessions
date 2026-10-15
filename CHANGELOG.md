@@ -2,6 +2,9 @@
 
 What each version changed, newest first. Each links its pull request, which holds the details, the checks and the reviews. After updating, run `/reload-plugins` in your sessions.
 
+## 0.33.0 — 2026-10-14 ([#48](https://github.com/d3r3nic/claude-live-sessions/pull/48))
+- **A workspace gone quiet is checked in with:** with the relay on, both agents idle, nothing to pass and nothing typed by you since the relay last typed into an agent, the relay looks at the last turn. One that ended with no cue line 5 minutes to 2 hours ago (an agent that stopped early, asked you something in passing, or said to paste a line by hand) gets one check-in typed into it, never over a reply you have started typing: go on with the plan if the next step is clear, else end with NEEDS USER or SCOPE CLOSED. If it stops so again, you are told once and nothing more is typed until you type. A turn you stopped (Esc), one you started, NEEDS USER and SCOPE CLOSED are left alone, however long they wait. You are also told when a hand-off has waited 10 minutes for the other agent to show at its prompt, when a check-in started nothing, and when an agent of the pair is no longer running in its pane.
+
 ## 0.32.3 — 2026-10-14 ([#46](https://github.com/d3r3nic/claude-live-sessions/pull/46))
 - **Bringing in a Codex no longer holds up the new workspace for a minute:** Codex's shared server keeps a conversation about a minute after its terminal closes, and the workspace used to wait for that before it opened. It now opens at once, Claude starting its work, and the Codex pane waits for the server instead, saying so, then goes on in that conversation (still never in two places: it resumes only once no Codex holds it). Anything other than that server holding it is waited for before opening, as before.
 

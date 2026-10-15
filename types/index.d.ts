@@ -154,6 +154,10 @@ export type Relay = {
   at?: number
   /** Hand-offs passed since the last drift check. */
   sinceCheck?: number
+  /** When it last checked in with an agent whose turn ended with no cue, and which (stallSteps). */
+  checkin?: { at: number; tool: 'claude' | 'codex' }
+  /** When it last typed into an agent (a hand-off or a check-in): the owner typing after that leads. */
+  passedAt?: number
 }
 
 export type Snapshot = {

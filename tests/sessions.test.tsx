@@ -62,8 +62,8 @@ import {
 } from '../hooks/collect'
 import type { CodexProc, ThreadRow } from '../hooks/collect'
 import type { ClaudeSession, CodexSession, Snapshot, Workspace } from '../types'
-import { afterOwner, afterStep, claudeKeep, CODEX_AT_WORK, CODEX_BOTTOM, CODEX_DIALOG, screenReady, COMPACT_FROM, cueOf, cutBytes, eventOf, EVENT_SCRIPT, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_MAX_AGE_MS, TURN_SCRIPT, tokensSaid } from '../hooks/relay'
-import type { Side } from '../hooks/relay'
+import { afterOwner, afterStep, CHECKIN_LINE, CHECKIN_START, CHECKIN_WITHIN_MS, isInputEmpty, withoutDim, claudeKeep, CODEX_AT_WORK, CODEX_BOTTOM, CODEX_DIALOG, HELD_LONG_MS, screenReady, STALL_MS, stallSteps, COMPACT_FROM, cueOf, cutBytes, eventOf, EVENT_SCRIPT, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_MAX_AGE_MS, TURN_SCRIPT, tokensSaid } from '../hooks/relay'
+import type { Side, Turn } from '../hooks/relay'
 import { branchOf, checkDue, checkFrom, driftRequest, isDueAfterCompaction, parseVerdict, recordFolderOf, RECORDS_SCRIPT } from '../hooks/drift'
 import { accountOfFile, applyScan, claudeCost, claudeLimits, clockSaid, codexUnits, currentLimits, EMPTY_USAGE, limitSaid, markKey, mergeLimits, offsetOf, OFFSETS_SCRIPT, parseContexts, priceOf, rankUsage, scanInput, sharedLimitsFrom, usageFrom, USAGE_FILES_SCRIPT, USAGE_KEEP_MS, wholeFiles } from '../hooks/usage'
 import { bringable, codexDir, CODEX_FOLDER_SCRIPT, CODEX_LETS_GO_S, CODEX_TASK_SCRIPT, codexTaskState, envOfProfile, holderOf, holdersOf, HOLDERS_SCRIPT, isKnownCodex, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, threadFrom, toggled, withThreads } from '../hooks/bring'
@@ -2670,7 +2670,7 @@ describe('relay', () => {
     expect(TURN_MAX_AGE_MS).toBeLessThan(30 * 24 * 3600_000)
     // the count: a pass adds one; a cue for the owner starts it again
     const pass = { kind: 'pass' as const, key: 'pass-c1', to: 'codex' as const, pane: '%2', line: READY_CODEX }
-    expect(afterStep(relayOn({ streak: 3 }), pass, 'passed', NOW)).toEqual(relayOn({ streak: 4, sinceCheck: 1, status: 'passed to Codex', at: NOW }))
+    expect(afterStep(relayOn({ streak: 3 }), pass, 'passed', NOW)).toEqual(relayOn({ streak: 4, sinceCheck: 1, passedAt: NOW, status: 'passed to Codex', at: NOW }))
     expect(afterStep(relayOn({ streak: 3 }), pass, 'not-agent zsh', NOW)).toEqual(relayOn({ streak: 3, status: 'could not pass to Codex', at: NOW }))
     // a scrolled-back pane: it waits, and says so
     expect(afterStep(relayOn({ streak: 3 }), pass, 'in-mode', NOW)).toEqual(relayOn({ streak: 3, status: 'waits: Codex\'s pane is scrolled back (copy mode; q leaves it)', at: NOW }))
@@ -2841,7 +2841,7 @@ describe('relay', () => {
     expect(read.some(f => f.includes('session-104'))).toBe(true)
     expect(read).toContain('/rollouts/a.jsonl')
     const relay = JSON.parse(files.get(WORKSPACES)!).workspaces[0].relay
-    expect(relay).toEqual({ ...relayOn({ streak: 1, sinceCheck: 1, status: 'passed to Codex' }), at: expect.any(Number) })
+    expect(relay).toEqual({ ...relayOn({ streak: 1, sinceCheck: 1, status: 'passed to Codex' }), passedAt: expect.any(Number), at: expect.any(Number) })
     // shown on the workspace's row, with its mode
     const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
     const shown = (await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')
@@ -3941,6 +3941,109 @@ describe('the context guard', () => {
 })
 
 describe('the ops screen', () => {
+  test('a workspace gone quiet: the relay checks in once with the agent whose turn ended with no cue, never when the owner leads, stopped it, or is asked', async () => {
+    const ws = { name: 'RBAC', relay: relayOn() }
+    const side = (tool: 'claude' | 'codex', turn: Turn | undefined, more: Partial<Side> = {}): Side => ({ tool, pane: tool === 'claude' ? '%1' : '%2', isBusy: false, isReady: true, ...(turn === undefined ? {} : { turn }), ...more })
+    const quiet = (claudeAt: number, more: Partial<Side> = {}, claude: Partial<Turn> = {}) => ({ claude: side('claude', { ...done('c9', 'Want me to go on with the fix?', claudeAt), ...claude }, more), codex: side('codex', done('x8', READY_CLAUDE, claudeAt - 600_000)) })
+    // Claude's turn ended with no cue: a check-in once it has been quiet STALL_MS, typed into Claude
+    expect(stallSteps(ws, quiet(NOW - STALL_MS + 1_000), NOW)).toEqual([])
+    expect(stallSteps(ws, quiet(NOW - STALL_MS), NOW)).toEqual([{ kind: 'pass', key: 'checkin-c9', to: 'claude', pane: '%1', line: CHECKIN_LINE, at: NOW - STALL_MS, isCheckIn: true }])
+    // (after the steps for cues, whose pass of Codex's earlier hand-off its ledger took long ago)
+    expect(relaySteps(ws, quiet(NOW - STALL_MS), NOW).map(s => s.key)).toEqual(['pass-x8', 'checkin-c9'])
+    expect(CHECKIN_LINE.startsWith(CHECKIN_START)).toBe(true)
+    expect(cueOf(CHECKIN_LINE)).toBeUndefined()
+    // quiet longer than CHECKIN_WITHIN_MS: put aside, left as it is
+    const longOn = { ...ws, relay: relayOn({ since: NOW - 3 * CHECKIN_WITHIN_MS }) }
+    expect(stallSteps(longOn, quiet(NOW - CHECKIN_WITHIN_MS - 1_000), NOW)).toEqual([])
+    expect(stallSteps(longOn, quiet(NOW - CHECKIN_WITHIN_MS), NOW).map(s => s.key)).toEqual(['checkin-c9'])
+    // the owner typed since the relay last typed into an agent: theirs to lead (a turn they started, told to wait, too)
+    const ledByOwner = quiet(NOW - 600_000)
+    ledByOwner.codex.turn = { ...ledByOwner.codex.turn!, typedAt: NOW - 700_000 }
+    expect(stallSteps(ws, ledByOwner, NOW)).toEqual([])
+    expect(stallSteps({ ...ws, relay: relayOn({ passedAt: NOW - 800_000 }) }, ledByOwner, NOW)).toEqual([])
+    // ...the relay typed after them: a check-in again
+    expect(stallSteps({ ...ws, relay: relayOn({ passedAt: NOW - 650_000 }) }, ledByOwner, NOW).map(s => s.key)).toEqual(['checkin-c9'])
+    // stopped by the owner (Esc: an interrupt, never their typing): nothing, however long
+    expect(stallSteps(ws, quiet(NOW - 600_000, {}, { isStopped: true }), NOW)).toEqual([])
+    // an agent at work, one whose turn the relay cannot read (at work for all it knows), or Claude not idle a few
+    // seconds by its own status: nothing yet
+    expect(stallSteps(ws, { ...quiet(NOW - 600_000), codex: side('codex', done('x8', READY_CLAUDE, NOW - 900_000), { isBusy: true }) }, NOW)).toEqual([])
+    expect(stallSteps(ws, { ...quiet(NOW - 600_000), codex: side('codex', undefined) }, NOW)).toEqual([])
+    expect(stallSteps(ws, quiet(NOW - 600_000, { isReady: false }), NOW)).toEqual([])
+    // its cue is the owner's (NEEDS USER, SCOPE CLOSED): nothing more than cueSteps tells, however long it waits, an
+    // agent gone meanwhile too
+    for (const line of ['NEEDS USER · peer-coding/feat-rbac · which email?', 'SCOPE CLOSED · peer-coding/feat-rbac · done']) {
+      const asked = { claude: side('claude', done('c9', line, NOW - 3_600_000)), codex: side('codex', done('x8', READY_CLAUDE, NOW - 7_200_000)) }
+      expect(stallSteps(ws, asked, NOW)).toEqual([])
+      expect(relaySteps(ws, asked, NOW).map(s => s.kind)).toEqual(['tell'])
+      expect(stallSteps(ws, { ...asked, codex: side('codex', undefined, { isGone: true }) }, NOW)).toEqual([])
+    }
+    // a turn from before the relay was on, or the relay off: nothing; at its cap (waiting for the owner): told, nothing typed
+    expect(stallSteps({ ...ws, relay: relayOn({ since: NOW - 60_000 }) }, quiet(NOW - 600_000), NOW)).toEqual([])
+    expect(stallSteps({ ...ws, relay: relayOn({ mode: 'off' }) }, quiet(NOW - 600_000), NOW)).toEqual([])
+    expect(stallSteps({ ...ws, relay: relayOn({ streak: RELAY_CAP }) }, quiet(NOW - 600_000), NOW).map(s => s.key)).toEqual(['stalled-c9'])
+    // the owner's prompt past what is read of a long turn: as the relay saw it when it began (relay.typedAt)
+    expect(stallSteps({ ...ws, relay: relayOn({ passedAt: NOW - 900_000, typedAt: NOW - 800_000 }) }, quiet(NOW - 600_000), NOW)).toEqual([])
+    // checked in with already (Claude), and it stopped so again, the owner silent: the owner is told, once, nothing typed
+    const checkedIn = (tool: 'claude' | 'codex', at: number) => ({ ...ws, relay: relayOn({ checkin: { at, tool }, passedAt: at }) })
+    expect(stallSteps(checkedIn('claude', NOW - 900_000), quiet(NOW - 600_000), NOW)).toEqual([{ kind: 'tell', key: 'stalled-c9', from: 'claude', text: 'RBAC: Claude stopped without a cue line again, after a check-in, with nothing passed on: it may need you.', isForOwner: true }])
+    // ...the owner typed after that check-in, and the relay has passed a hand-off since: checked in with again
+    const typedSince = quiet(NOW - 600_000)
+    typedSince.codex.turn = { ...typedSince.codex.turn!, typedAt: NOW - 5 * 3_600_000 }
+    expect(stallSteps({ ...ws, relay: relayOn({ since: NOW - 10 * 3_600_000, checkin: { at: NOW - 8 * 3_600_000, tool: 'claude' }, passedAt: NOW - 4 * 3_600_000 }) }, typedSince, NOW).map(s => s.key)).toEqual(['checkin-c9'])
+    // ...a check-in with the other agent is not this one's: Claude is checked in with
+    expect(stallSteps(checkedIn('codex', NOW - 900_000), quiet(NOW - 600_000), NOW).map(s => s.key)).toEqual(['checkin-c9'])
+    // checked in with, and no turn started since (its last turn is from before): told once STALL_MS on
+    expect(stallSteps(checkedIn('claude', NOW - 600_000 + 60_000), quiet(NOW - 600_000), NOW)).toEqual([{ kind: 'tell', key: 'nostart-c9', from: 'claude', text: 'RBAC: the relay checked in with Claude 9 minutes ago and it has not started a turn: look at its pane.', isForOwner: true }])
+    expect(stallSteps(checkedIn('claude', NOW - 60_000), quiet(NOW - 600_000), NOW)).toEqual([])
+    // in notify mode the owner is told, never anything typed
+    expect(stallSteps({ ...ws, relay: relayOn({ mode: 'notify' }) }, quiet(NOW - 600_000), NOW)).toEqual([{ kind: 'tell', key: 'stalled-c9', from: 'claude', text: 'RBAC: Claude stopped without a cue line, with nothing passed on: it may need you.', isForOwner: true }])
+  })
+
+  test('a check-in is never typed over the owner\'s draft: the input line holds nothing but a dim placeholder', () => {
+    const esc = (code: string) => `\u001b[${code}`
+    expect(isInputEmpty('claude', `${esc('38;5;245m')}────\n${esc('39m')}❯ \n${esc('38;5;245m')}────`)).toBe(true)
+    expect(isInputEmpty('claude', `${esc('39m')}❯ yes, go on with the`)).toBe(false)
+    expect(isInputEmpty('codex', `• Done.\n${esc('1m')}›${esc('0m')}${esc('48;2;30;30;30m')} ${esc('2m')}Ask Codex to do anything${esc('0m')}${esc('48;2;30;30;30m')}\n  ? for shortcuts`)).toBe(true)
+    expect(isInputEmpty('codex', `${esc('1m')}›${esc('0m')} push it now`)).toBe(false)
+    // its prompt not found: not known to be empty
+    expect(isInputEmpty('claude', 'Resume from summary (recommended)')).toBeUndefined()
+    // dim however written (ESC[0;2m, with a colour); a 24-bit colour's 2 is no dim
+    expect(isInputEmpty('codex', `${esc('1m')}›${esc('0m')} ${esc('0;2m')}Ask Codex to do anything${esc('0m')}`)).toBe(true)
+    expect(isInputEmpty('codex', `› ${esc('2;38;5;245m')}Summarize recent commits${esc('22m')}`)).toBe(true)
+    expect(isInputEmpty('codex', `› ${esc('38;2;30;30;30m')}push it${esc('0m')}`)).toBe(false)
+    expect(withoutDim(`a${esc('2m')}b${esc('22m')}c${esc('48;2;2;2;2m')}d`)).toBe('acd')
+  })
+
+  test('a workspace gone quiet: a hand-off held for its peer to show at its prompt, or an agent no longer running, is told to the owner once', async () => {
+    const side = (tool: 'claude' | 'codex', turn: ReturnType<typeof done> | undefined, more: Partial<Side> = {}): Side => ({ tool, pane: tool === 'claude' ? '%1' : '%2', isBusy: false, isReady: true, ...(turn === undefined ? {} : { turn }), ...more })
+    // Claude handed over; the relay has waited for Codex to show at its prompt since HELD_LONG_MS ago
+    const held = { name: 'RBAC', relay: relayOn({ status: 'waits for the other agent to be at its prompt', at: NOW - HELD_LONG_MS }) }
+    const sides = { claude: side('claude', done('c9', READY_CODEX, NOW - HELD_LONG_MS - 5_000)), codex: side('codex', done('x1', 'from before', NOW - 86_400_000), { isReady: false }) }
+    expect(stallSteps(held, sides, NOW)).toEqual([{ kind: 'tell', key: 'held-c9', from: 'claude', text: 'RBAC: Claude\'s hand-off has waited 10 minutes for Codex to show at its prompt. Look at Codex\'s pane: a question of its own, or not running.', isForOwner: true }])
+    // ...whatever the owner typed since the relay last typed (it waits on the other agent, not on them)
+    expect(stallSteps({ ...held, relay: { ...held.relay, passedAt: NOW - 3_600_000, typedAt: NOW - 1_800_000 } }, sides, NOW).map(s => s.key)).toEqual(['held-c9'])
+    expect(stallSteps({ ...held, relay: { ...held.relay, at: NOW - HELD_LONG_MS + 1_000 } }, sides, NOW)).toEqual([])
+    expect(stallSteps({ ...held, relay: { ...held.relay, status: 'passed to Codex' } }, sides, NOW)).toEqual([])
+    // Codex no longer running in its pane, Claude idle since STALL_MS ago: told once
+    const gone = { claude: side('claude', done('c9', 'All done here.', NOW - STALL_MS)), codex: side('codex', undefined, { isGone: true }) }
+    expect(stallSteps({ name: 'RBAC', relay: relayOn() }, gone, NOW)).toEqual([{ kind: 'tell', key: 'gone-codex-c9', text: 'RBAC: Codex is no longer running in its pane. Stop the workspace and start it again (■ then ► on the Ops screen, or Close then Open), and it goes on with its conversation.', isForOwner: true }])
+    // ...not one that joined a moment ago (its pane waits for Codex's shared server to let its conversation go)
+    expect(stallSteps({ name: 'RBAC', relay: relayOn(), threads: { codex: { id: 'x', dir: '/a', since: NOW - 60_000 } } }, gone, NOW).some(s => s.key.startsWith('gone-'))).toBe(false)
+  })
+
+  test('a check-in: counted toward the cap, not toward the drift check; said so on its row and in the event log', async () => {
+    const step = { kind: 'pass' as const, key: 'checkin-c9', to: 'claude' as const, pane: '%1', line: CHECKIN_LINE, at: NOW - 600_000, isCheckIn: true }
+    expect(afterStep(relayOn({ streak: 2, sinceCheck: 3 }), step, 'passed', NOW)).toEqual({ ...relayOn({ streak: 3, sinceCheck: 3 }), passedAt: NOW, checkin: { at: NOW, tool: 'claude' }, status: 'checked in with Claude', at: NOW })
+    // a hand-off passed marks when the relay last typed; what is told of a quiet workspace keeps the count of hand-offs
+    expect(afterStep(relayOn(), { kind: 'pass', key: 'pass-c1', from: 'claude', to: 'codex', pane: '%2', line: READY_CODEX }, 'passed', NOW).passedAt).toBe(NOW)
+    expect(afterStep(relayOn({ streak: 4 }), { kind: 'tell', key: 'stalled-c9', text: 'x', isForOwner: true }, 'told', NOW)).toEqual({ ...relayOn({ streak: 4 }), status: 'needs you', at: NOW })
+    expect(afterStep(relayOn({ streak: 4 }), { kind: 'tell', key: 'tell-c9', text: 'x', isForOwner: true }, 'told', NOW).streak).toBe(0)
+    expect(eventOf({ id: 'practice-rbac', name: 'RBAC' }, step, 'passed')).toEqual({ workspace: 'practice-rbac', kind: 'checkin', text: 'RBAC: checked in with Claude: its turn ended without a cue line, nothing waiting on you', agent: 'claude' })
+    // the relay's own check-in is never taken for the owner's words
+    expect(TURN_SCRIPT).toContain(`(.[0] | startswith("${CHECKIN_START}"))`)
+  })
+
   test('the relay\'s event log: a hand-off passed or not, what is the owner\'s, a hold; nothing for a step taken already', async () => {
     const ws = { id: 'rbac', name: 'RBAC' }
     const pass = { kind: 'pass' as const, key: 'pass-x1', from: 'codex' as const, to: 'claude' as const, pane: '%1', line: READY_CLAUDE }
@@ -3975,6 +4078,87 @@ describe('the ops screen', () => {
     expect(world.events.every(e => typeof e.at === 'number')).toBe(true)
   })
 
+  test('a workspace gone quiet, through the collection: Claude checked in with once; Codex only at its prompt; never with a hand-off passed at once', async ($, on) => {
+    const { files, runs } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    // (RELAY_SCRIPT's arguments: what, the ledger, the step's key, the pane, the commands allowed in front, the line)
+    const relayRuns = () => runs.filter(r => r[2] === RELAY_SCRIPT).map(r => [r[6], r[7], r[9]?.slice(0, 19)])
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, checkout: '/Users/u/dev/web-app', relay: relayOn() }] }))
+    world.tmuxPanes = 'ws-practice-rbac\tpeers\t/dev/ttys022\t%1\tclaude\nws-practice-rbac\tpeers\t/dev/ttys045\t%2\tcodex\n'
+    world.tmuxOwner = String(NOW)
+    world.paneCommands = { '%1': 'claude', '%2': 'codex' }
+    // Codex handed over long ago (passed then); Claude's turn after it ended 6 minutes ago with no cue
+    world.ledger.add('pass-x8')
+    world.turns = { 'session-104': `done\tc9\t${new Date(NOW - 360_000).toISOString()}\tWant me to go on with the fix?`, '/rollouts/a.jsonl': `done\tx8\t${new Date(NOW - 1_200_000).toISOString()}\t${READY_CLAUDE}` }
+    // WORKER (Claude in ttys022) idle by its own status a while, nothing typed at its prompt
+    files.set('/Users/u/.claude-work/sessions/104.json', JSON.stringify({ ...JSON.parse(files.get('/Users/u/.claude-work/sessions/104.json')!), status: 'idle', statusUpdatedAt: NOW - 360_000 }))
+    world.screens['%1'] = '────\n\u001b[39m❯ \n────'
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    // typed into Claude's pane, once, as the relay types a hand-off
+    expect(relayRuns().filter(r => r[0] === 'checkin-c9')).toEqual([['checkin-c9', '%1', CHECKIN_START]])
+    expect(runs.find(r => r[2] === RELAY_SCRIPT && r[6] === 'checkin-c9')?.[9]).toBe(CHECKIN_LINE)
+    const [ws] = JSON.parse(files.get(WORKSPACES)!).workspaces
+    expect([ws.relay.status, ws.relay.checkin?.at, ws.relay.streak]).toEqual(['checked in with Claude', NOW, 1])
+    expect(world.events.map(e => [e.kind, e.agent])).toEqual([['checkin', 'claude']])
+  })
+
+  test('a check-in waits while the owner has started typing at the agent\'s prompt', async ($, on) => {
+    const { files } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, checkout: '/Users/u/dev/web-app', relay: relayOn() }] }))
+    world.tmuxPanes = 'ws-practice-rbac\tpeers\t/dev/ttys022\t%1\tclaude\nws-practice-rbac\tpeers\t/dev/ttys045\t%2\tcodex\n'
+    world.tmuxOwner = String(NOW)
+    world.paneCommands = { '%1': 'claude', '%2': 'codex' }
+    world.ledger.add('pass-x8')
+    world.turns = { 'session-104': `done\tc9\t${new Date(NOW - 360_000).toISOString()}\tWant me to go on with the fix?`, '/rollouts/a.jsonl': `done\tx8\t${new Date(NOW - 1_200_000).toISOString()}\t${READY_CLAUDE}` }
+    files.set('/Users/u/.claude-work/sessions/104.json', JSON.stringify({ ...JSON.parse(files.get('/Users/u/.claude-work/sessions/104.json')!), status: 'idle', statusUpdatedAt: NOW - 360_000 }))
+    // the owner's half-written answer at Claude's prompt
+    world.screens['%1'] = '────\n\u001b[39m❯ yes, go on but skip the\n────'
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    expect(world.ledger.has('checkin-c9')).toBe(false)
+  })
+
+  test('a hand-off passed in a collection: no check-in typed after it in the same one', async ($, on) => {
+    const { files } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, checkout: '/Users/u/dev/web-app', relay: relayOn() }] }))
+    world.tmuxPanes = 'ws-practice-rbac\tpeers\t/dev/ttys022\t%1\tclaude\nws-practice-rbac\tpeers\t/dev/ttys045\t%2\tcodex\n'
+    world.tmuxOwner = String(NOW)
+    world.paneCommands = { '%1': 'claude', '%2': 'codex' }
+    // Codex's hand-off not passed yet (Claude was at work then); Claude's own turn since ended with no cue, 6 minutes ago
+    world.turns = { 'session-104': `done\tc9\t${new Date(NOW - 360_000).toISOString()}\tLooking into it.`, '/rollouts/a.jsonl': `done\tx8\t${new Date(NOW - 1_200_000).toISOString()}\t${READY_CLAUDE}` }
+    files.set('/Users/u/.claude-work/sessions/104.json', JSON.stringify({ ...JSON.parse(files.get('/Users/u/.claude-work/sessions/104.json')!), status: 'idle', statusUpdatedAt: NOW - 360_000 }))
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    // the hand-off typed into Claude; the check-in not (Claude is at work on it now)
+    expect([world.ledger.has('pass-x8'), world.ledger.has('checkin-c9')]).toEqual([true, false])
+  })
+
+  test('a check-in for Codex waits until its pane shows it at its prompt', async ($, on) => {
+    const { runs, clock } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    const checkins = () => runs.filter(r => r[2] === RELAY_SCRIPT && r[6] === 'checkin-x9').length
+    world.files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, checkout: '/Users/u/dev/web-app', relay: relayOn() }] }))
+    world.tmuxPanes = 'ws-practice-rbac\tpeers\t/dev/ttys022\t%1\tclaude\nws-practice-rbac\tpeers\t/dev/ttys045\t%2\tcodex\n'
+    world.tmuxOwner = String(NOW)
+    world.paneCommands = { '%1': 'claude', '%2': 'codex' }
+    world.ledger.add('pass-c8')
+    // Claude handed over long ago; Codex's turn after it ended 6 minutes ago with no cue
+    world.turns = { 'session-104': `done\tc8\t${new Date(NOW - 1_200_000).toISOString()}\t${READY_CODEX}`, '/rollouts/a.jsonl': `done\tx9\t${new Date(NOW - 360_000).toISOString()}\tShall I push it?` }
+    world.files.set('/Users/u/.claude-work/sessions/104.json', JSON.stringify({ ...JSON.parse(world.files.get('/Users/u/.claude-work/sessions/104.json')!), status: 'idle', statusUpdatedAt: NOW - 1_200_000 }))
+    // Codex's pane shows a dialog of its own: not now
+    world.screens['%2'] = '• Done.\n\n        Resume paused goal?\n        › 1. Resume goal\n\n› Ask Codex to do anything\n\n  GPT-6 · ~/x\n  ? for shortcuts'
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    // (its pane was looked at, and nothing typed)
+    expect(runs.some(r => r[0] === 'tmux' && r[1] === 'capture-pane' && r.includes('%2'))).toBe(true)
+    expect([checkins(), world.ledger.has('checkin-x9')]).toEqual([0, false])
+    // at its prompt, at the next collection: typed, once (the ledger takes a step once, however many collections)
+    world.screens['%2'] = '• Done.\n─ Worked for 3m ─\n\n› \u001b[2mAsk Codex to do anything\u001b[0m\n\n  GPT-6 · ~/x\n  ? for shortcuts'
+    await clock.advance(10_000)
+    await $.command.run(SESSIONS)
+    expect(world.ledger.has('checkin-x9')).toBe(true)
+    expect(world.events.filter(e => e.kind === 'checkin').map(e => e.agent)).toEqual(['codex'])
+  })
+
   test('Ops screen opens the ops console, from this plugin\'s folder, in a Terminal window over the screen in use, in this tab\'s own font', async ($, on) => {
     const { runs } = engine(on, machine, { termProgram: 'Apple_Terminal', selfId: 'session-104' })
     await $.session.start(START)
@@ -4007,6 +4191,8 @@ describe('the drift check', () => {
     expect(checkDue({ relay: { sinceCheck: 7 } }, pass, 'taken')).toBe(false)
     expect(checkDue({ checkEvery: 8, relay: { sinceCheck: 3 } }, pass, 'passed')).toBe(false)
     expect(checkDue({ checkEvery: 0, relay: { sinceCheck: 9 } }, pass, 'passed')).toBe(false)
+    // a check-in is no hand-off: never the one that makes the count
+    expect(checkDue({ relay: { sinceCheck: 3 } }, { ...pass, isCheckIn: true }, 'passed')).toBe(false)
     // the agents closing their scope, by the cue's kind (not words a hand-off may quote)
     expect(checkDue({}, { kind: 'tell', cue: 'scope-closed' }, 'told')).toBe(true)
     expect(checkDue({}, { kind: 'tell', cue: 'scope-closed' }, 'failed')).toBe(false)

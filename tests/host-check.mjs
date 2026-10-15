@@ -252,7 +252,8 @@ if (process.argv.includes('--slow')) {
   check('holders: the process holding a conversation\'s rollout open', holders(id, 0) === `held ${holder.pid}`, holders(id, 0))
   check('holders: a conversation nothing holds is free; part of an id is no id', holders(id.replace(/^0000/, '9999'), 0) === 'free' && holders(id.slice(4), 0) === 'free')
   const at = Date.now()
-  check('holders: still held after the wait asked for', holders(id, 2) === `held ${holder.pid}` && Date.now() - at >= 2_000, `${Date.now() - at} ms`)
+  // (it waits by the clock's whole seconds: 2 of them end a second or more on)
+  check('holders: still held after the wait asked for', holders(id, 2) === `held ${holder.pid}` && Date.now() - at >= 1_000, `${Date.now() - at} ms`)
   const waited = new Promise(res => {
     const t0 = Date.now()
     const child = spawn('/bin/sh', ['-c', b.HOLDERS_SCRIPT, 'sh', id, '20'], { stdio: ['ignore', 'pipe', 'ignore'] })
@@ -798,6 +799,11 @@ except ChildProcessError: pass
     { type: 'event_msg', timestamp: '2026-10-09T11:00:00Z', payload: { type: 'task_started', turn_id: 't-1' } },
     { type: 'event_msg', timestamp: '2026-10-09T11:00:09Z', payload: { type: 'turn_aborted', turn_id: 't-1', reason: 'interrupted' } },
   ])
+  // a turn Codex aborted for another reason: ended, not stopped by the owner
+  const codexAbortedOther = jsonl('x-aborted-other.jsonl', [
+    { type: 'event_msg', timestamp: '2026-10-09T11:10:00Z', payload: { type: 'task_started', turn_id: 't-2' } },
+    { type: 'event_msg', timestamp: '2026-10-09T11:10:09Z', payload: { type: 'turn_aborted', turn_id: 't-2', reason: 'replaced' } },
+  ])
   // when the owner last typed: a prompt, a command or a paste, never the relay's cue line, a background
   // task's notice, an interrupt, a skill the agent ran, a command's output, a meta record or a summary
   const typedClaude = jsonl('c-typed.jsonl', [
@@ -826,6 +832,18 @@ except ChildProcessError: pass
   // records marked by who made them: the owner's prompt, one queued while the agent worked; not a task's
   // notice, a queued notice, the relay's cue (pasted, wrapped or not)
   const human = { kind: 'human' }
+  // the relay's own check-in, typed as the owner types (origin human): never taken for the owner's words
+  const typedCheckin = jsonl('c-typed-checkin.jsonl', [ended,
+    { type: 'user', uuid: 'k1', origin: human, timestamp: '2026-10-09T10:20:00Z', message: { content: 'go on with the fix' } },
+    { type: 'user', uuid: 'k2', origin: human, timestamp: '2026-10-09T10:40:00Z', message: { content: r.CHECKIN_LINE } },
+  ])
+  const typedCheckinCodex = jsonl('x-typed-checkin.jsonl', [
+    { type: 'event_msg', timestamp: '2026-10-09T13:00:00Z', payload: { type: 'item_completed', item: { type: 'UserMessage', content: [{ type: 'text', text: 'push it' }] } } },
+    { type: 'event_msg', timestamp: '2026-10-09T13:00:01Z', payload: { type: 'task_started', turn_id: 't-5' } },
+    { type: 'event_msg', timestamp: '2026-10-09T13:05:00Z', payload: { type: 'task_complete', turn_id: 't-5', last_agent_message: 'Shall I push?' } },
+    { type: 'event_msg', timestamp: '2026-10-09T13:20:00Z', payload: { type: 'item_completed', item: { type: 'UserMessage', content: [{ type: 'text', text: r.CHECKIN_LINE }] } } },
+    { type: 'event_msg', timestamp: '2026-10-09T13:20:01Z', payload: { type: 'task_started', turn_id: 't-6' } },
+  ])
   const typedMarked = jsonl('c-typed-marked.jsonl', [
     { type: 'user', uuid: 'q1', origin: human, timestamp: '2026-10-09T11:00:00Z', message: { content: 'go on' } },
     ended,
@@ -889,12 +907,13 @@ except ChildProcessError: pass
     { type: 'event_msg', timestamp: '2026-10-09T12:00:01Z', payload: { type: 'task_started', turn_id: 't-3' } },
     { type: 'event_msg', timestamp: '2026-10-09T12:01:00Z', payload: { type: 'user_message', message: 'NEEDS USER · peer-coding/feat-x · feat/x@abc1234' } },
   ])
-  const out = spawnSync('/bin/sh', ['-c', r.TURN_SCRIPT, 'sh', claudeDone, claudeBusy, codexDone, codexBusy, join(scratch, 'none.jsonl'), afterCommands, interrupted, midTurn, split, codexAborted, skillBusy, skillDone, apiError, typedClaude, typedCommand, typedBash, typedCue, typedCodex, typedCodexOld, typedMarked, typedPaste, typedOdd, compacted, quotesCompact, codexFilled], { encoding: 'utf8', timeout: 15_000 })
+  const out = spawnSync('/bin/sh', ['-c', r.TURN_SCRIPT, 'sh', claudeDone, claudeBusy, codexDone, codexBusy, join(scratch, 'none.jsonl'), afterCommands, interrupted, midTurn, split, codexAborted, codexAbortedOther, skillBusy, skillDone, apiError, typedClaude, typedCommand, typedBash, typedCue, typedCheckin, typedCheckinCodex, typedCodex, typedCodexOld, typedMarked, typedPaste, typedOdd, compacted, quotesCompact, codexFilled], { encoding: 'utf8', timeout: 15_000 })
   const turns = r.parseTurns(out.stdout)
   // Claude's last compaction, of its own (a subagent's is not), when and how large; one with no size said is 0
   check('turns: the last compaction of the session itself, when and how large', JSON.stringify([turns.get(compacted)?.compacted, turns.get(afterCommands)?.compacted, turns.get(claudeDone)?.compacted]) === JSON.stringify([{ at: Date.parse('2026-10-09T14:06:30Z'), tokens: 437000 }, { at: Date.parse('2026-10-09T10:07:00Z'), tokens: 0 }, undefined]), JSON.stringify([turns.get(compacted)?.compacted, turns.get(afterCommands)?.compacted]))
   check('turns: a command run in the session, its output, a compaction or a meta record starts no turn', turns.get(afterCommands)?.state === 'done' && turns.get(afterCommands)?.id === 'e1' && turns.get(afterCommands)?.cue?.line === cue, JSON.stringify(turns.get(afterCommands)))
   check('turns: an interrupt ends a turn, with no cue', turns.get(interrupted)?.state === 'done' && turns.get(interrupted)?.id === 'i1' && turns.get(interrupted)?.cue === undefined)
+  check('turns: a turn an interrupt ended is marked stopped (Claude, Codex); one that finished is not', turns.get(interrupted)?.isStopped === true && turns.get(codexAborted)?.isStopped === true && turns.get(claudeDone)?.isStopped === undefined && turns.get(codexDone)?.isStopped === undefined && turns.get(codexAbortedOther)?.state === 'done' && turns.get(codexAbortedOther)?.isStopped === undefined, JSON.stringify([turns.get(interrupted)?.isStopped, turns.get(codexAborted)?.isStopped, turns.get(claudeDone)?.isStopped, turns.get(codexDone)?.isStopped, turns.get(codexAbortedOther)]))
   check('turns: a reply that stopped for a tool is a turn under way', turns.get(midTurn)?.state === 'busy' && turns.get(midTurn)?.id === 'a3')
   check('turns: a skill starts a turn: under way while it calls tools, finished with its reply', turns.get(skillBusy)?.state === 'busy' && turns.get(skillDone)?.state === 'done' && turns.get(skillDone)?.id === 'k2' && turns.get(skillDone)?.cue === undefined, `${turns.get(skillBusy)?.state} ${turns.get(skillDone)?.id}`)
   check('turns: an error that ends the reply ends the turn', turns.get(apiError)?.state === 'done' && turns.get(apiError)?.id === 'err1')
@@ -915,13 +934,14 @@ except ChildProcessError: pass
   check('typed: a prompt queued with an image counts by its text; a cue with a long run of spaces stays the relay\'s, read at once; an odd origin breaks nothing', typedAt(typedOdd) === Date.parse('2026-10-09T13:10:00Z') && turns.get(typedOdd)?.state === 'busy', `${typedAt(typedOdd)} ${out.error ?? ''}`)
   check('typed: a command and a shell command typed in the session are the owner\'s', typedAt(typedCommand) === Date.parse('2026-10-09T10:06:00Z') && typedAt(typedBash) === Date.parse('2026-10-09T10:07:00Z'))
   check('typed: a cue pasted with words of the owner\'s own is theirs', typedAt(typedCue) === Date.parse('2026-10-09T10:08:00Z'))
+  check('typed: the relay\'s check-in is never the owner\'s words (Claude, Codex)', typedAt(typedCheckin) === Date.parse('2026-10-09T10:20:00Z') && typedAt(typedCheckinCodex) === Date.parse('2026-10-09T13:00:00Z'), `${typedAt(typedCheckin)} ${typedAt(typedCheckinCodex)}`)
   check('typed: Codex\'s prompt (item_completed, or user_message before), not the relay\'s cue nor injected context', typedAt(typedCodex) === Date.parse('2026-10-09T11:00:00Z') && typedAt(typedCodexOld) === Date.parse('2026-10-09T12:00:00Z'), `${typedAt(typedCodex)} ${typedAt(typedCodexOld)}`)
   check('typed: the skill command the owner typed; none where the owner never typed', typedAt(claudeDone) === Date.parse('2026-10-09T10:00:00Z') && typedAt(skillDone) === Date.parse('2026-10-09T10:20:00Z') && typedAt(codexDone) === undefined && typedAt(codexAborted) === undefined)
   // on this Mac's own records, read only: each answers in the expected form
   const real = readdirSync(join(home, '.claude', 'projects'), { withFileTypes: true }).filter(d => d.isDirectory()).slice(0, 3)
     .flatMap(d => readdirSync(join(home, '.claude', 'projects', d.name)).filter(f => f.endsWith('.jsonl')).slice(0, 2).map(f => join(home, '.claude', 'projects', d.name, f)))
   const realOut = spawnSync('/bin/sh', ['-c', r.TURN_SCRIPT, 'sh', ...real], { encoding: 'utf8' }).stdout
-  check('turns: this Mac\'s own transcripts read in that form', realOut.split('\n').filter(l => l !== '').every(l => l.startsWith('==> ') || /^(done|busy)\t[A-Za-z0-9-]+\t\S+\t[^\t]*\t\S*\t(\d{1,3})?\t\S*\t(\d+)?$/.test(l)), `${real.length} files`)
+  check('turns: this Mac\'s own transcripts read in that form', realOut.split('\n').filter(l => l !== '').every(l => l.startsWith('==> ') || /^(done|busy)\t[A-Za-z0-9-]+\t\S+\t[^\t]*\t\S*\t(\d{1,3})?\t\S*\t(\d+)?\t(stopped)?$/.test(l)), `${real.length} files`)
 
   const socket = `live-sessions-relay-${process.pid}`
   // a private server that reads no tmux.conf: the person's plugins (a session restore) never run in it

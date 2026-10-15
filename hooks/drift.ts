@@ -11,10 +11,11 @@ export const DRIFT_EVERY = 4
  * `checkEvery` (DRIFT_EVERY unless set; 0 is off) passed since the last
  * check, or the agents' SCOPE CLOSED told to the owner.
  */
-export function checkDue(ws: Pick<Workspace, 'checkEvery'> & { relay?: Pick<Relay, 'sinceCheck'> }, step: { kind: string; cue?: string }, outcome: string): boolean {
+export function checkDue(ws: Pick<Workspace, 'checkEvery'> & { relay?: Pick<Relay, 'sinceCheck'> }, step: { kind: string; cue?: string; isCheckIn?: boolean }, outcome: string): boolean {
   const every = ws.checkEvery ?? DRIFT_EVERY
   if (every <= 0) return false
-  if (step.kind === 'pass') return outcome === 'passed' && (ws.relay?.sinceCheck ?? 0) + 1 >= every
+  // (a check-in is no hand-off: no milestone to check at)
+  if (step.kind === 'pass') return outcome === 'passed' && step.isCheckIn !== true && (ws.relay?.sinceCheck ?? 0) + 1 >= every
   return step.kind === 'tell' && step.cue === 'scope-closed' && outcome === 'told'
 }
 

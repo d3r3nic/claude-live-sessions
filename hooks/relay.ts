@@ -14,6 +14,20 @@ export const TURN_MAX_AGE_MS = 7 * 24 * 3600_000
 type Tool = 'claude' | 'codex'
 const NAME: Record<Tool, string> = { claude: 'Claude', codex: 'Codex' }
 
+/** How a check-in the relay types begins: so it is never taken for the owner's own words (TURN_SCRIPT's `typed`). */
+export const CHECKIN_START = 'Workspace check-in:'
+/**
+ * What the relay types into an agent whose turn ended with no cue while nothing waits on the owner (stallSteps): go on
+ * with the plan if it is clear, else say what it needs, always ending with a cue the relay can act on.
+ */
+export const CHECKIN_LINE = `${CHECKIN_START} your last turn ended without a cue line, and nothing waits on the owner. If the next step of your plan is clear, carry on with it, and end a finished piece with the peer-coding cue line (READY FOR …). If you need the owner's decision, end with NEEDS USER and your question; if the scope is done, with SCOPE CLOSED.`
+/** How long both agents are idle, the last turn having ended with no cue and the owner silent since, before a check-in. */
+export const STALL_MS = 5 * 60_000
+/** How long a hand-off may wait for the other agent to show at its prompt before the owner is told. */
+export const HELD_LONG_MS = 10 * 60_000
+/** How long after a turn ended with no cue a check-in is still typed; one quiet longer is left as it is (put aside). */
+export const CHECKIN_WITHIN_MS = 2 * 3_600_000
+
 export type Cue = { kind: 'ready'; to: Tool; line: string } | { kind: 'needs-user' | 'scope-closed'; line: string }
 
 /** A cue as the rules' `cue` prints it, at the start of a line; a list mark, quote or code marks around it are dropped. */
@@ -70,17 +84,17 @@ export const TURN_SCRIPT = [
   '        else {state: "done", id: $o.uuid, at: $o.timestamp, mid: $o.message.id, text: ($o | said)} end',
   '      elif $o.type == "user" and $o.isMeta != true and $o.isCompactSummary != true and ([$o.message.content[]?.type] | index("tool_result") | not) then',
   '        ($o | said) as $s',
-  '        | if ($s | test("^\\\\[Request interrupted")) then {state: "done", id: $o.uuid, at: $o.timestamp, text: ""}',
+  '        | if ($s | test("^\\\\[Request interrupted")) then {state: "done", id: $o.uuid, at: $o.timestamp, text: "", stopped: true}',
   '          elif ($s | test("^\\\\s*<(command-name|command-message|local-command-|bash-input|bash-stdout|bash-stderr)") or ($s | compacting)) then .',
   '          else {state: "busy", id: $o.uuid, at: $o.timestamp, text: ""} end',
   '      elif $o.type == "event_msg" and $o.payload.type == "task_complete" then {state: "done", id: $o.payload.turn_id, at: $o.timestamp, text: ($o.payload.last_agent_message // "")}',
-  '      elif $o.type == "event_msg" and $o.payload.type == "turn_aborted" then {state: "done", id: $o.payload.turn_id, at: $o.timestamp, text: ""}',
+  '      elif $o.type == "event_msg" and $o.payload.type == "turn_aborted" then {state: "done", id: $o.payload.turn_id, at: $o.timestamp, text: "", stopped: (($o.payload.reason // "interrupted") == "interrupted")}',
   '      elif $o.type == "event_msg" and $o.payload.type == "task_started" then {state: "busy", id: $o.payload.turn_id, at: $o.timestamp, text: ""}',
   '      else . end;',
   '    def text: if (.content | type) == "string" then .content else ([.content[]? | select(.type == "text") | .text] | join("\\n")) end;',
   // the relay's own message is one line, a cue; a paste's wrapper is not the owner's words, so a cue pasted alone
   // is still only a cue (lines are split, not trimmed: a trim's regex slows on a long run of spaces)
-  '    def typed: gsub("</?pasted_content[^>]*>"; "") | [splits("\\n") | select(test("\\\\S"))] | (length == 1 and (.[0] | cue) != "") | not;',
+  `    def typed: gsub("</?pasted_content[^>]*>"; "") | [splits("\\n") | select(test("\\\\S"))] | (length == 1 and ((.[0] | cue) != "" or (.[0] | startswith("${CHECKIN_START}")))) | not;`,
   '    def textOf: if type == "string" then . elif type == "array" then [.[]? | objects | select(.type == "text") | .text | strings] | join("\\n") else "" end;',
   '    def kindOf: if type == "object" then .kind else null end;',
   // what the person typed: Claude Code marks it `origin.kind: human` (a prompt, a skill or prompt command, a
@@ -103,7 +117,7 @@ export const TURN_SCRIPT = [
   '      {t: (.t | step($o)), o: (if ($o | owner) then $o.timestamp else .o end),',
   '       c: (if $o.type == "event_msg" and $o.payload.type == "token_count" then ($o | filled) // .c else .c end),',
   '       k: (if $o.type == "system" and $o.subtype == "compact_boundary" and ($o.timestamp | type) == "string" then {at: $o.timestamp, tokens: (($o.compactMetadata.preTokens // 0) | if type == "number" then floor else 0 end)} else .k end)})',
-  '    | .o as $typed | .c as $filled | .k as $k | .t | select(. != null) | [.state, .id, .at, ((.text // "") | cue), $typed, $filled, ($k.at // ""), ($k.tokens // "")] | map(. // "" | tostring) | join("\\t")',
+  '    | .o as $typed | .c as $filled | .k as $k | .t | select(. != null) | [.state, .id, .at, ((.text // "") | cue), $typed, $filled, ($k.at // ""), ($k.tokens // ""), (if .stopped == true then "stopped" else "" end)] | map(. // "" | tostring) | join("\\t")',
   "  ' 2>/dev/null",
   'done',
 ].join('\n')
@@ -113,7 +127,7 @@ export const TURN_SCRIPT = [
  * reads); `filled`, how full a Codex conversation's context is, in percent; `compacted`, Claude's last
  * compaction of any kind, when and how large its context was (as far back as the pipeline reads).
  */
-export type Turn = { state: 'done' | 'busy'; id: string; at: number; cue?: Cue; typedAt?: number; filled?: number; compacted?: { at: number; tokens: number } }
+export type Turn = { state: 'done' | 'busy'; id: string; at: number; cue?: Cue; typedAt?: number; filled?: number; compacted?: { at: number; tokens: number }; isStopped?: boolean }
 
 /** TURN_SCRIPT's answer: each file's last turn. */
 export function parseTurns(stdout: string): Map<string, Turn> {
@@ -124,7 +138,7 @@ export function parseTurns(stdout: string): Map<string, Turn> {
       file = line.slice(4)
       continue
     }
-    const [state, id = '', iso = '', cueLine = '', typedIso = '', filledText = '', compactedIso = '', compactedTokens = ''] = line.split('\t')
+    const [state, id = '', iso = '', cueLine = '', typedIso = '', filledText = '', compactedIso = '', compactedTokens = '', stopped = ''] = line.split('\t')
     const at = Date.parse(iso)
     if (file === '' || (state !== 'done' && state !== 'busy') || !/^[A-Za-z0-9-]{1,80}$/.test(id) || Number.isNaN(at)) continue
     const cue = state === 'done' ? cueOf(cueLine) : undefined
@@ -132,7 +146,7 @@ export function parseTurns(stdout: string): Map<string, Turn> {
     const filled = /^\d{1,3}$/.test(filledText) ? Number(filledText) : undefined
     const compactedAt = Date.parse(compactedIso)
     const compacted = Number.isNaN(compactedAt) || !/^\d{1,9}$/.test(compactedTokens) ? undefined : { at: compactedAt, tokens: Number(compactedTokens) }
-    turns.set(file, { state, id, at, ...(cue === undefined ? {} : { cue }), ...(Number.isNaN(typedAt) ? {} : { typedAt }), ...(filled === undefined ? {} : { filled }), ...(compacted === undefined ? {} : { compacted }) })
+    turns.set(file, { state, id, at, ...(cue === undefined ? {} : { cue }), ...(Number.isNaN(typedAt) ? {} : { typedAt }), ...(filled === undefined ? {} : { filled }), ...(compacted === undefined ? {} : { compacted }), ...(stopped === 'stopped' && state === 'done' ? { isStopped: true } : {}) })
   }
   return turns
 }
@@ -143,7 +157,7 @@ export function parseTurns(stdout: string): Map<string, Turn> {
  * no question of its own open (`isReady`), as its pane and (Claude) its registry show it when a hand-off waits for it
  * (screenReady).
  */
-export type Side = { tool: Tool; pane: string; turn?: Turn; isBusy: boolean; isReady?: boolean }
+export type Side = { tool: Tool; pane: string; turn?: Turn; isBusy: boolean; isReady?: boolean; isGone?: boolean }
 /** How long Claude's registry has said idle before it is taken to be at its prompt (it may write idle a moment before a question opens). */
 export const CLAUDE_IDLE_MS = 3_000
 /**
@@ -195,7 +209,7 @@ export function screenReady(tool: Tool, screen: string): boolean {
  * - `tell`: tell the owner.
  */
 export type Step =
-  | { kind: 'pass'; key: string; from?: Tool; to: Tool; pane: string; line: string; at?: number }
+  | { kind: 'pass'; key: string; from?: Tool; to: Tool; pane: string; line: string; at?: number; isCheckIn?: boolean }
   | { kind: 'tell'; key: string; from?: Tool; text: string; isForOwner: boolean; cue?: Cue['kind'] }
 
 /**
@@ -207,6 +221,10 @@ export type Step =
  * owner's: they are told.
  */
 export function relaySteps(ws: Pick<Workspace, 'name' | 'relay'> & Partial<Pick<Workspace, 'threads'>>, sides: Partial<Record<Tool, Side>>, now: number, cap = RELAY_CAP): Step[] {
+  return [...cueSteps(ws, sides, now, cap), ...stallSteps(ws, sides, now, cap)]
+}
+
+function cueSteps(ws: Pick<Workspace, 'name' | 'relay'> & Partial<Pick<Workspace, 'threads'>>, sides: Partial<Record<Tool, Side>>, now: number, cap: number): Step[] {
   const relay: Relay | undefined = ws.relay
   if (relay === undefined || relay.mode === 'off') return []
   const steps: Step[] = []
@@ -240,6 +258,108 @@ export function relaySteps(ws: Pick<Workspace, 'name' | 'relay'> & Partial<Pick<
     }
   }
   return steps
+}
+
+/**
+ * What the relay does when a workspace has gone quiet with nothing for it to pass: every agent present idle and each
+ * one's last turn readable. It looks at the last turn of either agent since the relay was turned on:
+ * - Stopped by the owner (an interrupt) or ended with their cue (NEEDS USER, SCOPE CLOSED): nothing, however long.
+ * - Ended with no cue, STALL_MS to CHECKIN_WITHIN_MS ago (later: left as it is), the owner silent since the relay last
+ *   typed into an agent (`passedAt`; else since it was turned on; the owner leads otherwise): the relay checks in with
+ *   that agent (CHECKIN_LINE), once; in `notify` mode, at its cap, or when that agent ended so again after a check-in
+ *   of its own with the owner silent since, the owner is told instead, once, and nothing more is typed until they
+ *   type. A check-in that started no turn in STALL_MS is told to the owner, once.
+ * - Its hand-off has waited HELD_LONG_MS for the other agent to show at its prompt: the owner is told, once.
+ * - An agent of the pair is no longer running in its pane (and joined it STALL_MS ago or more): the owner is told,
+ *   once, STALL_MS after the last turn.
+ */
+export function stallSteps(ws: Pick<Workspace, 'name' | 'relay'> & Partial<Pick<Workspace, 'threads'>>, sides: Partial<Record<Tool, Side>>, now: number, cap = RELAY_CAP): Step[] {
+  const relay = ws.relay
+  if (relay === undefined || relay.mode === 'off') return []
+  const present = (['claude', 'codex'] as const).flatMap(tool => (sides[tool] === undefined ? [] : [sides[tool]!]))
+  // at work, or at work for all the relay can tell (a turn it cannot read): nothing
+  if (present.length === 0 || present.some(side => side.isBusy || (side.turn === undefined && side.isGone !== true))) return []
+  const last = present
+    .filter(side => side.turn?.state === 'done' && side.turn.at >= relay.since)
+    .sort((a, b) => b.turn!.at - a.turn!.at)[0]
+  if (last === undefined) return []
+  const turn = last.turn!
+  if (now - turn.at > TURN_MAX_AGE_MS) return []
+  const cue = turn.cue
+  // stopped by the owner, or waiting on them: nothing
+  if (turn.isStopped === true || (cue !== undefined && cue.kind !== 'ready')) return []
+  const gone = present.find(side => side.isGone === true && now - (ws.threads?.[side.tool]?.since ?? 0) >= STALL_MS)
+  if (gone !== undefined) {
+    return now - turn.at < STALL_MS ? [] : [{ kind: 'tell', key: `gone-${gone.tool}-${turn.id}`, text: `${ws.name}: ${NAME[gone.tool]} is no longer running in its pane. Stop the workspace and start it again (■ then ► on the Ops screen, or Close then Open), and it goes on with its conversation.`, isForOwner: true }]
+  }
+  if (cue !== undefined) {
+    if (relay.status !== 'waits for the other agent to be at its prompt' || relay.at === undefined || now - relay.at < HELD_LONG_MS) return []
+    const other = NAME[cue.to]
+    return [{ kind: 'tell', key: `held-${turn.id}`, from: last.tool, text: `${ws.name}: ${NAME[last.tool]}'s hand-off has waited ${Math.round((now - relay.at) / 60_000)} minutes for ${other} to show at its prompt. Look at ${other}'s pane: a question of its own, or not running.`, isForOwner: true }]
+  }
+  // the owner has typed since the relay last typed into an agent (the agents' records, or as the relay saw it when a
+  // long turn's prompt is past what is read of them): theirs to lead
+  const typedAt = Math.max(relay.typedAt ?? 0, ...present.map(side => side.turn?.typedAt ?? 0))
+  if (typedAt > Math.max(relay.passedAt ?? 0, relay.since)) return []
+  const checkin = relay.checkin
+  // checked in with, the owner silent since, and no turn started since: said, once
+  const isCheckedIn = checkin !== undefined && checkin.tool === last.tool && typedAt <= checkin.at
+  if (isCheckedIn && turn.at < checkin!.at) {
+    return now - checkin!.at < STALL_MS ? [] : [{ kind: 'tell', key: `nostart-${turn.id}`, from: last.tool, text: `${ws.name}: the relay checked in with ${NAME[last.tool]} ${Math.round((now - checkin!.at) / 60_000)} minutes ago and it has not started a turn: look at its pane.`, isForOwner: true }]
+  }
+  if (now - turn.at < STALL_MS || now - turn.at > CHECKIN_WITHIN_MS) return []
+  // after a check-in of its own, with the owner silent since; in notify mode; or at the relay's cap: told, once
+  if (isCheckedIn || relay.mode === 'notify' || relay.streak >= cap) {
+    return [{ kind: 'tell', key: `stalled-${turn.id}`, from: last.tool, text: `${ws.name}: ${NAME[last.tool]} stopped without a cue line${isCheckedIn ? ' again, after a check-in' : ''}, with nothing passed on: it may need you.`, isForOwner: true }]
+  }
+  // (Claude idle a few seconds by its own status, never at a question: CLAUDE_IDLE_MS)
+  if (last.isReady === false) return []
+  return [{ kind: 'pass', key: `checkin-${turn.id}`, to: last.tool, pane: last.pane, line: CHECKIN_LINE, at: turn.at, isCheckIn: true }]
+}
+
+/** Whether a step is one of stallSteps': a check-in, or what is told of a workspace gone quiet. */
+export const isStallStep = (step: Step) => (step.kind === 'pass' && step.isCheckIn === true) || /^(stalled|held|gone|nostart)-/.test(step.key)
+
+/**
+ * A line as `tmux capture-pane -p -e` shows it, its styles taken out and what is drawn dim (SGR 2, however it is
+ * written: `ESC[2m`, `ESC[0;2m`; never the 2 of a 24-bit colour, `38;2;r;g;b`) left out, until a reset (0, 22).
+ */
+export function withoutDim(line: string): string {
+  let out = ''
+  let isDim = false
+  // eslint-disable-next-line no-control-regex
+  for (const part of line.split(/(\u001b\[[0-9;?]*[A-Za-z])/)) {
+    // eslint-disable-next-line no-control-regex
+    const sgr = /^\u001b\[([0-9;]*)m$/.exec(part)
+    if (sgr !== null) {
+      const codes = sgr[1] === '' ? ['0'] : sgr[1]!.split(';')
+      for (let i = 0; i < codes.length; i++) {
+        const code = codes[i]
+        // a colour's own numbers: 38;5;n, 38;2;r;g;b (and 48, 58)
+        if ((code === '38' || code === '48' || code === '58') && codes[i + 1] === '5') i += 2
+        else if ((code === '38' || code === '48' || code === '58') && codes[i + 1] === '2') i += 4
+        else if (code === '2') isDim = true
+        else if (code === '0' || code === '22' || code === '') isDim = false
+      }
+      continue
+    }
+    // eslint-disable-next-line no-control-regex
+    if (/^\u001b\[/.test(part)) continue
+    if (!isDim) out += part
+  }
+  return out
+}
+
+/**
+ * Whether an agent's input line, in its pane as `tmux capture-pane -p -e` shows it, holds nothing typed: Claude's
+ * prompt (`❯`) or Codex's (`›`) with nothing after it but what is drawn dim (a placeholder: `Ask Codex to do anything`).
+ * Undefined when the line is not found. A check-in is never typed over the owner's draft.
+ */
+export function isInputEmpty(tool: Tool, screen: string): boolean | undefined {
+  const marker = tool === 'claude' ? '❯' : '›'
+  const plain = (line: string) => withoutDim(line)
+  const line = screen.split('\n').map(plain).filter(l => l.trimStart().startsWith(marker)).at(-1)
+  return line === undefined ? undefined : line.trimStart().slice(marker.length).trim() === ''
 }
 
 /**
@@ -293,7 +413,9 @@ export function eventOf(ws: Pick<Workspace, 'id' | 'name'>, step: Step, outcome:
   if (step.kind === 'pass') {
     const why = passFailure(outcome)
     return why === undefined
-      ? { ...at, kind: 'relay', text: `${ws.name}: ${step.from === undefined ? '' : `${NAME[step.from]} → `}${NAME[step.to]}: ${step.line}`, agent: step.to }
+      ? step.isCheckIn === true
+        ? { ...at, kind: 'checkin', text: `${ws.name}: checked in with ${NAME[step.to]}: its turn ended without a cue line, nothing waiting on you`, agent: step.to }
+        : { ...at, kind: 'relay', text: `${ws.name}: ${step.from === undefined ? '' : `${NAME[step.from]} → `}${NAME[step.to]}: ${step.line}`, agent: step.to }
       : { ...at, kind: 'failed', text: `${ws.name}: not passed to ${NAME[step.to]}: ${why}`, agent: step.to }
   }
   // a tell that did not happen (its ledger step could not be made) is no event
@@ -410,11 +532,15 @@ export function afterOwner(relay: Relay, sides: Partial<Record<Tool, Side>>): Re
 /** The relay's state after a step: a pass counts toward the cap; a cue for the owner starts the count again. */
 export function afterStep(relay: Relay, step: Step, outcome: string, now: number): Relay {
   // said after what the pass said, which it follows
-  if (step.kind === 'pass' && outcome === 'passed') return { ...relay, streak: relay.streak + 1, sinceCheck: (relay.sinceCheck ?? 0) + 1, status: `passed to ${NAME[step.to]}`, at: now }
+  // a check-in counts toward the cap (never typed round and round), not toward the next drift check
+  if (step.kind === 'pass' && step.isCheckIn === true && outcome === 'passed') return { ...relay, streak: relay.streak + 1, passedAt: now, checkin: { at: now, tool: step.to }, status: `checked in with ${NAME[step.to]}`, at: now }
+  if (step.kind === 'pass' && outcome === 'passed') return { ...relay, streak: relay.streak + 1, sinceCheck: (relay.sinceCheck ?? 0) + 1, passedAt: now, status: `passed to ${NAME[step.to]}`, at: now }
   if (step.kind === 'pass' && outcome === 'in-mode') return { ...relay, status: `waits: ${NAME[step.to]}'s pane is scrolled back (copy mode; q leaves it)`, at: now }
   if (step.kind === 'pass') return { ...relay, status: `could not pass to ${NAME[step.to]}`, at: now }
   if (step.key.startsWith('cap-')) return { ...relay, status: 'waits for you', at: now }
   // a cue held at the cap stays held while the other agent starts again: what the row says, and its continue, stay
   if (step.key.startsWith('wait-')) return { ...relay, status: relay.status === 'waits for you' ? relay.status : 'waits for the other agent to be at its prompt', at: now }
+  // (what is told of a workspace gone quiet is not the owner's answer: the count of hand-offs stands)
+  if (isStallStep(step)) return { ...relay, status: 'needs you', at: now }
   return step.isForOwner ? { ...relay, streak: 0, status: 'needs you', at: now } : { ...relay, status: 'told you', at: now }
 }

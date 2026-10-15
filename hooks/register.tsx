@@ -4,7 +4,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { BackgroundTask, ClaudeSession, CodexSession, Place, Relay, SessionContext, Snapshot, Thread, UsageView, Workspace } from '../types'
 import { accountOfFile, applyScan, claudeLimits, clockOf, currentLimits, EMPTY_USAGE, limitSaid, markKey, mergeLimits, offsetOf, OFFSETS_SCRIPT, parseContexts, rankUsage, scanInput, sharedLimitsFrom, usageFrom, USAGE_FILES_SCRIPT, USAGE_KEEP_MS, WINDOW_MS, wholeFiles } from './usage'
 import type { Limit, UsageState } from './usage'
-import { AGENT_COMMANDS, CLAUDE_IDLE_MS, screenReady, afterOwner, afterStep, claudeKeep, COMPACT_FROM, cueOf, cutBytes, eventOf, EVENT_SCRIPT, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, tokensSaid, TURN_SCRIPT } from './relay'
+import { AGENT_COMMANDS, CLAUDE_IDLE_MS, isInputEmpty, isStallStep, screenReady, afterOwner, afterStep, claudeKeep, COMPACT_FROM, cueOf, cutBytes, eventOf, EVENT_SCRIPT, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, tokensSaid, TURN_SCRIPT } from './relay'
 import type { RelayEvent, Side, Step } from './relay'
 import { branchOf, checkDue, DRIFT_EVERY, driftRequest, isDueAfterCompaction, parseVerdict, recordFolderOf, RECORDS_SCRIPT } from './drift'
 import { hiddenNames, hideInTree, hideNames, hidingFrom, namesPath, namesProblem, NO_HIDING, turned } from './names'
@@ -2037,7 +2037,8 @@ async function passCues(
       const known = fileFor(tool, tty)
       const turn = known?.file === undefined ? undefined : turns.get(known.file)
       const isBusy = (known?.isBusy ?? false) || turn?.state === 'busy'
-      sides[tool] = { tool, pane: p.pane!, isBusy, isReady: known?.mayBeReady === true && !isBusy, ...(turn === undefined ? {} : { turn }) }
+      // (no agent in its pane: one that ended, or one not started yet)
+      sides[tool] = { tool, pane: p.pane!, isBusy, isReady: known?.mayBeReady === true && !isBusy, ...(turn === undefined ? {} : { turn }), ...(known === undefined ? { isGone: true } : {}) }
     }
     // an agent with no turn of its own since it resumed, a hand-off waiting for it: at its prompt only as its pane shows
     // it (screenReady); else not taken to be (no pane looked at while nothing waits for it)
@@ -2102,12 +2103,27 @@ async function passCues(
       const why = step.kind === 'pass' ? passFailure(outcome) : undefined
       if (step.kind === 'pass' && why !== undefined) {
         await $.process
-          .run(['/bin/sh', '-c', RELAY_SCRIPT, 'sh', 'tell', ledgerPath(home), `failed-${step.key}`, '', '', await told($, `${ws.name}: the relay did not pass the hand-off to ${step.to === 'claude' ? 'Claude' : 'Codex'}: ${why}. Paste: ${step.line}`), '', 'Workspace relay'], { timeoutMs: 20_000 })
+          .run(['/bin/sh', '-c', RELAY_SCRIPT, 'sh', 'tell', ledgerPath(home), `failed-${step.key}`, '', '', await told($, step.isCheckIn === true ? `${ws.name}: the relay could not check in with ${step.to === 'claude' ? 'Claude' : 'Codex'}: ${why}.` : `${ws.name}: the relay did not pass the hand-off to ${step.to === 'claude' ? 'Claude' : 'Codex'}: ${why}. Paste: ${step.line}`), '', 'Workspace relay'], { timeoutMs: 20_000 })
           .catch(() => undefined)
       }
     }
-    // Codex compacts itself, by its own measure: nothing is typed into it but hand-offs
-    for (const step of relaySteps(ws, sides, now)) await settle(step, await run(step))
+    // Codex compacts itself, by its own measure: nothing is typed into it but hand-offs and check-ins
+    // (a hand-off passed now sets an agent to work: nothing of a workspace gone quiet in the same collection)
+    let isPassed = false
+    for (const step of relaySteps(ws, sides, now)) {
+      if (isPassed && isStallStep(step)) continue
+      // a check-in is typed only while the agent's input line holds nothing (never over the owner's draft), and into
+      // Codex only while its pane shows it at its prompt, no question of its own: else left for a later collection
+      if (step.kind === 'pass' && step.isCheckIn === true) {
+        const screen = await $.process.run(['tmux', 'capture-pane', '-p', '-e', '-t', step.pane], { timeoutMs: 10_000 }).catch(() => ({ exitCode: -1, stdout: '' }))
+        // eslint-disable-next-line no-control-regex
+        const plain = screen.stdout.replace(/\u001b\[[0-9;?]*[A-Za-z]/g, '')
+        if (screen.exitCode !== 0 || isInputEmpty(step.to, screen.stdout) !== true || (step.to === 'codex' && !screenReady('codex', plain))) continue
+      }
+      const outcome = await run(step)
+      if (step.kind === 'pass' && outcome === 'passed') isPassed = true
+      await settle(step, outcome)
+    }
   }
 }
 
