@@ -66,7 +66,7 @@ import { afterOwner, afterStep, claudeKeep, CODEX_AT_WORK, CODEX_BOTTOM, CODEX_D
 import type { Side } from '../hooks/relay'
 import { branchOf, checkDue, checkFrom, driftRequest, isDueAfterCompaction, parseVerdict, recordFolderOf, RECORDS_SCRIPT } from '../hooks/drift'
 import { accountOfFile, applyScan, claudeCost, claudeLimits, clockSaid, codexUnits, currentLimits, EMPTY_USAGE, limitSaid, markKey, mergeLimits, offsetOf, OFFSETS_SCRIPT, parseContexts, priceOf, rankUsage, scanInput, sharedLimitsFrom, usageFrom, USAGE_FILES_SCRIPT, USAGE_KEEP_MS, wholeFiles } from '../hooks/usage'
-import { bringable, codexDir, CODEX_FOLDER_SCRIPT, CODEX_LETS_GO_S, CODEX_TASK_SCRIPT, codexTaskState, envOfProfile, holderOf, HOLDERS_SCRIPT, isKnownCodex, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, threadFrom, toggled, withThreads } from '../hooks/bring'
+import { bringable, codexDir, CODEX_FOLDER_SCRIPT, CODEX_LETS_GO_S, CODEX_TASK_SCRIPT, codexTaskState, envOfProfile, holderOf, holdersOf, HOLDERS_SCRIPT, isKnownCodex, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, threadFrom, toggled, withThreads } from '../hooks/bring'
 import { BYPASS } from '../hooks/workspaces'
 import {
   absoluteDir,
@@ -267,7 +267,7 @@ const world = {
   lsof: undefined as string | undefined,
   lsofOne: undefined as string | undefined,
   /** The Codex process holding a conversation's rollout open, by its id, as HOLDERS_SCRIPT finds it (none: free); and each asked. */
-  holders: {} as Record<string, number>,
+  holders: {} as Record<string, number | string>,
   heldAsked: [] as string[],
   /** Threads the Codex databases no longer have, though the fixtures do. */
   hiddenThreads: new Set<string>(),
@@ -832,6 +832,9 @@ describe('collect', () => {
 
   test('who holds a Codex conversation open: free, or the process', () => {
     expect([holderOf('free\n'), holderOf('held 91352\n'), holderOf(''), holderOf('held x')]).toEqual(['free', 91352, undefined, undefined])
+    // every process holding it, so that one held by more than one is never taken for one held by the first alone
+    expect([holdersOf('held 91352 304\n'), holdersOf('held 91352\n'), holdersOf('free'), holdersOf('held 1 x'), holderOf('held 91352 304')]).toEqual([[91352, 304], [91352], 'free', undefined, 91352])
+    expect(HOLDERS_SCRIPT).toContain('!(p in seen) { seen[p] = 1; out = out (out == "" ? "" : " ") p } END { print out }')
     // every Codex process asked, a rollout found by the end of its name, asked again each second while one holds it
     expect(HOLDERS_SCRIPT).toContain('/usr/bin/pgrep -x codex')
     expect(CODEX_LETS_GO_S).toBe(90)
@@ -3020,12 +3023,12 @@ describe('bringing running sessions into a workspace', () => {
     }
     const line = openCommand(ws, HOME)
     expect(line).toContain(nested(`open=; for f in '/Users/u/.claude'/sessions/*.json; do grep -q '"sessionId":"session-101"' "$f" 2>/dev/null && kill -0 "$(basename "$f" .json)" 2>/dev/null && open=1; done; `))
-    expect(line).toContain(nested(`if [ -n "$open" ]; then echo 'This conversation is open in another Claude session; close it there, then open the workspace again.'; else cd '/Users/u/dev/web-app/src' && env `))
+    expect(line).toContain(nested(`if [ -n "$open" ]; then echo 'This conversation is open in another Claude session: close it there, then close this workspace and open it again.'; else cd '/Users/u/dev/web-app/src' && env `))
     expect(line).toContain(nested(` claude --resume session-101 --dangerously-skip-permissions --append-system-prompt '${leanWork(true)}' --add-dir '/Users/u/dev/web-app-worktrees' \${p:+--} \${p:+"$p"}; fi; exec`))
     // Codex with no sandbox needs no folder added
     // Codex once no Codex holds its conversation open (asked once; else waited for, saying so, PANE_LETS_GO_S at most)
     expect(line).toContain(nested(`; h=$(/bin/sh -c "$hs" sh ${RESUMED_A} 0); if [ "$h" != free ]; then echo '${CODEX_WAIT_LINE}'; h=$(/bin/sh -c "$hs" sh ${RESUMED_A} ${PANE_LETS_GO_S}); fi; if [ "$h" = free ]; then env `))
-    expect(line).toContain(nested(` codex resume -c check_for_update_on_startup=false --no-daemon --dangerously-bypass-approvals-and-sandbox -C '/Users/u/dev/web-app' -- ${RESUMED_A} \${p:+"$p"}; else echo "This conversation is still open in another Codex (process \${h#held }): close it there, then open the workspace again."; fi; exec`))
+    expect(line).toContain(nested(` codex resume -c check_for_update_on_startup=false --no-daemon --dangerously-bypass-approvals-and-sandbox -C '/Users/u/dev/web-app' -- ${RESUMED_A} \${p:+"$p"}; else echo "This conversation is still open in another Codex (process \${h#held }): close it there, then close this workspace and open it again."; fi; exec`))
     expect(line).toContain(nested(`hs=${shellQuote(HOLDERS_SCRIPT)}; `))
     expect(PANE_LETS_GO_S).toBe(180)
     expect(line).not.toMatch(/--sandbox|--ask-for-approval|--permission-mode/)
@@ -3142,6 +3145,11 @@ describe('bringing running sessions into a workspace', () => {
     expect(members('/Users/u/dev/web-app', undefined, { ...snap, codex: [closed, { ...row, updatedAt: NOW - 600_000, startedAt: NOW - 3600_000 }] })).not.toContain('codex:closed-1')
     // ...never one written in the last minute (it may be open somewhere still)
     expect(members('/Users/u/dev/web-app', undefined, { ...snap, codex: [{ ...closed, updatedAt: NOW - 30_000 }] })).not.toContain('codex:closed-1')
+    // ...nor one a running workspace keeps (its Codex pane may be waiting to go on with it); a stopped one's is offered
+    const keeping = { ...practice, threads: { codex: { id: 'closed-1', dir: '/Users/u/dev/web-app' } } }
+    const running = { ...snap, codex: [closed], workspaces: [keeping], tmux: { panes: { ttys066: { session: 'ws-practice-rbac', window: 'codex', pane: '%9' } }, clients: {} } }
+    expect(members('/Users/u/dev/web-app', undefined, running)).not.toContain('codex:closed-1')
+    expect(members('/Users/u/dev/web-app', undefined, { ...running, tmux: { panes: {}, clients: {} } })).toContain('codex:closed-1')
     // this session itself, said so (it closes once the workspace has opened); another repository's never; one in a
     // workspace's panes never
     expect(listed(undefined, 'session-101').find(b => b.member === 'claude:session-101')).toMatchObject({ label: 'Claude · WEB CONSOLE (this session)', isSelf: true })
@@ -3504,6 +3512,15 @@ describe('bringing running sessions into a workspace', () => {
     expect(toasts).toContain('Codex · Find the report writer: still waiting for Codex to let its conversation go (30 s more at most)…')
     expect(JSON.parse(files.get(WORKSPACES)!).workspaces[0].threads).toBeUndefined()
     expect(toasts.at(-1)).toContain(`Not brought in: Codex · Find the report writer (it closed in ttys045, but another Codex (process 304) has its conversation open still, so it was not resumed here, and the workspace's Codex starts new).`)
+    // held by that server and by another Codex too: never left to the pane; waited for here, as any other holder
+    world.exited.delete(207)
+    world.stopped = []
+    world.heldAsked = []
+    world.holders[RESUMED_A] = '204 304'
+    await clock.advance(60_000)
+    await create('Reports both')
+    expect(world.heldAsked).toEqual([`${RESUMED_A} 0`, `${RESUMED_A} 0`, `${RESUMED_A} 60`, `${RESUMED_A} 30`])
+    expect(toasts.at(-1)).toContain('(it closed in ttys045, but another Codex (process 204) has its conversation open still, so it was not resumed here, and the workspace\'s Codex starts new)')
     // held by the server that ran it, which lets it go about a minute after its terminal closed: nothing waited for
     // here; the workspace opens with it at once, its Codex pane waiting for the server, and says so
     world.exited.delete(207)
@@ -4757,6 +4774,26 @@ describe('a workspace of one agent', () => {
     expect(files.get(promptPath(HOME, 'practice-rbac', 'codex'))).toBe(addedPrompt(saved, 'codex', { isNew: true, isBrought: true }))
     expect(files.get(openScriptPath(HOME, 'practice-rbac'))).toContain(`-- ${HELD}`)
     await ui.unmount()
+  })
+
+  test('Add Codex with a terminal run in Codex\'s shared server: added and opened at once, its Codex pane waiting for the server', async ($, on) => {
+    const { files, clock } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    // of ~/.codex's terminals only 207 is left, run in the shared server (204), which holds its conversation
+    for (const pid of [201, 208, 209, 211]) world.exited.add(pid)
+    world.args.set(204, '/Users/u/.codex/packages/app-server-daemon/releases/0.162.1/bin/codex app-server --listen unix:// --managed-daemon')
+    world.lsof = ['p204', 'f31', `n/Users/u/.codex/sessions/2026/10/08/rollout-2026-10-08T10-00-00-${RESUMED_A}.jsonl`, 'p207', 'f3', 'n/dev/ttys045', ''].join('\n')
+    await clock.advance(120_000)
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, env: '', only: 'claude', purpose: 'roles', checkout: '/Users/u/dev/web-app', threads: { claude: { id: 'session-900', dir: '/Users/u/dev/web-app' } } }] }))
+    await $.session.start(START)
+    // still held by that server once its terminal closed: left to the pane, nothing waited for here
+    world.holders[RESUMED_A] = 204
+    const said = (await $.command.run({ ...SESSIONS, command: 'workspace', args: `add Practice RBAC codex ${RESUMED_A}` })).text
+    expect(said).toBe('Added Codex to Practice RBAC: Codex · Find the report writer goes on there in its own conversation, beside Claude (Codex goes on in about a minute, once its shared server lets the conversation go: its pane says so); Claude gets peer coding ready, and the relay passes each hand-over. Opened ws-practice-rbac in a new Terminal window.')
+    expect(world.stopped).toEqual(['ttys045 codex|node 207'])
+    expect(world.heldAsked).toEqual([`${RESUMED_A} 0`, `${RESUMED_A} 0`])
+    const [saved] = JSON.parse(files.get(WORKSPACES)!).workspaces
+    expect(saved.threads.codex.id).toBe(RESUMED_A)
+    expect(files.get(openScriptPath(HOME, 'practice-rbac'))).toContain(`sh ${RESUMED_A} ${PANE_LETS_GO_S}`)
   })
 
   test('Add is left undone, the workspace opened again as it was, when the session cannot go on there', async ($, on) => {

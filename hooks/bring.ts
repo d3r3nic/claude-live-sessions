@@ -94,10 +94,12 @@ export function bringable(snap: Snapshot, o: { now: number; selfId: string }, di
     })
   }
   // a conversation made in Codex's terminal and open in none (closed by the owner), once every Codex terminal under
-  // that account is certain (else it may be the one an uncertain terminal runs), and not written in the last minute
+  // that account is certain (else it may be the one an uncertain terminal runs), and not written in the last minute;
+  // never one a running workspace keeps (its Codex pane may be waiting to go on with it)
+  const keptRunning = new Set(snap.workspaces.filter(ws => Object.values(snap.tmux.panes).some(p => p.session === tmuxName(ws))).map(ws => ws.threads?.codex?.id))
   for (const s of snap.codex) {
     const env = envOfProfile('codex', s.profile)
-    if (s.surface !== 'cli' || !SAFE_ID.test(s.key) || env === undefined || !s.cwd.startsWith('/') || !inRepo(s.cwd) || o.now - s.updatedAt < WORKING_MS) continue
+    if (s.surface !== 'cli' || !SAFE_ID.test(s.key) || env === undefined || !s.cwd.startsWith('/') || !inRepo(s.cwd) || o.now - s.updatedAt < WORKING_MS || keptRunning.has(s.key)) continue
     if (snap.codex.some(t => t.surface === 'terminal' && t.isExec !== true && t.profile === s.profile && !isKnownCodex(snap, t))) continue
     found.push({ member: `codex:${s.key}`, tool: 'codex', label: `Codex · ${s.title || s.key.slice(0, 8)} (closed)`, env, dir: s.cwd, isIdle: true, isClosed: true, at: s.lastActive })
   }
@@ -216,7 +218,8 @@ export const HOLDERS_SCRIPT = [
   'while :; do',
   '  pids=$(/usr/bin/pgrep -x codex | /usr/bin/paste -sd , -)',
   '  pid=',
-  `  [ -n "$pids" ] && pid=$(/usr/sbin/lsof -n -P -a -p "$pids" -Fpn 2>/dev/null | /usr/bin/awk -v end="-$id.jsonl" '/^p/ { p = substr($0, 2) } /^n/ && length($0) > length(end) && substr($0, length($0) - length(end) + 1) == end { print p; exit }')`,
+  // every process holding it, once each, one space apart
+  `  [ -n "$pids" ] && pid=$(/usr/sbin/lsof -n -P -a -p "$pids" -Fpn 2>/dev/null | /usr/bin/awk -v end="-$id.jsonl" '/^p/ { p = substr($0, 2) } /^n/ && length($0) > length(end) && substr($0, length($0) - length(end) + 1) == end && !(p in seen) { seen[p] = 1; out = out (out == "" ? "" : " ") p } END { print out }')`,
   '  [ -z "$pid" ] && { echo free; exit 0; }',
   '  [ "$(/bin/date +%s)" -ge "$end" ] && { echo "held $pid"; exit 0; }',
   '  sleep 1',
@@ -231,12 +234,18 @@ export const HOLDERS_SCRIPT = [
  */
 export const CODEX_LETS_GO_S = 90
 
-/** HOLDERS_SCRIPT's answer: free, or the process that holds the conversation open (unknown, when it said neither: not free). */
+/** HOLDERS_SCRIPT's answer: free, or a process that holds the conversation open (unknown, when it said neither: not free). */
 export function holderOf(stdout: string): 'free' | number | undefined {
+  const all = holdersOf(stdout)
+  return all === undefined || all === 'free' ? all : all[0]
+}
+
+/** HOLDERS_SCRIPT's answer: free, or every process that holds the conversation open (unknown, when it said neither). */
+export function holdersOf(stdout: string): 'free' | number[] | undefined {
   const line = stdout.trim()
   if (line === 'free') return 'free'
-  const m = /^held (\d+)$/.exec(line)
-  return m === null ? undefined : Number(m[1])
+  const m = /^held (\d+(?: \d+)*)$/.exec(line)
+  return m === null ? undefined : m[1]!.split(' ').map(Number)
 }
 
 /** The commands of an agent's job in front of its terminal: Codex runs as a node wrapper and its own binary. */

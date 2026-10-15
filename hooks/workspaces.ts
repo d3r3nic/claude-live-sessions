@@ -199,7 +199,7 @@ function paneScript(tool: 'claude' | 'codex', ws: Pick<Workspace, 'id' | 'env' |
           `if grep -q '"sessionId":"' ${shellWord(`${claudeHome}/sessions/${waitFor.pid}.json`)} 2>/dev/null && ! grep -q '"sessionId":"${thread.id}"' ${shellWord(`${claudeHome}/sessions/${waitFor.pid}.json`)} 2>/dev/null; then n=$((n + 1)); [ "$n" -ge 2 ] && break; else n=0; fi; ` +
           `[ -n "$w" ] || echo 'Waiting for the Claude session this conversation was brought in from to close; it goes on here then.'; w=1; sleep 0.5; done; `) +
           `open=; for f in ${shellWord(claudeHome)}/sessions/*.json; do grep -q '"sessionId":"${thread.id}"' "$f" 2>/dev/null && kill -0 "$(basename "$f" .json)" 2>/dev/null && open=1; done; ` +
-          `if [ -n "$open" ]; then echo 'This conversation is open in another Claude session; close it there, then open the workspace again.'; ` +
+          `if [ -n "$open" ]; then echo 'This conversation is open in another Claude session: close it there, then close this workspace and open it again.'; ` +
           `else cd ${shellWord(thread.dir)} && ${start} --resume ${thread.id}${flags}${lean}${addDir} \${p:+--} \${p:+"$p"}; fi`
         // a Codex conversation is resumed only once no Codex holds it open: Codex's shared server lets one go about a
         // minute after the terminal it ran closes, so a workspace with a terminal brought in opens at once and its
@@ -207,7 +207,7 @@ function paneScript(tool: 'claude' | 'codex', ws: Pick<Workspace, 'id' | 'env' |
         : `hs=${shellWord(HOLDERS_SCRIPT)}; h=$(/bin/sh -c "$hs" sh ${thread.id} 0); ` +
           `if [ "$h" != free ]; then echo ${shellWord(CODEX_WAIT_LINE)}; h=$(/bin/sh -c "$hs" sh ${thread.id} ${PANE_LETS_GO_S}); fi; ` +
           `if [ "$h" = free ]; then ${start} resume ${UPDATE_OFF} ${NO_DAEMON}${flags} -C ${shellWord(thread.dir)} -- ${thread.id} \${p:+"$p"}; ` +
-          `else echo "This conversation is still open in another Codex (process \${h#held }): close it there, then open the workspace again."; fi`
+          `else echo "This conversation is still open in another Codex (process \${h#held }): close it there, then close this workspace and open it again."; fi`
   const run = `p=$(cat ${prompt} 2>/dev/null) && rm -f ${prompt}; ${agent}`
   return `/bin/sh -c ${shellWord(`${run}; exec "$SHELL" -l`)}`
 }

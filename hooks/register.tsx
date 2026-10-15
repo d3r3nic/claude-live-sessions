@@ -9,7 +9,7 @@ import type { RelayEvent, Side, Step } from './relay'
 import { branchOf, checkDue, DRIFT_EVERY, driftRequest, isDueAfterCompaction, parseVerdict, recordFolderOf, RECORDS_SCRIPT } from './drift'
 import { hiddenNames, hideInTree, hideNames, hidingFrom, namesPath, namesProblem, NO_HIDING, turned } from './names'
 import type { Hiding } from './names'
-import { type Bringable, bringable, codexDir, CODEX_LETS_GO_S, envOfProfile, holderOf, HOLDERS_SCRIPT, isKnownCodex, CODEX_FOLDER_SCRIPT, CODEX_TASK_SCRIPT, codexTaskState, JOB_COMMANDS, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, toggled, withThreads } from './bring'
+import { type Bringable, bringable, codexDir, CODEX_LETS_GO_S, envOfProfile, holderOf, holdersOf, HOLDERS_SCRIPT, isKnownCodex, CODEX_FOLDER_SCRIPT, CODEX_TASK_SCRIPT, codexTaskState, JOB_COMMANDS, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, toggled, withThreads } from './bring'
 import {
   agentsOf,
   CHECKOUT_SCRIPT,
@@ -992,9 +992,11 @@ async function isSureCodex($: EngineInterface, codexHome: string, s: CodexSessio
 /** Said of a Codex brought in whose shared server still holds its conversation: its pane waits for it. */
 const LATER_SAID = 'Codex goes on in about a minute, once its shared server lets the conversation go: its pane says so.'
 
-/** Which Codex holds a conversation's rollout open now, asked once: free, its process, or unknown. */
-const codexHolder = async ($: EngineInterface, id: string) =>
-  holderOf((await $.process.run(['/bin/sh', '-c', HOLDERS_SCRIPT, 'sh', id, '0'], { timeoutMs: 30_000 }).catch(() => ({ stdout: '' }))).stdout)
+/** Which Codex processes hold a conversation's rollout open now, asked once: free, every one of them, or unknown. */
+const codexHolders = async ($: EngineInterface, id: string) =>
+  holdersOf((await $.process.run(['/bin/sh', '-c', HOLDERS_SCRIPT, 'sh', id, '0'], { timeoutMs: 30_000 }).catch(() => ({ stdout: '' }))).stdout)
+/** Whether that answer is the one process `pid` alone. */
+const isHeldBy = (holders: 'free' | number[] | undefined, pid: number) => Array.isArray(holders) && holders.length === 1 && holders[0] === pid
 
 async function codexLetsGo($: EngineInterface, id: string, what: string): Promise<'free' | number | undefined> {
   const ask = async (seconds: number) =>
@@ -1067,7 +1069,7 @@ async function openWorkspace($: EngineInterface, ws: Workspace, at?: { window: s
     const codex = ws.threads.codex === undefined || !runs.includes('codex') ? undefined : snap.codex.find(s => s.key === ws.threads!.codex!.id && (s.surface === 'terminal' || now - s.updatedAt < WORKING_MS))
     // and one any Codex holds open (a terminal, its shared server, the desktop app), however it was started
     // (one the shared server that ran a terminal just brought in still holds, `letGoBy`: its Codex pane waits for it)
-    const isLater = o.letGoBy !== undefined && ws.threads.codex !== undefined && (await codexHolder($, ws.threads.codex.id)) === o.letGoBy
+    const isLater = o.letGoBy !== undefined && ws.threads.codex !== undefined && isHeldBy(await codexHolders($, ws.threads.codex.id), o.letGoBy)
     const holder = codex !== undefined || ws.threads.codex === undefined || !runs.includes('codex') || isLater ? 'free' : await codexLetsGo($, ws.threads.codex.id, ws.name)
     const elsewhere = [
       ...(claude === undefined ? [] : [`Claude's runs in ${claude.tty === '??' ? 'the background' : claude.tty}`]),
@@ -1583,9 +1585,10 @@ async function takeOver($: EngineInterface, home: string, b: Bring): Promise<{ t
   }
   if (b.tool === 'codex') {
     // held by the shared server that ran it alone, which lets it go about a minute after its terminal closed: the
-    // workspace's Codex pane waits for that, so the workspace opens at once; anything else holding it is waited for here
-    const first = await codexHolder($, b.thread.id)
-    if (server !== undefined && first === server) return { thread: b.thread, letGoBy: server }
+    // workspace's Codex pane waits for that, so the workspace opens at once; anything else holding it (too) is waited
+    // for here
+    const first = await codexHolders($, b.thread.id)
+    if (server !== undefined && isHeldBy(first, server)) return { thread: b.thread, letGoBy: server }
     const holder = first === 'free' ? first : await codexLetsGo($, b.thread.id, b.label)
     if (holder !== 'free') {
       const other = `another Codex${typeof holder === 'number' ? ` (process ${holder})` : ''}`
