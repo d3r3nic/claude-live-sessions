@@ -638,13 +638,24 @@ async function refreshAgents($: EngineInterface, home: string, snap: Snapshot, n
 async function isClaudePending($: EngineInterface, home: string, s: ClaudeSession | undefined, now: number): Promise<boolean> {
   if (s === undefined || (s.startedAt ?? 0) <= 0) return true
   const file = transcriptPath(`${home}/.${s.profile}`, s.startCwd, s.sessionId)
-  const out = await $.process.run(['/usr/bin/perl', `${$.plugin.root}/hooks/tasks.pl`, String(s.startedAt), file], { timeoutMs: 20_000 }).catch(() => undefined)
-  if (out === undefined || out.exitCode !== 0) return true
-  const open = (parseTasks(out.stdout).get(file) ?? []).filter(t => t.endsBy === undefined || now < t.endsBy)
-  if (open.length > 0) return true
-  const scheduled = await $.process.run(['/usr/bin/perl', '-ne', SCHEDULED_SCRIPT, new Date(s.startedAt!).toISOString(), file], { timeoutMs: 20_000 }).catch(() => undefined)
-  return scheduled === undefined || scheduled.exitCode !== 0 || scheduled.stdout.trim() !== ''
+  // read again only when its transcript has grown, or PENDING_MAX_AGE_MS on (a monitor's own time may run out meanwhile)
+  const size = (await $.fs.stat(file).catch(() => undefined))?.size
+  const kept = pendingRead.get(s.pid)
+  if (size !== undefined && kept !== undefined && kept.size === size && now - kept.at < PENDING_MAX_AGE_MS) return kept.isPending
+  const isPending = await (async () => {
+    const out = await $.process.run(['/usr/bin/perl', `${$.plugin.root}/hooks/tasks.pl`, String(s.startedAt), file], { timeoutMs: 20_000 }).catch(() => undefined)
+    if (out === undefined || out.exitCode !== 0) return true
+    const open = (parseTasks(out.stdout).get(file) ?? []).filter(t => t.endsBy === undefined || now < t.endsBy)
+    if (open.length > 0) return true
+    const scheduled = await $.process.run(['/usr/bin/perl', '-ne', SCHEDULED_SCRIPT, new Date(s.startedAt!).toISOString(), file], { timeoutMs: 20_000 }).catch(() => undefined)
+    return scheduled === undefined || scheduled.exitCode !== 0 || scheduled.stdout.trim() !== ''
+  })()
+  if (size !== undefined) pendingRead.set(s.pid, { size, at: now, isPending })
+  return isPending
 }
+/** What isClaudePending last found for a process, with its transcript's size then; read again after this long anyway. */
+const pendingRead = new Map<number, { size: number; at: number; isPending: boolean }>()
+const PENDING_MAX_AGE_MS = 10 * 60_000
 
 /** The workspaces; `isReadable` false when the file is there but is not one, which nothing then overwrites. */
 async function readWorkspaces($: EngineInterface, home: string): Promise<{ list: Workspace[]; isReadable: boolean }> {
