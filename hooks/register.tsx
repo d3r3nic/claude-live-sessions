@@ -76,7 +76,7 @@ import {
   HIDE_SCRIPT,
   mayBindHide,
 } from './workspaces'
-import { isOwnersPrompt, isProblemDue, problemAsk, problemLine, problemOf } from './problem'
+import { isOwnersPrompt, isProblemDue, PROBLEM_OPTION, problemAsk, problemLine, problemOf } from './problem'
 import {
   ACTIVE_MS,
   AGENT_MS,
@@ -782,7 +782,7 @@ async function move($: EngineInterface, scope: string, shown: readonly string[],
  * each of its windows, with its status bar's Hide: hide.sh written, and the
  * click bound unless the person bound that click to something of their own.
  */
-async function prepareSession($: EngineInterface, home: string, name: string, title: string, problem?: string) {
+async function prepareSession($: EngineInterface, home: string, name: string, title: string, id: string) {
   const tmux = (args: string[]) =>
     $.process.run(['tmux', ...args], { timeoutMs: 10_000 }).catch((error: unknown) => ({ exitCode: -1, stdout: '', stderr: message(error) }))
   const path = hidePath(home)
@@ -795,18 +795,26 @@ async function prepareSession($: EngineInterface, home: string, name: string, ti
   const right = await tmux(['show-options', '-gv', 'status-right'])
   // (not read: the right end left to tmux.conf, never one that drops what it runs)
   for (const args of sessionSetup(name, windows, canHide, title, right.exitCode === 0 ? statusJobs(right.stdout.replace(/\n$/, '')) : undefined)) await tmux(args)
-  await showProblem($, name, problem)
+  await showProblem($, home, id, name)
 }
 
 /**
- * The workspace session `name`'s bar with `problem` on a line of its own under it (problemLine), or with none, that
- * line taken away; the bar's first line as tmux.conf draws it (none read: no second line, never a bar without it).
+ * The workspace `id`'s tmux session `name`, its bar with the main problem the workspaces file holds now on a line of
+ * its own under it (problemLine): only while tmux.conf's bar is one line (`status on`: a bar off, or of lines of its
+ * own, is left as it is), with the bar's first line as tmux.conf draws it (none read: no second line, never a bar
+ * without it). With none, the line this set taken away, and nothing else. Only the session of that exact name.
  */
-async function showProblem($: EngineInterface, name: string, problem: string | undefined) {
+async function showProblem($: EngineInterface, home: string, id: string, name: string) {
   const tmux = (args: string[]) =>
     $.process.run(['tmux', ...args], { timeoutMs: 10_000 }).catch((error: unknown) => ({ exitCode: -1, stdout: '', stderr: message(error) }))
-  const first = problem === undefined ? undefined : await tmux(['show-options', '-gv', 'status-format[0]'])
-  for (const args of problemLine(name, problem, first?.exitCode === 0 ? first.stdout.replace(/\n$/, '') : undefined)) await tmux(args)
+  if ((await tmux(['has-session', '-t', `=${name}`])).exitCode !== 0) return
+  const problem = (await readWorkspaces($, home)).list.find(w => w.id === id)?.problem?.text
+  const status = problem === undefined ? undefined : await tmux(['show-options', '-gv', 'status'])
+  const first = status?.exitCode === 0 && status.stdout.trim() === 'on' ? await tmux(['show-options', '-gv', 'status-format[0]']) : undefined
+  const line = problemLine(name, problem, first?.exitCode === 0 ? first.stdout.replace(/\n$/, '') : undefined)
+  // (no line to show: one set before taken away, and only one this set)
+  if (line[0]?.includes('-u') === true && (await tmux(['show-options', '-t', name, '-qv', PROBLEM_OPTION])).stdout.trim() === '') return
+  for (const args of line) await tmux(args)
 }
 
 /**
@@ -832,7 +840,7 @@ async function prepareRunning($: EngineInterface) {
   const snap = await read($, snapshot)
   for (const ws of snap.workspaces) {
     if (!Object.values(snap.tmux.panes).some(p => isOwnPane(ws, p))) continue
-    if (await isOwnSession($, ws)) await prepareSession($, home, tmuxName(ws), ws.name, ws.problem?.text)
+    if (await isOwnSession($, ws)) await prepareSession($, home, tmuxName(ws), ws.name, ws.id)
   }
 }
 
@@ -852,7 +860,7 @@ async function prepareWhenMade($: EngineInterface, home: string, ws: Workspace) 
   for (let i = 0; i < 20; i++) {
     const has = await $.process.run(['tmux', 'has-session', '-t', `=${tmuxName(ws)}`], { timeoutMs: 5_000 }).catch(() => ({ exitCode: -1 }))
     if (has.exitCode === 0) {
-      if (await isOwnSession($, ws)) await prepareSession($, home, tmuxName(ws), ws.name, ws.problem?.text)
+      if (await isOwnSession($, ws)) await prepareSession($, home, tmuxName(ws), ws.name, ws.id)
       return
     }
     await $.clock.sleep(250)
@@ -1057,7 +1065,7 @@ async function openWorkspace($: EngineInterface, ws: Workspace, at?: { window: s
   const colors = await agentColors($)
   if (wasRunning) {
     // one made before the mouse, the side labels and Hide were set up gets them now, in each of its windows
-    await prepareSession($, home, name, ws.name, ws.problem?.text)
+    await prepareSession($, home, name, ws.name, ws.id)
     // and the colours of a window of agents, or none when they are not known (an agent already running keeps colours
     // it worked out from others until it starts again)
     const listed = (await tmux(['list-windows', '-t', `=${name}`, '-F', '#{window_id}'])).stdout
@@ -2209,7 +2217,6 @@ async function compactAtHandOff($: EngineInterface, answer: string) {
   await logEvent($, home, { kind: 'compact', text: `${ws.name}: Claude compacted at its hand-off (its context was ${tokensSaid(tokens)} tokens${spent})`, workspace: ws.id, agent: 'claude' })
 }
 
-/** Forgets a workspace (the command's `rm` and the pane's Remove): its tmux session keeps running. */
 /** This session's workspace, as the snapshot has it, when this session (`id`) is the Claude in that workspace's own pane. */
 async function ownWorkspace($: EngineInterface, id: string): Promise<{ ws: Workspace; self: ClaudeSession } | undefined> {
   const snap = await read($, snapshot)
@@ -2219,10 +2226,12 @@ async function ownWorkspace($: EngineInterface, id: string): Promise<{ ws: Works
   return self === undefined || ws === undefined || pane?.window !== 'claude' ? undefined : { ws, self }
 }
 
-// asking the workspace's Claude for its main problem: one question at a time in this session, the owner's newest words
-// while one runs asked next (`askAgain`); when one was last asked (a fork made, answered or not)
-let isAsking = false
-let askAgain: { text?: string } | undefined
+// asking the workspace's Claude for its main problem: one question at a time in this session, each waiting for the one
+// before (`asking`) and then asked only if it is still the newest (`askSeq`); how many are under way or waiting; when
+// one was last asked (a fork made, answered or not)
+let asking: Promise<void> = Promise.resolve()
+let askSeq = 0
+let askPending = 0
 let problemTriedAt = 0
 
 /**
@@ -2231,22 +2240,20 @@ let problemTriedAt = 0
  * owner has just typed, which its conversation does not hold yet. A session that is no workspace's Claude asks nothing.
  */
 async function askProblem($: EngineInterface, ownerText?: string) {
-  if (isAsking) {
-    askAgain = { text: ownerText ?? askAgain?.text }
-    return
-  }
-  isAsking = true
-  try {
-    let text = ownerText
-    for (;;) {
-      await askProblemOnce($, text)
-      if (askAgain === undefined) break
-      text = askAgain.text
-      askAgain = undefined
+  const mine = ++askSeq
+  const before = asking
+  askPending++
+  const run = (async () => {
+    try {
+      await before.catch(() => undefined)
+      // words newer than these came while they waited: those are asked instead
+      if (mine === askSeq) await askProblemOnce($, ownerText)
+    } finally {
+      askPending--
     }
-  } finally {
-    isAsking = false
-  }
+  })()
+  asking = run
+  await run
 }
 
 async function askProblemOnce($: EngineInterface, ownerText: string | undefined) {
@@ -2267,7 +2274,7 @@ async function askProblemOnce($: EngineInterface, ownerText: string | undefined)
     saved = { ...w, problem: { text: problem, at } }
     return saved
   }))
-  if (isSaved && saved !== undefined) await showProblem($, tmuxName(saved), problem)
+  if (isSaved && saved !== undefined) await showProblem($, home, saved.id, tmuxName(saved))
 }
 
 /**
@@ -2275,13 +2282,14 @@ async function askProblemOnce($: EngineInterface, ownerText: string | undefined)
  * an agent of it since it was said (isProblemDue); never while a question runs.
  */
 async function askProblemAtTurnEnd($: EngineInterface) {
-  if (isAsking) return
+  if (askPending > 0) return
   const own = await ownWorkspace($, await $.session.id())
   if (own === undefined) return
   const ws = (await readWorkspaces($, (await $.env.get('HOME')) ?? '')).list.find(w => w.id === own.ws.id)
   if (ws !== undefined && isProblemDue(ws, await $.clock.now(), problemTriedAt)) await askProblem($)
 }
 
+/** Forgets a workspace (the command's `rm` and the pane's Remove): its tmux session keeps running. */
 async function removeWorkspace($: EngineInterface, ws: Workspace): Promise<string> {
   const home = (await $.env.get('HOME')) ?? ''
   if (!(await changeWorkspaces($, home, now => now.filter(w => w.id !== ws.id)))) return `Not done: ${UNREADABLE}.`
@@ -2576,12 +2584,13 @@ export const register: Register = on => {
     return result
   })
 
-  // a workspace's Claude given something new by the owner says what main problem the workspace works on, before it
-  // starts (a hand-off or a check-in the relay types is no new problem)
-  on('turn.start', async ($, e, next) => {
-    const started = await next(e)
-    if (isOwnersPrompt(e.text)) void askProblem($, e.text).catch(() => undefined)
-    return started
+  // a workspace's Claude given something by the owner (typed, while it is idle or at work, or through Remote Control)
+  // says what main problem the workspace works on, before it starts on it: a background task's notice, a scheduled
+  // prompt or another session's message is not the owner's, nor a hand-off or check-in the relay types
+  on('prompt.submit', async ($, e, next) => {
+    const entered = await next(e)
+    if ((e.origin.kind === 'composer' || e.origin.kind === 'bridge') && !('drop' in entered) && isOwnersPrompt(e.text)) void askProblem($, e.text).catch(() => undefined)
+    return entered
   })
 
   on('session.start', async ($, e, next) => {

@@ -216,6 +216,9 @@ const world = {
   globalRight: '',
   // tmux.conf's first line of the bar (`status-format[0]`)
   firstLine: 'FIRST LINE',
+  // tmux.conf's `status`, and the problem each workspace session holds (PROBLEM_OPTION)
+  globalStatus: 'on',
+  problems: new Map<string, string>(),
   /** What each pane shows (`tmux capture-pane -p -t <pane>`). */
   screens: {} as Record<string, string>,
   /** What `tmux list-panes -s -t =<session> -F PANE_STATE_FORMAT` prints, and `ps -ax -o ppid=` (a pid a line). */
@@ -316,6 +319,8 @@ const resetWorld = () => {
   world.tmuxPanes = ''
   world.globalRight = ''
   world.firstLine = 'FIRST LINE'
+  world.globalStatus = 'on'
+  world.problems.clear()
   world.leftover = ''
   world.screens = {}
   world.parents = '1\n'
@@ -517,8 +522,16 @@ function machine(argv: readonly string[], env: unknown): Run {
         return world.tmuxPanes.includes(`${name}\t`) || world.started.has(name) ? ok('') : { exitCode: 1, stdout: '', stderr: '' }
       }
       if (argv[1] === 'list-keys') return ok(`${world.statusClick}\n`)
+      // the problem a workspace session holds: set, taken away, read
+      if (argv[1] === 'set-option' && argv.includes(PROBLEM_OPTION)) {
+        const name = argv[argv.indexOf('-t') + 1] ?? ''
+        if (argv.includes('-u')) world.problems.delete(name)
+        else world.problems.set(name, argv.at(-1) ?? '')
+        return ok('')
+      }
+      if (argv[1] === 'show-options' && argv.at(-1) === PROBLEM_OPTION) return ok(`${world.problems.get(argv[3] ?? '') ?? ''}\n`)
       if (argv[1] === 'bind-key' || argv[1] === 'set-option' || argv[1] === 'set-window-option') return ok('')
-      if (argv[1] === 'show-options' && argv[2] === '-gv') return ok(`${argv[3] === 'status-format[0]' ? world.firstLine : world.globalRight}\n`)
+      if (argv[1] === 'show-options' && argv[2] === '-gv') return ok(`${argv[3] === 'status-format[0]' ? world.firstLine : argv[3] === 'status' ? world.globalStatus : world.globalRight}\n`)
       if (argv[1] === 'show-options') return ok(`${world.started.get(argv[3] ?? '') ?? world.tmuxOwner}\n`)
       return { exitCode: 1, stdout: '', stderr: `unexpected tmux ${argv.join(' ')}` }
     case '/usr/sbin/lsof':
@@ -6204,7 +6217,8 @@ describe('the main problem', () => {
     // the answer: one line, a label, marks and quotes dropped; none for none or nothing; cut at a word
     expect(problemOf('Main problem: "The sign-in page\nlooks broken."')).toBe('The sign-in page looks broken.')
     expect(problemOf('**MAIN PROBLEM** — the app is slow')).toBe('the app is slow')
-    expect([problemOf('none'), problemOf(' None. '), problemOf(''), problemOf('""')]).toEqual([undefined, undefined, undefined, undefined])
+    expect([problemOf('none'), problemOf(' None. '), problemOf(''), problemOf('""'), problemOf('None — nothing has been asked yet.'), problemOf('none: no work yet')]).toEqual([undefined, undefined, undefined, undefined, undefined, undefined])
+    expect(problemOf('None of the agent windows open in your light theme.')).toBe('None of the agent windows open in your light theme.')
     expect(problemOf('a\u202eb\u0007c\u200bd')).toBe('a b c d')
     const long = problemOf('word '.repeat(100))!
     expect([...long].length).toBeLessThanOrEqual(PROBLEM_MAX)
@@ -6220,6 +6234,11 @@ describe('the main problem', () => {
     expect(isOwnersPrompt(`${READY_CODEX}\nand look at the docs too`)).toBe(true)
     expect([isOwnersPrompt(READY_CODEX), isOwnersPrompt(`<pasted_content id="a">\n${READY_CLAUDE}\n</pasted_content id="a">`), isOwnersPrompt(CHECKIN_LINE), isOwnersPrompt(''), isOwnersPrompt(' \n '), isOwnersPrompt('/compact keep the plan')])
       .toEqual([false, false, false, false, false, false])
+    // a command alone, an interrupt or an engine's own message is not; a command with words, or a paste, is
+    expect([isOwnersPrompt('/model'), isOwnersPrompt(' /reload-plugins '), isOwnersPrompt('[Request interrupted by user]'), isOwnersPrompt('<task-notification>\n<task-id>b1</task-id>\n</task-notification>')])
+      .toEqual([false, false, false, false])
+    expect([isOwnersPrompt('/peer-coding go on with the export'), isOwnersPrompt('<pasted_content id="b">the logs</pasted_content id="b">\nwhy does this fail?'), isOwnersPrompt('<command-message>peer-coding</command-message>')])
+      .toEqual([true, true, true])
     // at a turn's end: none yet, or the owner has typed since it was said; never within the retry time of the last ask
     expect(isProblemDue({}, NOW)).toBe(true)
     expect(isProblemDue({ problem: { text: 'x', at: NOW - 1_000 } }, NOW)).toBe(false)
@@ -6240,10 +6259,13 @@ describe('the main problem', () => {
     expect([problemLine('ws-a', undefined, 'FIRST'), problemLine('ws-a', '', 'FIRST'), problemLine('ws-a', 'x', undefined), problemLine('ws-a', 'x', '')]).toEqual([off, off, off, off])
   })
 
+  /** A prompt entering the session, from where `kind` says (the owner at its terminal unless said). */
+  const typed = ($: Engine, text: string, kind: 'composer' | 'bridge' | 'task-notification' | 'scheduled-trigger' | 'peer' = 'composer') =>
+    $.prompt.submit({ text, wait: false, origin: { kind } as never })
   /** A workspace's Claude (this session, session-104, in its left pane), its fork answered as `reply` says. */
   const claudeOfWorkspace = (on: On, fields: Partial<Workspace> = {}) => {
     const { files, runs, clock } = engine(on, machine, { termProgram: 'Apple_Terminal', selfId: 'session-104' })
-    on('turn.start', async ($, e) => ({ turnId: e.turnId }))
+    on('prompt.submit', async ($, e) => ({ text: e.text }))
     on('turn.complete', async ($, e) => ({ text: e.answer }))
     const usage = { input_tokens: 10, output_tokens: 30, cache_read_input_tokens: 200_000, cache_creation_input_tokens: 0 }
     const asked: string[] = []
@@ -6271,21 +6293,23 @@ describe('the main problem', () => {
     await $.session.start(START)
     await $.command.run(SESSIONS)
     await settle()
-    // (a workspace with none: its window's bar has no line for it)
-    expect(barSince(0)).toEqual(problemLine('ws-practice-rbac', undefined, undefined).map(a => ['tmux', ...a]))
+    // (a workspace with none: its window's bar has no line for it, and nothing of it is taken away)
+    expect(barSince(0)).toEqual([])
     // the relay's hand-off and check-in start turns the owner gave nothing new in
-    await $.turn.start({ text: READY_CODEX, turnId: 't0' })
-    await $.turn.start({ text: CHECKIN_LINE, turnId: 't0b' })
+    await typed($, READY_CODEX)
+    await typed($, CHECKIN_LINE)
     await settle()
     expect(asked).toEqual([])
     const before = runs.length
-    await $.turn.start({ text: 'the sign-in page turns away good passwords: fix it', turnId: 't1' })
+    await typed($, 'the sign-in page turns away good passwords: fix it')
     await settle()
     expect(asked).toEqual([problemAsk('the sign-in page turns away good passwords: fix it')])
     expect(saved().problem?.text).toBe(SAID)
     expect(saved().problem!.at).toBeGreaterThanOrEqual(NOW)
-    // its window: the bar's first line read, the problem under it
-    expect(runs.slice(before).find(r => r[0] === 'tmux' && r[1] === 'show-options')).toEqual(['tmux', 'show-options', '-gv', 'status-format[0]'])
+    // its window: tmux.conf's bar of one line, its first line read, the problem under it
+    expect(runs.slice(before).filter(r => r[0] === 'tmux' && (r[1] === 'show-options' || r[1] === 'has-session'))).toEqual([
+      ['tmux', 'has-session', '-t', '=ws-practice-rbac'], ['tmux', 'show-options', '-gv', 'status'], ['tmux', 'show-options', '-gv', 'status-format[0]'],
+    ])
     expect(barSince(before)).toEqual(problemLine('ws-practice-rbac', SAID, 'FIRST LINE').map(a => ['tmux', ...a]))
     // that turn's end: said already, nothing asked again
     await $.turn.complete({ answer: 'Fixed.', durationMs: 1_000, isAborted: false, turnId: 't1', reason: 'answer' })
@@ -6337,7 +6361,7 @@ describe('the main problem', () => {
     await $.session.start(START)
     await $.command.run(SESSIONS)
     fork.reply = { isAnswered: false, reason: 'nothing-to-fork', usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } }
-    await $.turn.start({ text: 'build the export page', turnId: 't1' })
+    await typed($, 'build the export page')
     await settle()
     expect(asked).toEqual([problemAsk('build the export page')])
     expect(saved().problem).toBeUndefined()
@@ -6350,10 +6374,10 @@ describe('the main problem', () => {
     // while a question runs: the owner's newest words asked once it is done; a turn's end then asks nothing more
     let open = () => {}
     fork.gate = new Promise<void>(resolve => { open = resolve })
-    await $.turn.start({ text: 'first', turnId: 't2' })
+    await typed($, 'first')
     await settle()
-    await $.turn.start({ text: 'second', turnId: 't3' })
-    await $.turn.start({ text: 'third', turnId: 't4' })
+    await typed($, 'second')
+    await typed($, 'third')
     await $.turn.complete({ answer: 'x', durationMs: 1_000, isAborted: false, turnId: 't4', reason: 'answer' })
     await settle()
     fork.gate = undefined
@@ -6362,7 +6386,7 @@ describe('the main problem', () => {
     expect(asked.slice(2)).toEqual([problemAsk('first'), problemAsk('third')])
     // a turn's end while a question runs, nothing newer typed: no second question
     fork.gate = new Promise<void>(resolve => { open = resolve })
-    await $.turn.start({ text: 'fourth', turnId: 't6' })
+    await typed($, 'fourth')
     await settle()
     await $.turn.complete({ answer: 'x', durationMs: 1_000, isAborted: false, turnId: 't6', reason: 'answer' })
     await settle()
@@ -6374,7 +6398,7 @@ describe('the main problem', () => {
     const kept = saved().problem
     fork.gate = new Promise<void>(resolve => { open = resolve })
     fork.reply = { isAnswered: true, text: 'Something from the conversation before.', usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } }
-    await $.turn.start({ text: 'fifth', turnId: 't7' })
+    await typed($, 'fifth')
     await settle()
     world.sessionId = 'session-new'
     fork.gate = undefined
@@ -6385,7 +6409,7 @@ describe('the main problem', () => {
     expect(saved().problem).toEqual(kept)
     // another session (cleared into another conversation, or no workspace's): nothing asked
     world.sessionId = 'session-new'
-    await $.turn.start({ text: 'something else', turnId: 't5' })
+    await typed($, 'something else')
     await settle()
     world.sessionId = undefined
     expect(asked).toHaveLength(6)
@@ -6397,7 +6421,7 @@ describe('the main problem', () => {
     await $.command.run(SESSIONS)
     let open = () => {}
     fork.gate = new Promise<void>(resolve => { open = resolve })
-    await $.turn.start({ text: 'fix the sign-in page', turnId: 't1' })
+    await typed($, 'fix the sign-in page')
     await settle()
     await $.turn.complete({ answer: 'Fixed.', durationMs: 1_000, isAborted: false, turnId: 't1', reason: 'answer' })
     await settle()
@@ -6413,7 +6437,7 @@ describe('the main problem', () => {
     world.tmuxPanes = 'ws-practice-rbac\tpeers\t/dev/ttys045\t%1\tclaude\nws-practice-rbac\tpeers\t/dev/ttys022\t%2\tcodex\n'
     await $.session.start(START)
     await $.command.run(SESSIONS)
-    await $.turn.start({ text: 'fix the sign-in page', turnId: 't1' })
+    await typed($, 'fix the sign-in page')
     await $.turn.complete({ answer: 'x', durationMs: 1_000, isAborted: false, turnId: 't1', reason: 'answer' })
     await settle()
     expect(asked).toEqual([])
@@ -6426,11 +6450,56 @@ describe('the main problem', () => {
     await settle()
     expect(barSince(0)).toEqual(problemLine('ws-practice-rbac', 'Your #1 report is slow', 'FIRST LINE').map(a => ['tmux', ...a]))
     expect(runs.some(r => r.includes('Your ##1 report is slow'))).toBe(true)
-    // the bar's first line not read: no second line, never a bar without its first
+    // the bar's first line not read: no second line (the one set before taken away), never a bar without its first
     world.firstLine = ''
     const before = runs.length
-    await $.turn.start({ text: 'and the export too', turnId: 't1' })
+    await typed($, 'and the export too')
     await settle()
     expect(barSince(before)).toEqual(problemLine('ws-practice-rbac', undefined, undefined).map(a => ['tmux', ...a]))
+    // tmux.conf's bar off, or of lines of its own: left as it is, no line added
+    world.firstLine = 'FIRST LINE'
+    for (const status of ['off', '2']) {
+      world.globalStatus = status
+      const from = runs.length
+      await typed($, `and more ${status}`)
+      await settle()
+      expect(barSince(from)).toEqual([])
+    }
+  })
+
+  test('only what the owner gives Claude asks: a background task\'s notice, a scheduled prompt or another session\'s message asks nothing; Remote Control does', async ($, on) => {
+    const { asked, settle } = claudeOfWorkspace(on, { problem: { text: 'x', at: NOW + 3_600_000 } })
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    await typed($, 'the export is done', 'task-notification')
+    await typed($, 'check the build', 'scheduled-trigger')
+    await typed($, 'from the other session', 'peer')
+    await settle()
+    expect(asked).toEqual([])
+    await typed($, 'from my phone: fix the login', 'bridge')
+    await settle()
+    expect(asked).toEqual([problemAsk('from my phone: fix the login')])
+  })
+
+  test('opening a workspace sets its line from the workspaces file as it is then; one started afresh gets it once its session is made', async ($, on) => {
+    const { files, settle, saved } = claudeOfWorkspace(on)
+    world.tmuxClients = ''
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    await settle()
+    expect(world.problems.size).toBe(0)
+    // said meanwhile by its Claude in another session: the open reads the file, not what this session last saw
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...saved(), problem: { text: 'Said meanwhile', at: NOW } }] }))
+    await $.command.run({ ...SESSIONS, command: 'workspace', args: 'open practice rbac' })
+    await settle()
+    expect(world.problems.get('ws-practice-rbac')).toBe('Said meanwhile')
+    // not running: opened, its session made, then set up with it
+    world.problems.clear()
+    world.tmuxPanes = ''
+    world.tmuxOwner = ''
+    await $.command.run(SESSIONS)
+    await $.command.run({ ...SESSIONS, command: 'workspace', args: 'open practice rbac' })
+    for (let i = 0; i < 40 && !world.problems.has('ws-practice-rbac'); i++) await settle()
+    expect(world.problems.get('ws-practice-rbac')).toBe('Said meanwhile')
   })
 })
