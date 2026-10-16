@@ -165,13 +165,15 @@ export const TOOLS_EVERY_MS = 10 * 60_000
 
 /**
  * Whether the versions installed are to be read again now: never read, read TOOLS_EVERY_MS ago, or an update shows
- * since (a Codex terminal newly running a replaced program, or a Claude session on a version newer than the one read),
+ * since (a Codex terminal newly running a replaced program, or a Claude session started since on a newer version),
  * so the line never says an update is out that was installed meanwhile.
  */
 export function isToolsDue(tools: Tools | undefined, now: number, claude: readonly ClaudeSession[], wasOutdated: ReadonlySet<number>, outdated: ReadonlySet<number>): boolean {
   if (tools?.at === undefined || now - tools.at >= TOOLS_EVERY_MS) return true
   if ([...outdated].some(pid => !wasOutdated.has(pid))) return true
-  return claude.some(s => s.version !== undefined && (tools.claude === undefined || compareVersions(s.version, tools.claude) > 0))
+  // (a session started since they were read, on a newer Claude Code: one started before, or a version that could not
+  // be read, waits for the 10 minutes, never read again at every collection)
+  return claude.some(s => s.version !== undefined && tools.claude !== undefined && (s.startedAt ?? 0) > tools.at! && compareVersions(s.version, tools.claude) > 0)
 }
 
 const UUID_RE = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'

@@ -1767,7 +1767,7 @@ describe('updates', () => {
 
   test('the versions read again when due: never read, 10 minutes on, or as soon as an update shows (a terminal newly on a replaced program, a session on a newer Claude)', async () => {
     const tools = { claude: '2.1.301', codex: '0.162.1', at: NOW }
-    const claude = (version?: string) => [{ pid: 1, sessionId: 's', jobId: '', name: '', cwd: '/x', startCwd: '/x', status: 'idle', kind: 'interactive', profile: 'claude', tty: 'ttys001', isForeground: true, since: NOW, ...(version === undefined ? {} : { version }) }]
+    const claude = (version?: string, startedAt = NOW + 30_000) => [{ pid: 1, sessionId: 's', jobId: '', name: '', cwd: '/x', startCwd: '/x', status: 'idle', kind: 'interactive', profile: 'claude', tty: 'ttys001', isForeground: true, since: NOW, startedAt, ...(version === undefined ? {} : { version }) }]
     const none = new Set<number>()
     expect(isToolsDue(undefined, NOW, claude('2.1.301'), none, none)).toBe(true)
     expect(isToolsDue({ claude: '2.1.301' }, NOW, claude('2.1.301'), none, none)).toBe(true)
@@ -1776,10 +1776,13 @@ describe('updates', () => {
     // a terminal newly on a replaced program: Codex was just updated
     expect(isToolsDue(tools, NOW + 60_000, claude('2.1.301'), none, new Set([7]))).toBe(true)
     expect(isToolsDue(tools, NOW + 60_000, claude('2.1.301'), new Set([7]), new Set([7]))).toBe(false)
-    // a session on a Claude newer than the one read: Claude updated itself, and a session started on it
+    // a session started since on a Claude newer than the one read: Claude updated itself, and a session started on it
     expect(isToolsDue(tools, NOW + 60_000, claude('2.1.302'), none, none)).toBe(true)
     expect(isToolsDue(tools, NOW + 60_000, claude('2.1.300'), none, none)).toBe(false)
     expect(isToolsDue(tools, NOW + 60_000, claude(), none, none)).toBe(false)
+    // one started before they were read (a downgrade since), or the version installed not readable: the 10 minutes wait
+    expect(isToolsDue(tools, NOW + 60_000, claude('2.1.302', NOW - 60_000), none, none)).toBe(false)
+    expect(isToolsDue({ codex: '0.162.1', at: NOW }, NOW + 60_000, claude('2.1.302'), none, none)).toBe(false)
   })
 
   test('the pane and the snapshot say what waits on an update; Codex updated meanwhile is said at once, never as still out', async ($, on) => {
