@@ -6297,17 +6297,17 @@ describe('the main problem', () => {
     const { files, asked, fork, saved, settle, clock } = claudeOfWorkspace(on)
     await $.session.start(START)
     await $.command.run(SESSIONS)
+    // a subagent's turn or an interrupted one, with none kept yet: nothing asked
+    await $.turn.complete({ answer: '', durationMs: 1_000, isAborted: true, turnId: 't0', reason: 'aborted' })
+    await $.turn.complete({ answer: 'x', durationMs: 1_000, isAborted: false, turnId: 't0b', reason: 'answer', agentId: 'sub-1' })
+    await settle()
+    expect(asked).toEqual([])
     // none yet: its first turn's end asks (no owner words to carry)
     await $.turn.complete({ answer: 'Hello.', durationMs: 1_000, isAborted: false, turnId: 't1', reason: 'answer' })
     await settle()
     expect(asked).toEqual([problemAsk()])
     expect(saved().problem?.text).toBe(SAID)
     const said = saved().problem!
-    // a subagent's turn or an interrupted one: nothing
-    await $.turn.complete({ answer: '', durationMs: 1_000, isAborted: true, turnId: 't2', reason: 'aborted' })
-    await $.turn.complete({ answer: 'x', durationMs: 1_000, isAborted: false, turnId: 't3', reason: 'answer', agentId: 'sub-1' })
-    await settle()
-    expect(asked).toHaveLength(1)
     // the owner typed to Codex since: asked at Claude's next turn's end, once the retry time is past
     const typed = said.at + 1_000
     files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...saved(), relay: { ...saved().relay!, typedAt: typed } }] }))
@@ -6360,12 +6360,46 @@ describe('the main problem', () => {
     open()
     await settle()
     expect(asked.slice(2)).toEqual([problemAsk('first'), problemAsk('third')])
+    // a turn's end while a question runs, nothing newer typed: no second question
+    fork.gate = new Promise<void>(resolve => { open = resolve })
+    await $.turn.start({ text: 'fourth', turnId: 't6' })
+    await settle()
+    await $.turn.complete({ answer: 'x', durationMs: 1_000, isAborted: false, turnId: 't6', reason: 'answer' })
+    await settle()
+    fork.gate = undefined
+    open()
+    await settle()
+    expect(asked.slice(4)).toEqual([problemAsk('fourth')])
+    // cleared into another conversation while the question ran: its answer is not that conversation's, and not kept
+    const kept = saved().problem
+    fork.gate = new Promise<void>(resolve => { open = resolve })
+    fork.reply = { isAnswered: true, text: 'Something from the conversation before.', usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } }
+    await $.turn.start({ text: 'fifth', turnId: 't7' })
+    await settle()
+    world.sessionId = 'session-new'
+    fork.gate = undefined
+    open()
+    await settle()
+    world.sessionId = undefined
+    expect(asked).toHaveLength(6)
+    expect(saved().problem).toEqual(kept)
     // another session (cleared into another conversation, or no workspace's): nothing asked
     world.sessionId = 'session-new'
     await $.turn.start({ text: 'something else', turnId: 't5' })
     await settle()
     world.sessionId = undefined
-    expect(asked).toHaveLength(4)
+    expect(asked).toHaveLength(6)
+  })
+
+  test('a Claude in a workspace\'s Codex pane (started there by hand) is not its Claude: it asks nothing', async ($, on) => {
+    const { asked, settle } = claudeOfWorkspace(on)
+    world.tmuxPanes = 'ws-practice-rbac\tpeers\t/dev/ttys045\t%1\tclaude\nws-practice-rbac\tpeers\t/dev/ttys022\t%2\tcodex\n'
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    await $.turn.start({ text: 'fix the sign-in page', turnId: 't1' })
+    await $.turn.complete({ answer: 'x', durationMs: 1_000, isAborted: false, turnId: 't1', reason: 'answer' })
+    await settle()
+    expect(asked).toEqual([])
   })
 
   test('a running workspace\'s window gets its problem line when it is set up (a reload, an open); with the bar\'s first line not read, none', async ($, on) => {

@@ -1745,6 +1745,36 @@ except ChildProcessError: pass
         !/ops[\s._/-]*x|確認/i.test(masked) && masked.includes('┌─ ••••• 要•• ✅ é') && masked.includes('▓▒░ ••••• 要•• ✅ é ░▒▓'),
         JSON.stringify(masked.split('\n').filter(l => l.includes('要')).map(l => l.trim().slice(0, 60))))
       rmSync(join(prefsDir(compactHome), 'names.json'))
+      // its main problem first in its details, as its Claude last said it, in a colour of its own, wrapped inside the
+      // box; none said yet, or Codex alone, said so; listed names out of sight in it too
+      const problemFile = join(scratch, 'problem.json')
+      writeFileSync(problemFile, snapshot({ claude: [claudeIn], workspaces: [
+        { id: 'opsx', name: 'Ops X 要確認 ✅ é', env: '', dir: scratch, createdAt: 1, problem: { text: 'The agent windows open dark, but you want them in the light theme your terminal used to have, so they are easy to read next to your other work in Ops X.', at: now - 720_000 } },
+        { id: 'stopped', name: 'Stopped one', env: '', dir: scratch, createdAt: 2 },
+        { id: 'solox', name: 'Solo X', env: '', dir: scratch, createdAt: 4, only: 'codex' },
+      ] }))
+      const detailsOf = (modal, args = ['--plain']) => spawnSync(process.execPath, ['--no-warnings', opsFile, '--frame', ...args], { encoding: 'utf8', env: { ...compactEnv, LIVE_SESSIONS_SNAPSHOT: problemFile, COLS: '120', ROWS: '30', MODAL: modal } }).stdout.split('\n')
+      const said = detailsOf('opsx')
+      const saidColored = detailsOf('opsx', [])
+      const head = said.findIndex(l => l.includes('║ MAIN PROBLEM · said 12m ago'))
+      const note = `\x1b[38;2;${[1, 3, 5].map(k => parseInt('#f4ecd0'.slice(k, k + 2), 16)).join(';')}m`
+      const inBox = l => l.slice(l.indexOf('║ ') + 2, l.lastIndexOf(' ║')).trim()
+      const wrapped = said.slice(head + 1).map(inBox)
+      const blank = wrapped.indexOf('')
+      check('ops: a workspace\'s details say its main problem first, in a colour of its own, wrapped between words inside the box, then what its agents do',
+        head > 0 && said[head - 1].includes('╔═ Ops X') && blank >= 2 && wrapped.slice(0, blank).join(' ') === 'The agent windows open dark, but you want them in the light theme your terminal used to have, so they are easy to read next to your other work in Ops X.' &&
+        said[head + blank + 2]?.includes('▓▒░ Ops X') && saidColored[head]?.includes(`${note}\x1b[1mMAIN PROBLEM`) && saidColored[head + 1]?.includes(`${note}The agent windows`) &&
+        cellsOfLines(saidColored.join('\n')).every(n => n === 120),
+        JSON.stringify(said.slice(Math.max(0, head - 1), head + blank + 3).map(l => l.trim().slice(0, 110))))
+      check('ops: with none said yet, its details say its Claude says it when you next give it something; a workspace of Codex alone has none',
+        detailsOf('stopped').some(l => l.includes('║ MAIN PROBLEM · not said yet: its Claude says it when you next give it something')) &&
+        detailsOf('solox').some(l => l.includes('║ MAIN PROBLEM · none: Codex alone does not say one')),
+        JSON.stringify([...detailsOf('stopped'), ...detailsOf('solox')].filter(l => l.includes('MAIN PROBLEM')).map(l => l.trim().slice(0, 110))))
+      writeFileSync(join(prefsDir(compactHome), 'names.json'), JSON.stringify({ names: ['ops x'] }))
+      const saidMasked = detailsOf('opsx').join('\n')
+      check('ops: listed names are out of sight in a workspace\'s main problem too', !/ops[\s._/-]*x/i.test(saidMasked) && saidMasked.includes('•••••.'),
+        JSON.stringify(saidMasked.split('\n').filter(l => l.includes('other work')).map(l => l.trim().slice(0, 110))))
+      rmSync(join(prefsDir(compactHome), 'names.json'))
       // the detailed view: the agent at background work there too, its work under it, no `done … ago`
       writeFileSync(join(prefsDir(compactHome), 'ops.json'), JSON.stringify({ view: 'detailed' }))
       const detailed = show({ ROWS: '40' }).split('\n')
