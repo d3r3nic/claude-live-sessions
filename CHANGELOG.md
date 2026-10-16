@@ -2,6 +2,9 @@
 
 What each version changed, newest first. Each links its pull request, which holds the details, the checks and the reviews. After updating, run `/reload-plugins` in your sessions.
 
+## 0.37.0 — 2026-10-16
+- **Says when an update waits:** a line under the pane's counts, and one under the ops screen's header, say what waits on an update: Claude sessions still running an older Claude Code than the one installed (Claude Code updates itself, but a session runs the version it started with until it is started again), Codex terminals still running the program an update has since replaced, and a Codex release newer than the one installed (Codex installed with npm does not update itself), each with how many are workspace agents. With nothing waiting there is no line. The shared list's format is now 9 (it holds the versions): run `/reload-plugins` in every session.
+
 ## 0.36.0 — 2026-10-16 ([#51](https://github.com/d3r3nic/claude-live-sessions/pull/51))
 - **What Claude's use would cost, in dollars:** the usage panel and `/sessions usage` say what each account's Claude use in the window would cost at API list prices (`≈ $2,503`), and each project's part beside its share. It is a measure of how much work it was: on a plan paid by the month it is not what you pay. Codex has no price, as its plan's credits are not priced here. The figures were already counted for the shares; they are now shown.
 

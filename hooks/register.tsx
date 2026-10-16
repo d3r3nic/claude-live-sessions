@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { BackgroundTask, ClaudeSession, CodexSession, Place, Relay, SessionContext, Snapshot, Thread, UsageView, Workspace } from '../types'
+import type { BackgroundTask, ClaudeSession, CodexSession, Place, Relay, SessionContext, Snapshot, Thread, Tools, UsageView, Workspace } from '../types'
 import { accountOfFile, applyScan, claudeLimits, clockOf, currentLimits, dollarsSaid, EMPTY_USAGE, limitSaid, markKey, mergeLimits, offsetOf, OFFSETS_SCRIPT, parseContexts, rankUsage, scanInput, sharedLimitsFrom, usageFrom, USAGE_FILES_SCRIPT, USAGE_KEEP_MS, WINDOW_MS, wholeFiles } from './usage'
 import type { Limit, UsageState } from './usage'
 import { AGENT_COMMANDS, CLAUDE_IDLE_MS, isInputEmpty, isStallStep, screenReady, afterOwner, afterStep, claudeKeep, COMPACT_FROM, cueOf, cutBytes, eventOf, EVENT_SCRIPT, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, tokensSaid, TURN_SCRIPT } from './relay'
@@ -143,6 +143,13 @@ import {
   SHARED_VERSION,
   ALL_ACCOUNTS,
   forAccount,
+  BIN_SCRIPT,
+  codexLatestFrom,
+  compareVersions,
+  outdatedFrom,
+  updatesPending,
+  updatesSaid,
+  versionFrom,
 } from './collect'
 import type { CodexProc, Item, Proc, ThreadRow } from './collect'
 
@@ -396,6 +403,29 @@ async function codexThreads(
   }
 }
 
+/** How often the versions installed are read again: an update lands about once a day. */
+const TOOLS_EVERY_MS = 10 * 60_000
+let toolsRead: { at: number; tools: Tools } | undefined
+
+/**
+ * The versions installed (`claude --version`, `codex --version`: what a session started now runs) and the newest Codex
+ * release that Codex's own update check found in any Codex home (its `version.json`), read again every TOOLS_EVERY_MS.
+ */
+async function toolsOf($: EngineInterface, codexHomes: readonly string[], now: number): Promise<Tools> {
+  if (toolsRead !== undefined && now - toolsRead.at < TOOLS_EVERY_MS) return toolsRead.tools
+  const said = async (bin: string) =>
+    versionFrom((await $.process.run([bin, '--version'], { timeoutMs: 15_000 }).catch(() => ({ stdout: '' }))).stdout)
+  const [claude, codex] = await Promise.all([said('claude'), said('codex')])
+  let codexLatest: string | undefined
+  for (const dir of codexHomes) {
+    const latest = await $.fs.read(`${dir}/version.json`).then(text => codexLatestFrom(JSON.parse(text))).catch(() => undefined)
+    if (latest !== undefined && (codexLatest === undefined || compareVersions(latest, codexLatest) > 0)) codexLatest = latest
+  }
+  const tools: Tools = { ...(claude === undefined ? {} : { claude }), ...(codex === undefined ? {} : { codex }), ...(codexLatest === undefined ? {} : { codexLatest }) }
+  toolsRead = { at: now, tools }
+  return tools
+}
+
 async function collect($: EngineInterface, home: string, now: number): Promise<Snapshot> {
   const problems: string[] = []
   const homeEntries = await $.fs.list(home)
@@ -464,7 +494,9 @@ async function collect($: EngineInterface, home: string, now: number): Promise<S
     const rows = await codexThreads($, codexHome, terminals, now, problems, (servers.get(codexHome) ?? []).flatMap(s => s.held))
     if (rows !== undefined) threads.set(codexHome, rows)
   }
-  const started = codexSessions({ terminals, threads, now, servers })
+  // each open terminal: whether an update has since replaced the program it runs
+  const outdated = open.length === 0 ? new Set<number>() : outdatedFrom((await $.process.run(['/bin/sh', '-c', BIN_SCRIPT, 'sh', open.map(p => p.pid).join(',')], { timeoutMs: 10_000 }).catch(() => ({ stdout: '' }))).stdout)
+  const started = codexSessions({ terminals, threads, now, servers }).map(s => (s.pid !== undefined && outdated.has(s.pid) ? { ...s, isOutdated: true } : s))
 
   // each session is listed where it has been working, which its own records say
   const rollouts = new Map([...threads.values()].flat().map(t => [t.id, t.rollout_path] as const))
@@ -516,7 +548,8 @@ async function collect($: EngineInterface, home: string, now: number): Promise<S
     problems.push(`relay: ${message(error)}`)
   }
 
-  return { claude, codex, places, workspaces, envs, tmux, checkedAt: now, problems }
+  const tools = await toolsOf($, [...codexHomes], now)
+  return { claude, codex, places, workspaces, envs, tmux, checkedAt: now, problems, tools }
 }
 
 
@@ -3050,6 +3083,8 @@ export const register: Register = on => {
         : []),
     ]
     const hidden = view.total - view.shown
+    // what waits on an update: sessions of the account shown that run an older Claude or Codex, and a Codex release out
+    const updates = updatesSaid(updatesPending(snap))
     return hideInTree(
       <Box flexDirection="column" width={width} minHeight={height} backgroundColor={paint}>
         <Box flexDirection="row" width={width}>
@@ -3057,6 +3092,7 @@ export const register: Register = on => {
           {working > 0 && <Text color="warning">{` · ${working} working`}</Text>}
           {inBackground > 0 && <Text color="suggestion">{` · ${inBackground} background`}</Text>}
         </Box>
+        {updates !== '' && <Text color="warning" wrap="truncate-end">{`↑ ${updates}`}</Text>}
         <Box flexDirection="row" width={width} columnGap={1}>
           <Text dimColor>active in</Text>
           {WINDOWS.map(w => (

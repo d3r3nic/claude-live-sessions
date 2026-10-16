@@ -1,5 +1,5 @@
 // Pure parsing and matching: no `$`, so the tests drive it directly.
-import type { BackgroundTask, ClaudeSession, CodexSession, Place, SessionContext, Snapshot, Workspace } from '../types'
+import type { BackgroundTask, ClaudeSession, CodexSession, Place, SessionContext, Snapshot, Tools, Workspace } from '../types'
 import { COMPACT_FROM, RELAY_CAP, tokensSaid } from './relay'
 import { DRIFT_EVERY } from './drift'
 import { isOwnPane, tmuxName } from './workspaces'
@@ -61,6 +61,97 @@ export function statusSummary(snap: Snapshot): string {
   const backgroundClaude = snap.claude.filter(s => claudeState(s, snap.checkedAt) === 'background').length
   const busyCodex = snap.codex.filter(s => s.updatedAt > 0 && snap.checkedAt - s.updatedAt < WORKING_MS).length
   return `Claude ${snap.claude.length} (${busyClaude} working${backgroundClaude > 0 ? `, ${backgroundClaude} background` : ''}) · Codex ${snap.codex.length} (${busyCodex} working) · /sessions`
+}
+
+/** The first version in a program's answer to `--version` (`2.1.301 (Claude Code)`, `codex-cli 0.162.1`), if any. */
+export function versionFrom(stdout: string): string | undefined {
+  return /\b(\d+\.\d+\.\d+)\b/.exec(stdout)?.[1]
+}
+
+/** Two versions compared part by part as numbers (`2.1.99` < `2.1.301`): below 0 when `a` is older, above 0 when newer. */
+export function compareVersions(a: string, b: string): number {
+  const parts = (v: string) => (v.split('-')[0] ?? '').split('.').map(n => Number(n) || 0)
+  const [x, y] = [parts(a), parts(b)]
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    const d = (x[i] ?? 0) - (y[i] ?? 0)
+    if (d !== 0) return d
+  }
+  return 0
+}
+
+/** The newest Codex release in a Codex home's `version.json` (what Codex's own update check found), if it says one. */
+export function codexLatestFrom(raw: unknown): string | undefined {
+  const v = (raw as { latest_version?: unknown } | null)?.latest_version
+  return typeof v === 'string' && versionFrom(v) === v ? v : undefined
+}
+
+/**
+ * Prints `pid<TAB>old` or `pid<TAB>current` for each pid in "$1" (comma-separated): `old` when the program it runs (its
+ * first `txt` file, its executable) is no longer the file at that path, as after an update installed over it.
+ */
+export const BIN_SCRIPT = [
+  `/usr/sbin/lsof -a -d txt -p "$1" -Fpin 2>/dev/null | /usr/bin/awk '/^p/ { p = substr($0, 2); seen = 0 } /^i/ { if (!seen) i = substr($0, 2) } /^n/ { if (!seen) { print p "\t" i "\t" substr($0, 2); seen = 1 } }' |`,
+  'while IFS="$(printf \'\\t\')" read -r pid inode path; do',
+  '  [ "$(/usr/bin/stat -f %i "$path" 2>/dev/null)" = "$inode" ] && printf \'%s\\tcurrent\\n\' "$pid" || printf \'%s\\told\\n\' "$pid"',
+  'done',
+].join('\n')
+
+/** The pids BIN_SCRIPT says run a program replaced since they started. */
+export function outdatedFrom(stdout: string): Set<number> {
+  return new Set(stdout.split('\n').flatMap(l => {
+    const [pid, state] = l.trim().split('\t')
+    return state === 'old' && /^\d+$/.test(pid ?? '') ? [Number(pid)] : []
+  }))
+}
+
+/** Whether a session's terminal is a pane of a workspace's own tmux session. */
+const inWorkspace = (snap: Pick<Snapshot, 'workspaces' | 'tmux'>, tty: string) => {
+  const pane = snap.tmux.panes[tty]
+  return pane !== undefined && snap.workspaces.some(ws => pane.session === tmuxName(ws) && isOwnPane(ws, pane))
+}
+
+/**
+ * What is waiting on an update: Claude Code sessions that run an older version than the one installed, and Codex
+ * terminals that run the program an update replaced (how many of each are workspace agents); and a Codex release newer
+ * than the one installed. Unset parts have nothing waiting.
+ */
+export type Pending = {
+  claude?: { installed: string; behind: number; inWorkspaces: number }
+  codex?: { installed?: string; latest?: string; behind: number; inWorkspaces: number }
+}
+
+export function updatesPending(snap: Pick<Snapshot, 'claude' | 'codex' | 'workspaces' | 'tmux' | 'tools'>): Pending {
+  const tools: Tools = snap.tools ?? {}
+  const pending: Pending = {}
+  if (tools.claude !== undefined) {
+    const behind = snap.claude.filter(s => s.version !== undefined && s.version !== '' && compareVersions(s.version, tools.claude!) < 0)
+    if (behind.length > 0) pending.claude = { installed: tools.claude, behind: behind.length, inWorkspaces: behind.filter(s => inWorkspace(snap, s.tty)).length }
+  }
+  const stale = snap.codex.filter(s => s.isOutdated === true)
+  const isNewer = tools.codex !== undefined && tools.codexLatest !== undefined && compareVersions(tools.codexLatest, tools.codex) > 0
+  if (stale.length > 0 || isNewer) {
+    pending.codex = {
+      ...(tools.codex === undefined ? {} : { installed: tools.codex }),
+      ...(isNewer ? { latest: tools.codexLatest! } : {}),
+      behind: stale.length,
+      inWorkspaces: stale.filter(s => inWorkspace(snap, s.tty)).length,
+    }
+  }
+  return pending
+}
+
+/** Pending said in a line (`Claude 2.1.302 installed: 3 sessions still run an older one, 2 in workspaces · …`), '' for nothing. */
+export function updatesSaid(p: Pending): string {
+  const sessions = (n: number, what: string) => `${n} ${what}${n === 1 ? '' : 's'}`
+  const of = (n: number) => (n === 0 ? '' : `, ${n} in workspaces`)
+  const runs = (n: number) => (n === 1 ? 'runs' : 'run')
+  const parts: string[] = []
+  if (p.claude !== undefined) parts.push(`Claude ${p.claude.installed} installed: ${sessions(p.claude.behind, 'session')} still ${runs(p.claude.behind)} an older one${of(p.claude.inWorkspaces)}`)
+  if (p.codex !== undefined) {
+    if (p.codex.latest !== undefined) parts.push(`Codex ${p.codex.latest} is out (${p.codex.installed} installed)`)
+    if (p.codex.behind > 0) parts.push(`Codex ${p.codex.installed ?? ''} installed: ${sessions(p.codex.behind, 'terminal')} still ${runs(p.codex.behind)} the one before${of(p.codex.inWorkspaces)}`.replace('Codex  installed', 'Codex installed'))
+  }
+  return parts.join(' · ')
 }
 
 const UUID_RE = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
@@ -457,6 +548,7 @@ export function claudeFromRegistry(
     isForeground: isForeground(proc.stat),
     since: num(o.statusUpdatedAt) || num(o.updatedAt) || num(o.startedAt),
     startedAt: num(o.startedAt),
+    ...(versionFrom(str(o.version)) === str(o.version) ? { version: str(o.version) } : {}),
   }
 }
 
@@ -1079,9 +1171,10 @@ export function orderFrom(value: unknown): Record<string, string[]> | undefined 
 
 /**
  * The shared snapshot's format: one written by another version is not read. 8: Codex terminals matched through their
- * shared server (`loaded`), which a session of an earlier version, not reloaded yet, leaves unmatched.
+ * shared server (`loaded`), which a session of an earlier version, not reloaded yet, leaves unmatched. 9: the versions
+ * installed and each session's (what waits on an update), which an earlier version leaves out.
  */
-export const SHARED_VERSION = 8
+export const SHARED_VERSION = 9
 
 /** A snapshot, if the value is one (as read back from the shared file). */
 export const isSnapshot = (v: unknown): v is Snapshot => {

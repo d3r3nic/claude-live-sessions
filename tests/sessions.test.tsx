@@ -59,6 +59,13 @@ import {
   contextSaid,
   normalPath,
   SHARED_VERSION,
+  BIN_SCRIPT,
+  codexLatestFrom,
+  compareVersions,
+  outdatedFrom,
+  updatesPending,
+  updatesSaid,
+  versionFrom,
 } from '../hooks/collect'
 import type { CodexProc, ThreadRow } from '../hooks/collect'
 import type { ClaudeSession, CodexSession, Snapshot, Workspace } from '../types'
@@ -300,6 +307,9 @@ const world = {
   tasksRuns: [] as string[][],
   /** A listed file's modified time, when it changed since the fixture's (a registry file rewritten). */
   mtimes: new Map<string, number>(),
+  /** What `claude --version` and `codex --version` say (unset: not found), and the pids BIN_SCRIPT finds replaced. */
+  versions: {} as { claude?: string; codex?: string },
+  binOld: new Set<number>(),
 }
 const resetWorld = () => {
   world.heads = { '/Users/u/dev/web-app': 'main\nmain\n', '/Users/u/dev/build': 'linked\nfix/build\n' }
@@ -365,6 +375,8 @@ const resetWorld = () => {
   world.tasks = {}
   world.tasksRuns = []
   world.mtimes.clear()
+  world.versions = {}
+  world.binOld.clear()
 }
 const changed = (pid: number, line: string) => {
   const stat = world.stat.get(pid)
@@ -484,6 +496,7 @@ function machine(argv: readonly string[], env: unknown): Run {
         return ok(allow.split('|').includes(cmd) ? 'passed\n' : `not-agent ${cmd}\n`)
       }
       if (argv[2] === RECENT_SCRIPT) return ok(args.map(f => `==> ${f}\n${(RECENT[f] ?? []).map(l => `${l}\n`).join('')}`).join(''))
+      if (argv[2] === BIN_SCRIPT) return ok(`${(args[0] ?? '').split(',').map(pid => `${pid}\t${world.binOld.has(Number(pid)) ? 'old' : 'current'}`).join('\n')}\n`)
       if (argv[2] !== ENV_SCRIPT) return { exitCode: 2, stdout: '', stderr: 'unexpected script' }
       const pids = (args[0] ?? '').split(',').map(Number)
       return ok(`${pids.flatMap(pid => (ENV_LINES[pid] === undefined ? [] : [ENV_LINES[pid]!])).join('\n')}\n`)
@@ -559,6 +572,12 @@ function machine(argv: readonly string[], env: unknown): Run {
       const db = dbOf(argv)
       const home = db.slice(0, db.lastIndexOf('/'))
       return ok(JSON.stringify((THREADS[home] ?? []).filter(t => !world.hiddenThreads.has((t as { id: string }).id))))
+    }
+    case 'claude':
+    case 'codex': {
+      const v = world.versions[argv[0]]
+      if (argv[1] !== '--version' || v === undefined) return { exitCode: 127, stdout: '', stderr: `${argv[0]}: command not found` }
+      return ok(argv[0] === 'claude' ? `${v} (Claude Code)\n` : `codex-cli ${v}\n`)
     }
     default:
       return { exitCode: 127, stdout: '', stderr: `unexpected ${argv.join(' ')}` }
@@ -1121,7 +1140,7 @@ describe('pane', () => {
     expect(placedAt('NIGHTLY')).toBe(':/Users/u')
     // the shared snapshot holds what is shown and nothing of the processes' arguments
     const shared = files.get(SHARED) ?? ''
-    expect(JSON.parse(shared).version).toBe(8)
+    expect(JSON.parse(shared).version).toBe(9)
     for (const leak of ['opt/homebrew', 'dangerously', '--cd', 'CODEX_HOME']) expect(shared).not.toContain(leak)
 
     for (const surface of ['terminal', 'desktop'] as const) {
@@ -1624,7 +1643,7 @@ describe('pane', () => {
       checkedAt: NOW - 10_000,
       problems: [],
     }
-    files.set(SHARED, JSON.stringify({ version: 8, snapshot: theirs }))
+    files.set(SHARED, JSON.stringify({ version: 9, snapshot: theirs }))
     await $.session.start(START)
     await clock.settle()
     expect(collections()).toBe(0)
@@ -1642,8 +1661,8 @@ describe('pane', () => {
     expect(collections()).toBe(1)
     // one a session of 0.31 or before wrote (its Codex matches without the shared server's): not taken
     const old = { claude: [], codex: [], places: {}, workspaces: [], envs: [''], tmux: { panes: {}, clients: {} }, checkedAt: NOW, problems: [] }
-    files.set(SHARED, JSON.stringify({ version: 7, snapshot: old }))
-    expect(SHARED_VERSION).toBe(8)
+    files.set(SHARED, JSON.stringify({ version: 8, snapshot: old }))
+    expect(SHARED_VERSION).toBe(9)
     await $.command.run(SESSIONS)
     expect(collections()).toBe(2)
   })
@@ -1692,6 +1711,80 @@ describe('pane', () => {
     await $.session.start(START)
     await $.command.run(SESSIONS)
     expect((await shownOn($, 'terminal', 90)).join('\n')).toContain('! ps: ps: illegal option -- w')
+  })
+})
+
+describe('updates', () => {
+  test('versions read from what the programs say, compared part by part as numbers', async () => {
+    expect(versionFrom('2.1.301 (Claude Code)\n')).toBe('2.1.301')
+    expect(versionFrom('codex-cli 0.162.1\n')).toBe('0.162.1')
+    expect(versionFrom('command not found')).toBeUndefined()
+    expect(compareVersions('2.1.99', '2.1.301')).toBeLessThan(0)
+    expect(compareVersions('2.1.301', '2.1.301')).toBe(0)
+    expect(compareVersions('0.163.0', '0.162.1')).toBeGreaterThan(0)
+    expect(compareVersions('0.164.0-alpha.2', '0.164.0')).toBe(0)
+    expect(codexLatestFrom({ latest_version: '0.163.0', last_checked_at: '2026-10-16T17:38:33Z' })).toBe('0.163.0')
+    for (const raw of [{}, null, { latest_version: 7 }, { latest_version: '0.163.0; rm -rf ~' }]) expect(codexLatestFrom(raw)).toBeUndefined()
+    expect([...outdatedFrom('201\tcurrent\n202\told\nx\told\n207\told\n')]).toEqual([202, 207])
+  })
+
+  test('what waits on an update, said in a line; nothing when every session runs what is installed', async () => {
+    const ws = { ...practice, createdAt: NOW }
+    const claude = (pid: number, tty: string, version?: string) => ({ pid, sessionId: `s-${pid}`, jobId: '', name: '', cwd: '/x', startCwd: '/x', status: 'idle', kind: 'interactive', profile: 'claude', tty, isForeground: true, since: NOW, ...(version === undefined ? {} : { version }) })
+    const codex = (pid: number, tty: string, isOutdated?: boolean) => ({ key: `k-${pid}`, title: '', cwd: '/x', profile: 'codex', surface: 'terminal', tty, updatedAt: NOW, lastActive: NOW, agents: 0, pid, ...(isOutdated === undefined ? {} : { isOutdated }) })
+    const snap = {
+      claude: [claude(1, 'ttys001', '2.1.300'), claude(2, 'ttys002', '2.1.301'), claude(3, 'ttys003', '2.1.299'), claude(4, 'ttys004')],
+      codex: [codex(5, 'ttys005', true), codex(6, 'ttys006')],
+      workspaces: [ws],
+      tmux: { panes: { ttys003: { session: 'ws-practice-rbac', window: 'peers', pane: '%1', owner: String(NOW) }, ttys005: { session: 'ws-practice-rbac', window: 'peers', pane: '%2', owner: String(NOW) } }, clients: {} },
+      tools: { claude: '2.1.301', codex: '0.162.1', codexLatest: '0.163.0' },
+    }
+    const pending = updatesPending(snap)
+    expect(pending).toEqual({ claude: { installed: '2.1.301', behind: 2, inWorkspaces: 1 }, codex: { installed: '0.162.1', latest: '0.163.0', behind: 1, inWorkspaces: 1 } })
+    expect(updatesSaid(pending)).toBe('Claude 2.1.301 installed: 2 sessions still run an older one, 1 in workspaces · Codex 0.163.0 is out (0.162.1 installed) · Codex 0.162.1 installed: 1 terminal still runs the one before, 1 in workspaces')
+    // a pane under a like-named session that is not the workspace's own is not one of its agents
+    const notOwn = { ...snap, tmux: { panes: { ttys003: { session: 'ws-practice-rbac', window: 'peers', pane: '%1', owner: '1' } }, clients: {} } }
+    expect(updatesPending(notOwn).claude?.inWorkspaces).toBe(0)
+    // every session current, the newest Codex installed: nothing
+    const current = { ...snap, claude: [claude(2, 'ttys002', '2.1.301')], codex: [codex(6, 'ttys006')], tools: { claude: '2.1.301', codex: '0.163.0', codexLatest: '0.163.0' } }
+    expect(updatesSaid(updatesPending(current))).toBe('')
+    // versions not read (no snapshot of this version yet, or the programs not found): nothing said
+    expect(updatesSaid(updatesPending({ ...snap, tools: undefined }))).toBe('Codex installed: 1 terminal still runs the one before, 1 in workspaces')
+    expect(updatesSaid(updatesPending({ ...snap, codex: [], tools: {} }))).toBe('')
+  })
+
+  test('the pane and the snapshot say what waits on an update; the versions read again every 10 minutes, not on every refresh', async ($, on) => {
+    const { runs, clock, files } = engine(on)
+    // an older Claude in WEB CONSOLE (the default account's), the work account's on the one installed
+    files.set('/Users/u/.claude/sessions/101.json', JSON.stringify({ ...JSON.parse(files.get('/Users/u/.claude/sessions/101.json')!), version: '2.1.300' }))
+    files.set('/Users/u/.claude-work/sessions/104.json', JSON.stringify({ ...JSON.parse(files.get('/Users/u/.claude-work/sessions/104.json')!), version: '2.1.301' }))
+    files.set('/Users/u/.codex/version.json', JSON.stringify({ latest_version: '0.163.0', last_checked_at: '2026-10-16T17:38:33Z', dismissed_version: null }))
+    world.versions = { claude: '2.1.301', codex: '0.162.1' }
+    world.binOld.add(201)
+    const asked = () => runs.filter(r => (r[0] === 'claude' || r[0] === 'codex') && r[1] === '--version').length
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    const snap = JSON.parse(files.get(SHARED) ?? '{}').snapshot as Snapshot
+    expect(snap.tools).toEqual({ claude: '2.1.301', codex: '0.162.1', codexLatest: '0.163.0' })
+    expect(snap.claude.find(s => s.pid === 101)?.version).toBe('2.1.300')
+    expect(snap.codex.filter(s => s.isOutdated === true).map(s => s.pid)).toEqual([201])
+    const shown = (await shownOn($, 'terminal', 200)).join('\n')
+    expect(shown).toContain('↑ Claude 2.1.301 installed: 1 session still runs an older one · Codex 0.163.0 is out (0.162.1 installed) · Codex 0.162.1 installed: 1 terminal still runs the one before')
+    const first = asked()
+    expect(first).toBe(2)
+    // the pane in view refreshes every 4 s: the programs are not asked again until 10 minutes are up
+    await clock.advance(5 * 60_000)
+    expect(asked()).toBe(first)
+    await clock.advance(6 * 60_000)
+    expect(asked()).toBe(first + 2)
+  })
+
+  test('nothing waiting: no update line', async ($, on) => {
+    engine(on)
+    world.versions = { claude: '2.1.301', codex: '0.163.0' }
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    expect((await shownOn($, 'terminal', 200)).join('\n')).not.toContain('↑')
   })
 })
 

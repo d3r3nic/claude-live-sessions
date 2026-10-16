@@ -179,8 +179,50 @@ for (const repo of view.repos) {
     }
   }
 }
+// 3b. What waits on an update: the versions the programs say, and BIN_SCRIPT on the Codex terminals (read-only) and on
+// a throwaway process whose program is replaced under it, as an update installs over one
+{
+  const said = bin => c.versionFrom(spawnSync(bin, ['--version'], { encoding: 'utf8', timeout: 15_000 }).stdout ?? '')
+  const tools = { claude: said('claude'), codex: said('codex') }
+  check('update: the versions installed read from the programs', tools.claude !== undefined && tools.codex !== undefined, JSON.stringify(tools))
+  const pids = terminals.map(t => t.pid)
+  if (pids.length > 0) {
+    const out = run(['/bin/sh', '-c', c.BIN_SCRIPT, 'sh', pids.join(',')])
+    check('update: every Codex terminal said current or old', out.trim().split('\n').length === pids.length && /^(\d+\t(current|old)\n)+$/.test(out), out.trim().replace(/\n/g, ' '))
+  }
+  // a copy (a clone: no space taken) of this Node, not of a program of macOS's own, which macOS ends when run from
+  // elsewhere
+  const dir = mkdtempSync(join(tmpdir(), 'live-sessions-bin-'))
+  const prog = join(dir, 'nodey')
+  try {
+    run(['/bin/cp', '-c', process.execPath, prog])
+    const child = spawn(prog, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: 'ignore' })
+    try {
+      spawnSync('/bin/sleep', ['0.5'])
+      const before = run(['/bin/sh', '-c', c.BIN_SCRIPT, 'sh', String(child.pid)])
+      // a new file put in its place, as an installer does
+      run(['/bin/cp', '-c', process.execPath, `${prog}.new`])
+      run(['/bin/mv', `${prog}.new`, prog])
+      const after = run(['/bin/sh', '-c', c.BIN_SCRIPT, 'sh', String(child.pid)])
+      check('update: a process whose program was replaced since it started is old, before that current', before === `${child.pid}\tcurrent\n` && after === `${child.pid}\told\n`, JSON.stringify([before, after]))
+    } finally {
+      child.kill()
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+  const outdated = c.outdatedFrom(pids.length > 0 ? run(['/bin/sh', '-c', c.BIN_SCRIPT, 'sh', pids.join(',')]) : '')
+  const latest = [...new Set([join(home, '.codex'), ...terminals.map(t => t.codexHome)])].flatMap(h => {
+    try { return [c.codexLatestFrom(JSON.parse(readFileSync(join(h, 'version.json'), 'utf8')))].filter(Boolean) } catch { return [] }
+  })[0]
+  const line = c.updatesSaid(c.updatesPending({
+    claude, codex: codex.map(s => (s.pid !== undefined && outdated.has(s.pid) ? { ...s, isOutdated: true } : s)), workspaces: [], tmux: { panes: {}, clients: {} },
+    tools: { ...tools, ...(latest === undefined ? {} : { codexLatest: latest }) },
+  }))
+  console.log(`update line here now: ${line || '(nothing waiting)'}`)
+}
 // 4. Terminal.app answers each live session's tab background as a color
-const tabs = claude.filter(s => /^ttys\d+$/.test(s.tty))
+const tabs =claude.filter(s => /^ttys\d+$/.test(s.tty))
 if (tabs.length > 0 && process.platform === 'darwin') {
   const colors = tabs.map(s => c.parseBackground(runOk(['/usr/bin/osascript', '-l', 'JavaScript', '-e', c.BACKGROUND_SCRIPT, s.tty])))
   const found = colors.filter(Boolean)
@@ -1411,6 +1453,21 @@ except ChildProcessError: pass
         theirs.includes('ACCOUNT mmm') && theirs.includes('Theirs There') && !theirs.includes('Mine Here') && !theirs.includes('a hand-off of mine') &&
         every.every(f => f.includes('ALL ACCOUNTS') && f.includes('Mine Here') && f.includes('Theirs There') && f.includes('a hand-off of theirs')),
         [own, theirs, ...every].map(f => f.split('\n').find(l => /ACCOUNT/.test(l))?.trim().slice(0, 60)).join(' | '))
+    }
+    // what waits on an update: a line of its own under the header, while something does; none otherwise
+    {
+      const upSnap = join(scratch, 'updates.json')
+      const older = { pid: 991, sessionId: 'up-1', jobId: '', name: 'Older', cwd: scratch, startCwd: scratch, status: 'idle', kind: 'interactive', profile: 'claude', tty: 'ttys995', isForeground: true, since: now, version: '2.1.300' }
+      const frameOf = tools => {
+        writeFileSync(upSnap, snapshot({ claude: [older], tools }))
+        return spawnSync(process.execPath, ['--no-warnings', opsFile, '--frame', '--plain'], { encoding: 'utf8', env: { ...env, LIVE_SESSIONS_SNAPSHOT: upSnap, COLS: '160', ROWS: '30', NOW: String(now) } }).stdout.split('\n')
+      }
+      const pending = frameOf({ claude: '2.1.301', codex: '0.162.1', codexLatest: '0.163.0' })
+      const current = frameOf({ claude: '2.1.300', codex: '0.163.0', codexLatest: '0.163.0' })
+      const at = pending.findIndex(l => l.includes('↑ Claude 2.1.301 installed: 1 session still runs an older one · Codex 0.163.0 is out (0.162.1 installed)'))
+      check('ops: what waits on an update is said on its own line under the header; nothing when nothing does',
+        at > 0 && pending[at - 1].includes('updated') && !current.some(l => l.includes('↑')),
+        JSON.stringify(pending[at]?.trim().slice(0, 120) ?? pending.slice(0, 4)))
     }
     // a workspace as it reads: its account only when every account is shown, `stopped` only when it is, nothing of its
     // window; each agent's state (working, never exec), context and title; the relay's last step, and the alert only
