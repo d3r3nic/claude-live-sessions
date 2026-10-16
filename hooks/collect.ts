@@ -1198,6 +1198,13 @@ export function orderFrom(value: unknown): Record<string, string[]> | undefined 
  */
 export const SHARED_VERSION = 9
 
+/**
+ * The shared snapshot formats the ops screen shows: this one, and those before it that it can still draw, so that an
+ * update of the plugin never leaves the screen waiting until every session, the workspaces' own Claudes too, has
+ * reloaded it. 8 lacks only the versions: no update line while one of those is shown.
+ */
+export const OPS_FORMATS: readonly number[] = [8, SHARED_VERSION]
+
 /** A snapshot, if the value is one (as read back from the shared file). */
 export const isSnapshot = (v: unknown): v is Snapshot => {
   const o = v as Partial<Snapshot> | null

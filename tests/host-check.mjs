@@ -1469,6 +1469,22 @@ except ChildProcessError: pass
         at > 0 && pending[at - 1].includes('updated') && pending[at + 1].includes('↑ Codex 0.163.0 is out (0.162.1 installed); to install it: npm install -g @openai/codex') && !current.some(l => l.includes('↑')),
         JSON.stringify(pending[at]?.trim().slice(0, 120) ?? pending.slice(0, 4)))
     }
+    // an update of the plugin: the snapshot sessions not reloaded yet still write (the format before) is shown, never a
+    // screen waiting until every session has reloaded; a format it cannot draw is said, nothing drawn
+    {
+      const olderFile = join(scratch, 'older.json')
+      const frameOf = version => {
+        const fresh = JSON.parse(snapshot())
+        writeFileSync(olderFile, JSON.stringify({ version, snapshot: fresh.snapshot }))
+        return spawnSync(process.execPath, ['--no-warnings', opsFile, '--frame', '--plain'], { encoding: 'utf8', env: { ...env, LIVE_SESSIONS_SNAPSHOT: olderFile, COLS: '120', ROWS: '30', NOW: String(now) } })
+      }
+      const before = frameOf(8)
+      const unknown = frameOf(7)
+      check('ops: the snapshot format before this one is shown (sessions not reloaded yet); one it cannot draw is said, nothing drawn',
+        before.status === 0 && before.stdout.includes('LIVE//SESSIONS :: OPS') && before.stdout.includes('Ops X') &&
+        unknown.status === 0 && unknown.stdout.startsWith('No snapshot this screen can show at ') && unknown.stdout.includes('/reload-plugins') && !unknown.stdout.includes('LIVE//SESSIONS'),
+        JSON.stringify([before.stdout.split('\n')[0]?.slice(0, 40), unknown.stdout.slice(0, 60), before.stderr.slice(0, 100), unknown.stderr.slice(0, 100)]))
+    }
     // a workspace as it reads: its account only when every account is shown, `stopped` only when it is, nothing of its
     // window; each agent's state (working, never exec), context and title; the relay's last step, and the alert only
     // while the owner has not typed since a cue for them
@@ -2063,9 +2079,9 @@ except ChildProcessError: pass
     const oldSnapshot = JSON.stringify({ version: 6, snapshot: { claude: [], codex: [] } })
     const arrives = { SNAP_PATH: snapFile, NEXT_SNAPSHOT: snapshot() }
     const waited = live(['open(os.environ["SNAP_PATH"], "w").write(os.environ["NEXT_SNAPSHOT"])', 'drain(2.5)'].join('\n'), arrives)
-    const waitedFor = waited.slice(waited.indexOf('No snapshot of this version'))
+    const waitedFor = waited.slice(waited.indexOf('No snapshot this screen can show'))
     check('ops: a snapshot of another version is said and never drawn, nothing broken; waited for, one of this version is drawn',
-      old.includes('No snapshot of this version') && old.includes('Waiting for it') && !old.includes('\x1b[?1049h') && waited.includes('No snapshot of this version') && waitedFor.includes('\x1b[?1049h') && waitedFor.includes('LIVE//SESSIONS'),
+      old.includes('No snapshot this screen can show') && old.includes('Waiting for it') && !old.includes('\x1b[?1049h') && waited.includes('No snapshot this screen can show') && waitedFor.includes('\x1b[?1049h') && waitedFor.includes('LIVE//SESSIONS'),
       `${old.includes('Waiting for it')} ${waitedFor.includes('LIVE//SESSIONS')}`)
     // keys while it waits: q closes it then; another is dropped, never acted on once it draws (here `a`, which would
     // show every account)

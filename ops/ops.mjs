@@ -279,11 +279,14 @@ const TASKS_SHOWN = 3
 function load() {
   try {
     const raw = JSON.parse(readFileSync(SNAPSHOT, 'utf8'))
-    return raw.version === c.SHARED_VERSION && c.isSnapshot(raw.snapshot) ? { snap: raw.snapshot, mtime: statSync(SNAPSHOT).mtimeMs } : undefined
+    return c.OPS_FORMATS.includes(raw.version) && c.isSnapshot(raw.snapshot) ? { snap: raw.snapshot, mtime: statSync(SNAPSHOT).mtimeMs } : undefined
   } catch {
     return undefined
   }
 }
+
+/** What the screen says while there is no snapshot it can show (none yet, or only an older format than it reads). */
+const NO_SNAPSHOT = `No snapshot this screen can show at ${SNAPSHOT} yet: run /reload-plugins in a Claude Code session, then /sessions`
 
 /** The relay's event log: one JSON event a line (`{ at, kind, text, workspace?, agent? }`), the newest last; the last 200 read. */
 function relayEvents() {
@@ -889,6 +892,11 @@ function open(target, snap) {
 
 if (process.argv.includes('--frame')) {
   const loaded = load()
+  // nothing it can show: said, as the live screen says it, and nothing drawn
+  if (loaded === undefined) {
+    process.stdout.write(`${NO_SNAPSHOT}.\n`)
+    process.exit(0)
+  }
   const now = Number(process.env.NOW ?? Date.now())
   diff(seenAs(loaded.snap), now)
   const { lines, targets } = frame(seenAs(loaded.snap), now, Number(process.env.COLS ?? 110), Number(process.env.ROWS ?? 34), Number(process.env.TICK ?? 3), '', process.env.MODAL)
@@ -929,7 +937,7 @@ if (process.argv.includes('--frame')) {
   let loaded = load()
   if (loaded === undefined) {
     // none of this version yet (an update: sessions not reloaded still write the one before): said, and waited for
-    process.stdout.write(hide(`No snapshot of this version at ${SNAPSHOT} yet: open /sessions in Claude Code once (with this plugin's version). Waiting for it; q closes.\n`))
+    process.stdout.write(hide(`${NO_SNAPSHOT}. Waiting for it; q closes.\n`))
     // keys while it waits: q or Ctrl-C closes, any other is dropped, never left for the screen once it draws; its
     // terminal gone (closed, with or without a hang-up), it ends
     process.stdin.setRawMode?.(true)
