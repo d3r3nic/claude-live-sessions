@@ -6432,6 +6432,25 @@ describe('the main problem', () => {
     expect(saved().problem?.text).toBe(SAID)
   })
 
+  test('a workspace whose tmux session ended while its Claude was asked: the problem kept, no session\'s bar touched (never another by a like name)', async ($, on) => {
+    const { asked, fork, saved, settle, barSince, runs } = claudeOfWorkspace(on)
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    await settle()
+    let open = () => {}
+    fork.gate = new Promise<void>(resolve => { open = resolve })
+    await typed($, 'fix the sign-in page')
+    await settle()
+    const before = runs.length
+    world.tmuxPanes = 'ws-practice-rbac-2\tpeers\t/dev/ttys061\t%7\tclaude\n'
+    fork.gate = undefined
+    open()
+    await settle()
+    expect(asked).toHaveLength(1)
+    expect(saved().problem?.text).toBe(SAID)
+    expect(barSince(before)).toEqual([])
+  })
+
   test('a Claude in a workspace\'s Codex pane (started there by hand) is not its Claude: it asks nothing', async ($, on) => {
     const { asked, settle } = claudeOfWorkspace(on)
     world.tmuxPanes = 'ws-practice-rbac\tpeers\t/dev/ttys045\t%1\tclaude\nws-practice-rbac\tpeers\t/dev/ttys022\t%2\tcodex\n'
