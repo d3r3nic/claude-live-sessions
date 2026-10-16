@@ -6205,7 +6205,7 @@ describe('the main problem', () => {
     expect(problemOf('Main problem: "The sign-in page\nlooks broken."')).toBe('The sign-in page looks broken.')
     expect(problemOf('**MAIN PROBLEM** — the app is slow')).toBe('the app is slow')
     expect([problemOf('none'), problemOf(' None. '), problemOf(''), problemOf('""')]).toEqual([undefined, undefined, undefined, undefined])
-    expect(problemOf('a‮b\u0007c​d')).toBe('a b c d')
+    expect(problemOf('a\u202eb\u0007c\u200bd')).toBe('a b c d')
     const long = problemOf('word '.repeat(100))!
     expect([...long].length).toBeLessThanOrEqual(PROBLEM_MAX)
     expect(long.endsWith('word…')).toBe(true)

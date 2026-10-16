@@ -31,7 +31,7 @@ export function problemAsk(ownerText?: string): string {
 
 // said to the owner: one line, no control characters (C0, C1), no invisible direction or joining controls
 const oneLine = (text: string) =>
-  text.replace(/[\u0000-\u001f\u007f-\u009f​-‏‪-‮⁠-⁩﻿]+/g, ' ').replace(/\s+/g, ' ').trim()
+  text.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]+/g, ' ').replace(/\s+/g, ' ').trim()
 
 /** At most PROBLEM_MAX characters, cut at a word where it has to be, with `…`. */
 function cutWords(text: string): string {
