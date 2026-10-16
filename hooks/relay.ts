@@ -20,7 +20,7 @@ export const CHECKIN_START = 'Workspace check-in:'
  * What the relay types into an agent whose turn ended with no cue while nothing waits on the owner (stallSteps): go on
  * with the plan if it is clear, else say what it needs, always ending with a cue the relay can act on.
  */
-export const CHECKIN_LINE = `${CHECKIN_START} your last turn ended without a cue line, and nothing waits on the owner. If the next step of your plan is clear, carry on with it, and end a finished piece with the peer-coding cue line (READY FOR …). If you need the owner's decision, end with NEEDS USER and your question; if the scope is done, with SCOPE CLOSED.`
+export const CHECKIN_LINE = `${CHECKIN_START} your last turn ended without a cue line, and nothing waits on the owner. If the next step of your plan is clear, carry on with it, and end a finished piece with the peer-coding cue line (READY FOR …). Decide yourself what the request, the code or a sound default settles; if only the owner can decide, end with NEEDS USER, your question, and one line on what would let you skip such a question next time. If the scope is done, end with SCOPE CLOSED.`
 /** How long both agents are idle, the last turn having ended with no cue and the owner silent since, before a check-in. */
 export const STALL_MS = 5 * 60_000
 /** How long a hand-off may wait for the other agent to show at its prompt before the owner is told. */

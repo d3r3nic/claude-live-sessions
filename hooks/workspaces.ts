@@ -873,6 +873,9 @@ export function headOf(stdout: string): { isMain: boolean; branch?: string; isDe
  * brought in also in its first prompt, as a conversation keeps the system
  * prompt it began with until it compacts (Claude Code's system-prompt
  * snapshot). Codex has it in its first prompt, which its compactions keep.
+ * It also asks them to need the owner as little as they can (the owner: "less need of the user, and whenever the user
+ * is requested, consider if this can be avoided the next time"): what the work settles they decide, and an ask comes
+ * with what would let them skip it next time.
  */
 export function leanWork(isPair: boolean): string {
   return [
@@ -884,6 +887,8 @@ export function leanWork(isPair: boolean): string {
       ? 'Run a test suite once per set of changes, saving its full output where the peer-coding rules keep evidence and printing only its failures and summary.'
       : 'Run a test suite once per set of changes, printing only its failures and summary.',
     'Between steps, write one short line at most, and only when your direction changes.',
+    'Need the owner as little as you can: what the request, the code, the project rules or a sound default already settle, decide yourself, say your choice in one line and go on.',
+    `When only the owner can decide, ask${isPair ? ' with NEEDS USER' : ''}, and add one line on what would let you skip such a question next time (a rule, a saved default, a check); put that in place yourself when it is yours to do.`,
     'Never skip a check, a test or a review to save tokens.',
   ].join(' ')
 }
