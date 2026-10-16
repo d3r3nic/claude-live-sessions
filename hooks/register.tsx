@@ -148,6 +148,7 @@ import {
   codexLatestFrom,
   dueRefresh,
   REFRESH_QUIET_MS,
+  SCHEDULED_SCRIPT,
   compareVersions,
   isToolsDue,
   outdatedFrom,
@@ -155,7 +156,7 @@ import {
   updatesPending,
   versionFrom,
 } from './collect'
-import type { CodexProc, Item, Proc, ThreadRow } from './collect'
+import type { CodexProc, Due, Item, Proc, ThreadRow } from './collect'
 
 type Element = ReturnType<typeof h>
 
@@ -576,40 +577,74 @@ let isRefreshing = false
 
 /**
  * Each workspace agent due to move onto the version installed (dueRefresh: its workspace quiet REFRESH_QUIET_MS, it on
- * an older one), started again where it runs: nothing typed in its input line (the owner's draft is never lost),
- * checked as close checks it (the conversation kept for the workspace, under its account, not this session, between
- * turns, checked again just before), taken by one session alone (its ledger key, by its process), stopped, and its pane
- * started afresh with the command the workspace starts it with, resuming that conversation in the same window. An
- * agent that could not be started again is told of.
+ * an older one), started again where it runs: nothing typed in its input line (read again just before, so the owner's
+ * draft is never lost); a Claude with nothing pending that a restart would drop (background work it started since its
+ * process did, or any job it scheduled: session-only jobs end with its process); checked as close checks it (the
+ * conversation kept for the workspace, under its account, not this session, between turns, checked again just
+ * before); taken by one session alone (its ledger key, by its process); its start marked on the workspace, as Open
+ * marks it, so the relay waits for it at its prompt; stopped, and its pane started afresh with the command the
+ * workspace starts it with, resuming that conversation in the same window. A stop that did not finish, or a pane that
+ * could not be started again, is told of.
  */
 async function refreshAgents($: EngineInterface, home: string, snap: Snapshot, now: number) {
   const NAME = { claude: 'Claude', codex: 'Codex' } as const
+  const isEmpty = async (due: Due) => {
+    const screen = await $.process.run(['tmux', 'capture-pane', '-p', '-e', '-t', due.pane], { timeoutMs: 10_000 }).catch(() => ({ exitCode: -1, stdout: '' }))
+    return screen.exitCode === 0 && isInputEmpty(due.tool, screen.stdout) === true
+  }
+  const tell = async (ws: Workspace, due: Due, key: string, text: string) => {
+    await logEvent($, home, { kind: 'update', text, workspace: ws.id, agent: due.tool })
+    await $.process.run(['/bin/sh', '-c', RELAY_SCRIPT, 'sh', 'tell', ledgerPath(home), `${key}-told`, '', '', await told($, text), '', 'Workspace update'], { timeoutMs: 20_000 }).catch(() => undefined)
+  }
   for (const ws of snap.workspaces) {
     for (const due of dueRefresh(ws, snap, now)) {
-      const screen = await $.process.run(['tmux', 'capture-pane', '-p', '-e', '-t', due.pane], { timeoutMs: 10_000 }).catch(() => ({ exitCode: -1, stdout: '' }))
-      if (screen.exitCode !== 0 || isInputEmpty(due.tool, screen.stdout) !== true) continue
+      if (!(await isEmpty(due))) continue
+      if (due.tool === 'claude' && (await isClaudePending($, home, snap.claude.find(c => c.pid === due.pid), now))) continue
       const agent = await stoppable($, home, ws, due.tty, snap, 'start it again on the new version')
-      if (agent === undefined || 'why' in agent || agent.tool !== due.tool || agent.pid !== due.pid || (await agent.check()) !== undefined) continue
+      if (agent === undefined || 'why' in agent || agent.tool !== due.tool || agent.pid !== due.pid || (await agent.check()) !== undefined || !(await isEmpty(due))) continue
       const ledger = ledgerPath(home)
+      const key = `refresh-${ws.id}-${due.tool}-${due.pid}`
       await $.process.run(['/bin/mkdir', '-p', ledger], { timeoutMs: 10_000 })
-      if ((await $.process.run(['/bin/mkdir', `${ledger}/refresh-${ws.id}-${due.tool}-${due.pid}`], { timeoutMs: 10_000 }).catch(() => ({ exitCode: -1 }))).exitCode !== 0) continue
+      if ((await $.process.run(['/bin/mkdir', `${ledger}/${key}`], { timeoutMs: 10_000 }).catch(() => ({ exitCode: -1 }))).exitCode !== 0) continue
+      // its start, as Open marks it: the relay passes nothing to it until it shows at its prompt, and takes it for one
+      // just started, never for one gone
+      const startedAt = await $.clock.now()
+      await changeWorkspaces($, home, list => list.map(w => (w.id !== ws.id || w.threads?.[due.tool] === undefined ? w : {
+        ...w,
+        threads: { ...w.threads, [due.tool]: { ...w.threads[due.tool]!, since: startedAt } },
+      })))
       const version = due.tool === 'claude' ? snap.tools?.claude : snap.tools?.codex
-      const quiet = `after ${ago(REFRESH_QUIET_MS)} quiet`
+      const on = version === undefined ? 'the version installed' : `${due.tool === 'claude' ? 'Claude Code' : 'Codex'} ${version}`
       const stopped = (await $.process.run(['/bin/sh', '-c', STOP_SCRIPT, 'sh', due.tty, JOB_COMMANDS[due.tool], String(due.pid)], { timeoutMs: 30_000 }).catch(() => ({ stdout: 'failed' }))).stdout.trim()
-      if (stopped !== 'stopped') continue
-      const started = await $.process.run(['tmux', 'respawn-pane', '-k', '-t', due.pane, paneScript(due.tool, ws, home)], { timeoutMs: 10_000 }).catch((error: unknown) => ({ exitCode: -1, stderr: message(error) }))
-      const what = `${ws.name}: ${NAME[due.tool]} started again on ${version === undefined ? 'the version installed' : `${due.tool === 'claude' ? 'Claude Code' : 'Codex'} ${version}`}, ${quiet}, in the same conversation`
-      if (started.exitCode === 0) {
-        await logEvent($, home, { kind: 'update', text: what, workspace: ws.id, agent: due.tool })
+      if (stopped !== 'stopped') {
+        await tell(ws, due, key, `${ws.name}: ${NAME[due.tool]} was to be started again on ${on}, but did not stop (${stopped || 'no answer'}); it may still be running in its pane, else close the workspace and open it again`)
         continue
       }
-      const failed = `${ws.name}: ${NAME[due.tool]} was stopped to move onto the new version but could not be started again (${firstLine(started.stderr) || `exit ${started.exitCode}`}); close the workspace and open it again`
-      await logEvent($, home, { kind: 'update', text: failed, workspace: ws.id, agent: due.tool })
-      await $.process.run(['/bin/sh', '-c', RELAY_SCRIPT, 'sh', 'tell', ledger, `refresh-failed-${ws.id}-${due.tool}-${due.pid}`, '', '', await told($, failed), '', 'Workspace update'], { timeoutMs: 20_000 }).catch(() => undefined)
+      const started = await $.process.run(['tmux', 'respawn-pane', '-k', '-t', due.pane, paneScript(due.tool, ws, home)], { timeoutMs: 10_000 }).catch((error: unknown) => ({ exitCode: -1, stderr: message(error) }))
+      if (started.exitCode === 0) {
+        await logEvent($, home, { kind: 'update', text: `${ws.name}: ${NAME[due.tool]} started again in its pane on ${on}, resuming its conversation, after ${ago(REFRESH_QUIET_MS)} quiet`, workspace: ws.id, agent: due.tool })
+        continue
+      }
+      await tell(ws, due, key, `${ws.name}: ${NAME[due.tool]} was stopped to move onto ${on} but its pane could not be started again (${firstLine(started.stderr) || `exit ${started.exitCode}`}); close the workspace and open it again`)
     }
   }
 }
 
+/**
+ * Whether a Claude session has something pending that starting it again would drop: background work it started since
+ * its process did (a command, a monitor, an agent: tasks.pl), or any job it scheduled since (SCHEDULED_SCRIPT: a /loop,
+ * a cron job; those of a session alone end with its process). Its process start not known: taken to have.
+ */
+async function isClaudePending($: EngineInterface, home: string, s: ClaudeSession | undefined, now: number): Promise<boolean> {
+  if (s === undefined || (s.startedAt ?? 0) <= 0) return true
+  const file = transcriptPath(`${home}/.${s.profile}`, s.startCwd, s.sessionId)
+  const out = await $.process.run(['/usr/bin/perl', `${$.plugin.root}/hooks/tasks.pl`, String(s.startedAt), file], { timeoutMs: 20_000 }).catch(() => undefined)
+  if (out === undefined || out.exitCode !== 0) return true
+  const open = (parseTasks(out.stdout).get(file) ?? []).filter(t => t.endsBy === undefined || now < t.endsBy)
+  if (open.length > 0) return true
+  const scheduled = await $.process.run(['/usr/bin/perl', '-ne', SCHEDULED_SCRIPT, new Date(s.startedAt!).toISOString(), file], { timeoutMs: 20_000 }).catch(() => undefined)
+  return scheduled === undefined || scheduled.exitCode !== 0 || scheduled.stdout.trim() !== ''
+}
 
 /** The workspaces; `isReadable` false when the file is there but is not one, which nothing then overwrites. */
 async function readWorkspaces($: EngineInterface, home: string): Promise<{ list: Workspace[]; isReadable: boolean }> {
@@ -983,15 +1018,6 @@ async function hideWindows($: EngineInterface, home: string, ws: Workspace): Pro
   return ttys.length
 }
 
-/**
- * Closes a workspace for now, to be opened again later: each agent in it, checked between turns, closed as a terminal
- * closing does (its conversation kept for the workspace, which Open goes on with), its windows hidden, then its tmux
- * session ended. Its panes are read as they are now: each runs a shell with nothing under it, or an agent checked as
- * bring-in checks one (its conversation the one kept, between turns, not waiting on the owner, no background work going).
- * Anything else in a pane (a program of the owner's, an agent not known for certain) is never ended: nothing is closed
- * then. Never from the workspace's own Claude, which would close itself first. An agent that began a turn after the
- * checks is left running.
- */
 /** A workspace agent that may be stopped between turns: its pane's terminal, its process, and the check made just before. */
 type Stoppable = { tool: 'claude' | 'codex'; tty: string; pid: number; check: () => Promise<string | undefined> }
 
@@ -1030,6 +1056,15 @@ async function stoppable($: EngineInterface, home: string, ws: Workspace, tty: s
   return { tool: 'codex', tty, pid: codex.pid!, check }
 }
 
+/**
+ * Closes a workspace for now, to be opened again later: each agent in it, checked between turns, closed as a terminal
+ * closing does (its conversation kept for the workspace, which Open goes on with), its windows hidden, then its tmux
+ * session ended. Its panes are read as they are now: each runs a shell with nothing under it, or an agent checked as
+ * bring-in checks one (its conversation the one kept, between turns, not waiting on the owner, no background work going).
+ * Anything else in a pane (a program of the owner's, an agent not known for certain) is never ended: nothing is closed
+ * then. Never from the workspace's own Claude, which would close itself first. An agent that began a turn after the
+ * checks is left running.
+ */
 async function closeWorkspace($: EngineInterface, ws: Workspace): Promise<{ isClosed: boolean; text: string }> {
   const home = (await $.env.get('HOME')) ?? ''
   const name = tmuxName(ws)

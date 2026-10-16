@@ -153,13 +153,13 @@ const SESSION_MARKERS = [
  * 100k tokens, as a workspace started again after quiet, by ■ then ►, or after a crash meets it): it resumes in full,
  * as it stood, and compacts at a hand-off as before. And it waits out the API's overload and capacity errors, up to 2
  * hours in all, instead of ending its turn on them (Claude Code's unattended retry mode), while a plan's usage limit
- * ends the request as it does without it (a wait of 0 for it).
+ * ends the request as it does without it (a wait of 1 ms for it: Claude Code reads 0 as not set, which waits on).
  */
 export const CLAUDE_UNATTENDED = [
   'CLAUDE_CODE_RESUME_THRESHOLD_MINUTES=525600',
   'CLAUDE_CODE_RETRY_WATCHDOG=1',
   'CLAUDE_CODE_RETRY_WATCHDOG_MAX_WAIT_MS=7200000',
-  'CLAUDE_CODE_RETRY_WATCHDOG_MAX_USAGE_LIMIT_WAIT_MS=0',
+  'CLAUDE_CODE_RETRY_WATCHDOG_MAX_USAGE_LIMIT_WAIT_MS=1',
 ] as const
 
 /** An agent's start under a workspace's environment: its config directory, Claude's or Codex's; Claude's set to go on unattended. */

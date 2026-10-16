@@ -72,6 +72,8 @@ import {
   TOOLS_EVERY_MS,
   dueRefresh,
   REFRESH_QUIET_MS,
+  SCHEDULED_SCRIPT,
+  transcriptPath,
 } from '../hooks/collect'
 import type { CodexProc, ThreadRow } from '../hooks/collect'
 import type { ClaudeSession, CodexSession, Snapshot, Workspace } from '../types'
@@ -319,6 +321,8 @@ const world = {
   /** Folders mkdir made (without -p, a second one of a name fails), and each `tmux respawn-pane` (its arguments after it). */
   made: new Set<string>(),
   respawned: [] as string[][],
+  /** Transcripts SCHEDULED_SCRIPT finds a job scheduled in. */
+  scheduled: new Set<string>(),
 }
 const resetWorld = () => {
   world.heads = { '/Users/u/dev/web-app': 'main\nmain\n', '/Users/u/dev/build': 'linked\nfix/build\n' }
@@ -388,6 +392,7 @@ const resetWorld = () => {
   world.binOld.clear()
   world.made.clear()
   world.respawned = []
+  world.scheduled.clear()
 }
 const changed = (pid: number, line: string) => {
   const stat = world.stat.get(pid)
@@ -588,6 +593,9 @@ function machine(argv: readonly string[], env: unknown): Run {
       const home = db.slice(0, db.lastIndexOf('/'))
       return ok(JSON.stringify((THREADS[home] ?? []).filter(t => !world.hiddenThreads.has((t as { id: string }).id))))
     }
+    case '/usr/bin/perl':
+      if (argv[1] === '-ne' && argv[2] === SCHEDULED_SCRIPT) return ok(world.scheduled.has(argv[4] ?? '') ? 'scheduled\n' : '')
+      return { exitCode: 127, stdout: '', stderr: `unexpected ${argv.join(' ')}` }
     case '/bin/mkdir': {
       const path = argv[argv.length - 1] ?? ''
       if (argv[1] === '-p') return ok('')
@@ -1871,17 +1879,17 @@ describe('updates', () => {
     files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, env: '', only: 'claude' }] }))
     world.tmuxPanes = `ws-practice-rbac\tpeers\t/dev/ttys004\t%1\tclaude\t${NOW}\n`
     world.tmuxOwner = String(NOW)
-    files.set('/Users/u/.claude/sessions/101.json', JSON.stringify({ ...JSON.parse(files.get('/Users/u/.claude/sessions/101.json')!), status: 'idle', statusUpdatedAt: NOW - idleMs, version: '2.1.300' }))
+    files.set('/Users/u/.claude/sessions/101.json', JSON.stringify({ ...JSON.parse(files.get('/Users/u/.claude/sessions/101.json')!), status: 'idle', statusUpdatedAt: NOW - idleMs, startedAt: NOW - 3 * 3_600_000, version: '2.1.300' }))
     world.versions = { claude: '2.1.301', codex: '0.163.0' }
     world.screens['%1'] = `────\n\u001b[39m❯ ${input}\n────`
     const settle = async () => {
       for (let i = 0; i < 10; i++) await clock.advance(10)
     }
-    return { files, clock, settle }
+    return { files, clock, settle, transcript: transcriptPath('/Users/u/.claude', '/Users/u/dev/web-app', 'session-101') }
   }
 
   test('a workspace Claude on an older Claude Code, its workspace quiet an hour: stopped between turns and started again in its pane, in the same conversation', async ($, on) => {
-    const { settle } = behindClaude(on, 2 * 3_600_000)
+    const { files, settle } = behindClaude(on, 2 * 3_600_000)
     await $.session.start(START)
     await $.command.run(SESSIONS)
     await settle()
@@ -1893,7 +1901,40 @@ describe('updates', () => {
     expect(args[3]).toContain('--resume session-101')
     expect(args[3]).toContain(BYPASS.claude)
     expect(args[3]).toContain('--append-system-prompt')
-    expect(world.events.map(e => (e as { text: string }).text)).toContain('Practice RBAC: Claude started again on Claude Code 2.1.301, after 1h quiet, in the same conversation')
+    expect(world.events.map(e => (e as { text: string }).text)).toContain('Practice RBAC: Claude started again in its pane on Claude Code 2.1.301, resuming its conversation, after 1h quiet')
+    // its start marked, as Open marks it: the relay waits for it at its prompt, and never takes it for one gone
+    expect(JSON.parse(files.get(WORKSPACES)!).workspaces[0].threads.claude.since).toBeGreaterThanOrEqual(NOW)
+  })
+
+  test('a Claude with something a restart would drop is left as it is: background work it started, a job it scheduled, or a process start not known', async ($, on) => {
+    const { files, clock, settle, transcript } = behindClaude(on, 2 * 3_600_000)
+    // a monitor it started an hour ago, not ended
+    world.tasks[transcript] = `T\tmonitor\tm1\t${NOW - 3_600_000}\t\tWait for CI\n`
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    await settle()
+    expect(world.stopped).toEqual([])
+    // a /loop or cron job of its own
+    delete world.tasks[transcript]
+    world.scheduled.add(transcript)
+    await clock.advance(5_000)
+    await settle()
+    expect(world.stopped).toEqual([])
+    // its process start not in its registry entry: nothing known of what it started
+    world.scheduled.clear()
+    const REG = '/Users/u/.claude/sessions/101.json'
+    const { startedAt: _, ...rest } = JSON.parse(files.get(REG)!)
+    files.set(REG, JSON.stringify(rest))
+    world.mtimes.set(REG, 2)
+    await clock.advance(5_000)
+    await settle()
+    expect(world.stopped).toEqual([])
+    // nothing pending, its start known again: started again
+    files.set(REG, JSON.stringify({ ...rest, startedAt: NOW - 3 * 3_600_000 }))
+    world.mtimes.set(REG, 3)
+    await clock.advance(5_000)
+    await settle()
+    expect(world.stopped).toEqual(['ttys004 claude 101'])
   })
 
   test('never over your draft, never mid-turn or before the hour; a stop that did not finish is not tried again on that process', async ($, on) => {
@@ -1929,6 +1970,8 @@ describe('updates', () => {
     await settle()
     expect(world.stopped).toEqual(['ttys004 claude 101'])
     expect(world.respawned).toEqual([])
+    // and you are told
+    expect(world.events.map(e => (e as { text: string }).text)).toContain('Practice RBAC: Claude was to be started again on Claude Code 2.1.301, but did not stop (stuck); it may still be running in its pane, else close the workspace and open it again')
   })
 
   test('nothing waiting: no update line', async ($, on) => {
@@ -1979,7 +2022,7 @@ describe('workspaces', () => {
 
   test('the tmux command: a claude and a codex window in its folder, under its environment, then attach', async () => {
     // Claude set to go on unattended: no question on resuming an old, large conversation; overload waited out, a usage limit not
-    const unattended = 'CLAUDE_CODE_RESUME_THRESHOLD_MINUTES=525600 CLAUDE_CODE_RETRY_WATCHDOG=1 CLAUDE_CODE_RETRY_WATCHDOG_MAX_WAIT_MS=7200000 CLAUDE_CODE_RETRY_WATCHDOG_MAX_USAGE_LIMIT_WAIT_MS=0'
+    const unattended = 'CLAUDE_CODE_RESUME_THRESHOLD_MINUTES=525600 CLAUDE_CODE_RETRY_WATCHDOG=1 CLAUDE_CODE_RETRY_WATCHDOG_MAX_WAIT_MS=7200000 CLAUDE_CODE_RETRY_WATCHDOG_MAX_USAGE_LIMIT_WAIT_MS=1'
     expect(agentStart('claude', '', HOME)).toBe(`env ${MARKERS} ${unattended} claude`)
     expect(agentStart('claude', 'work', HOME)).toBe(`env ${MARKERS} CLAUDE_CONFIG_DIR='/Users/u/.claude-work' ${unattended} claude`)
     expect(agentStart('codex', 'work', HOME)).toBe(`env ${MARKERS} CODEX_HOME='/Users/u/.codex-work' codex`)

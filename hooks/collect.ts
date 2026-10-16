@@ -183,6 +183,13 @@ export function isToolsDue(tools: Tools | undefined, now: number, claude: readon
  */
 export const REFRESH_QUIET_MS = 60 * 60_000
 
+/**
+ * `perl -ne SCHEDULED_SCRIPT SINCE FILE`: prints `scheduled` and stops at the first job a Claude session scheduled at or
+ * after SINCE (an ISO time in UTC, as its transcript writes them): a call of its own (not a subagent's) to CronCreate or
+ * ScheduleWakeup (/loop); nothing otherwise. The tools' definitions a transcript also holds are no calls.
+ */
+export const SCHEDULED_SCRIPT = 'BEGIN { $since = shift @ARGV } next if index($_, q("isSidechain":true)) >= 0; next unless index($_, q("type":"assistant")) >= 0 && /"type":"tool_use","id":"[^"]*","name":"(?:CronCreate|ScheduleWakeup)"/; my ($at) = /"timestamp":"([^"]+)"/; if (defined $at && $at ge $since) { print "scheduled\n"; exit 0 }'
+
 /** A workspace agent to start again on the version installed: its tool, its pane's terminal and tmux id, its process. */
 export type Due = { tool: 'claude' | 'codex'; tty: string; pane: string; pid: number }
 
