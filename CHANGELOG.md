@@ -2,13 +2,13 @@
 
 What each version changed, newest first. Each links its pull request, which holds the details, the checks and the reviews. After updating, run `/reload-plugins` in your sessions.
 
-## 0.36.0 — 2026-10-16
-- **What Claude's use would cost, in dollars:** the usage panel and `/sessions usage` say what each account's Claude use in the window would cost at API list prices (`≈ $2,503`), and each project's part beside its share. It is a measure of how much work it was, not a bill (a plan is paid by the month). Codex has no price, as its plan's credits are not priced here. The figures were already counted for the shares; they are now shown.
+## 0.36.0 — 2026-10-16 ([#51](https://github.com/d3r3nic/claude-live-sessions/pull/51))
+- **What Claude's use would cost, in dollars:** the usage panel and `/sessions usage` say what each account's Claude use in the window would cost at API list prices (`≈ $2,503`), and each project's part beside its share. It is a measure of how much work it was: on a plan paid by the month it is not what you pay. Codex has no price, as its plan's credits are not priced here. The figures were already counted for the shares; they are now shown.
 
-## 0.35.0 — 2026-10-16
+## 0.35.0 — 2026-10-16 ([#50](https://github.com/d3r3nic/claude-live-sessions/pull/50))
 - **Agents need you less:** a workspace's agents are told to decide themselves what the request, the code, the project rules or a sound default settles, say their choice in one line and go on. When only you can decide, they ask (in a pair, with NEEDS USER) and add one line on what would let them skip such a question next time (a rule, a saved default, a check), which they put in place themselves when it is theirs to do. The relay's check-in asks the same. Claude has it on its next start or resume of its pane, Codex in the first prompt of a workspace made or an agent brought in from now on; a resumed Claude conversation takes it once it next compacts.
 
-## 0.34.0 — 2026-10-15
+## 0.34.0 — 2026-10-15 ([#49](https://github.com/d3r3nic/claude-live-sessions/pull/49))
 - **Each workspace says what it is about:** coming back to a workspace after an hour, you can read the main problem it works on in one or two plain sentences, with no jargon: first in its details in the ops screen (a click on its tile), in a colour of its own, and on a pale yellow line under the bar at the top of its window. Its own Claude says it, from all it knows of the work, as you give it something (typed, or through Remote Control), before it starts; and at a turn's end while there is none yet, or after you typed to Codex. It is a side question to itself that its chat never shows: one short reply, on top of reading the conversation again, from the prompt cache while that holds it (after a long idle, in full, as the turn itself does). It is the problem you brought, not the step under way, and it is kept with the workspace. Background tasks' notices, scheduled prompts and other sessions' messages ask nothing. The line in the window is added only while your tmux bar is one line (tmux's default). A workspace running now gets one at its Claude's next turn; a workspace of Codex alone has none.
 
 ## 0.33.0 — 2026-10-14 ([#48](https://github.com/d3r3nic/claude-live-sessions/pull/48))

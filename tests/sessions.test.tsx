@@ -5739,8 +5739,11 @@ describe('usage', () => {
     expect(store.get('usageShown')).toBe(true)
     let shown = (await texts()).join('\n')
     expect(shown).toContain('Usage by project')
-    expect(shown).toContain('  Claude · default · since Sun 4 Oct 08:40 · 19% of the 7d limit used · ≈ $8,000 at API list prices')
-    expect(shown).toMatch(/Acme\/web-app\n 75%\n  \$6,000\n≈ 14% of limit\n~\/notes\n 25%\n  \$2,000\n≈ 5% of limit/)
+    // (the dollars early in the heading: a narrow pane cuts the time and the limit, not them; at API list prices, as the
+    // panel's first line says)
+    expect(shown).toContain('  Claude · default · ≈ $8,000 · since Sun 4 Oct 08:40 · 19% of the 7d limit used')
+    expect(shown).toContain('ago · Claude\'s $ at API list prices · each project')
+    expect(shown).toMatch(/Acme\/web-app\n 75%\n    \$6,000\n≈ 14% of limit\n~\/notes\n 25%\n    \$2,000\n≈ 5% of limit/)
     expect(shown).toContain('  Codex · default · since Tue 6 Oct 08:40 · 42% of the 7d limit used')
     // Codex's: no price (its plan's credits are not priced here)
     expect(shown).toMatch(/Acme\/api\n100%\n\n≈ 42% of limit/)
@@ -5751,7 +5754,7 @@ describe('usage', () => {
     await ui.press({ key: 'usage-window 5h' })
     expect(store.get('usageWindow')).toBe('5h')
     shown = (await texts()).join('\n')
-    expect(shown).toContain('  Claude · default · since 06:40 · 4% of the 5h limit used · ≈ $8,000 at API list prices')
+    expect(shown).toContain('  Claude · default · ≈ $8,000 · since 06:40 · 4% of the 5h limit used')
     expect(shown).toContain('  Codex · default · since 03:40 · its limit not read yet')
     // as text
     const asText = await $.command.run({ ...SESSIONS, args: 'usage 7d' })
@@ -5781,6 +5784,15 @@ describe('usage', () => {
     const asText = await $.command.run({ ...SESSIONS, args: 'usage 7d' })
     expect(asText.text).toContain(', ≈ $10,000 at API list prices: ~/p0 10% ≈ $1,000 (≈ 2% of the limit), ')
     expect(asText.text).toContain(', +2 more\nCodex')
+    // the panel's heading too, under its eight rows and two more
+    await $.command.run(SESSIONS)
+    const ui = await $.ui.mount({ plugin: 'live-sessions', surface: 'terminal', ...PANE, props: paneProps(110) })
+    await ui.press({ key: 'usage' })
+    const shown = (await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')
+    expect(shown).toContain('  Claude · default · ≈ $10,000 · since ')
+    expect(shown).toContain('    +2 more')
+    expect(shown.match(/^ {4}\$1,000$/gm)?.length).toBe(8)
+    await ui.unmount()
   })
 
   test('every account at once: each one\'s limits and projects, named', { timeoutMs: 30_000 }, async ($, on) => {
@@ -5798,8 +5810,8 @@ describe('usage', () => {
     expect(shown).toContain('default: Claude 5h 4% ↻11:40 · 7d 19% ↻Sun 08:40 │ Codex 7d 42% ↻Tue 08:40')
     expect(shown).toContain('work: Claude 7d 61% ↻Sat 08:40')
     // (a million cache reads: 20 cents)
-    expect(shown).toContain('  Claude · work · since Sat 3 Oct 08:40 · 61% of the 7d limit used · ≈ <$1 at API list prices')
-    expect(shown).toMatch(/Acme\/api\n100%\n     <\$1\n≈ 61% of limit/)
+    expect(shown).toContain('  Claude · work · ≈ <$1 · since Sat 3 Oct 08:40 · 61% of the 7d limit used')
+    expect(shown).toMatch(/Acme\/api\n100%\n       <\$1\n≈ 61% of limit/)
     await ui.unmount()
   })
 

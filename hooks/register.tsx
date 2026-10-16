@@ -2698,7 +2698,7 @@ export const register: Register = on => {
     } else if (e.args.trim() !== '') {
       const ms = windowFrom(e.args)
       if (ms === undefined) {
-        return { text: 'Usage: /sessions [2d | 12h | all]: list the sessions active that recently; /sessions reset: back to the automatic order; /sessions usage [5h | 7d]: each project\'s part of each account\'s limits.' }
+        return { text: 'Usage: /sessions [2d | 12h | all]: list the sessions active that recently; /sessions reset: back to the automatic order; /sessions usage [5h | 7d]: each project\'s part of each account\'s limits, and what Claude\'s use would cost at API list prices.' }
       }
       await setWindow($, ms)
     } else if (await isPaneVisible($)) {
@@ -3015,14 +3015,15 @@ export const register: Register = on => {
         {(['5h', '7d'] as const).map(w => (
           <Button key={`usage-window ${w}`} label={w} {...(w === usedIn ? { variant: 'primary' as const } : {})} onPress={() => void setUsageWindow($, w)} />
         ))}
-        <Text dimColor wrap="truncate-end">{used.at === 0 ? 'reading…' : `counted ${ago(now - used.at)} ago · each project's share of the account's use, what Claude's would cost at API list prices, and about how much of the limit that is`}</Text>
+        <Text dimColor wrap="truncate-end">{used.at === 0 ? 'reading…' : `counted ${ago(now - used.at)} ago · Claude's $ at API list prices · each project's share of the account's use, and about how much of the limit that is`}</Text>
       </Box>,
       ...(used.problem === '' ? [] : [<Text key="usage-problem" color="error" wrap="truncate-end">{`! ${used.problem}`}</Text>]),
       ...usageAccounts.flatMap(a => (['claude', 'codex'] as const).flatMap(tool => {
         const rank = used.accounts[a]?.ranks[`${tool} ${usedIn}`]
         if (rank === undefined) return []
         const limit = used.accounts[a]?.limits[tool][usedIn]
-        const label = `${tool === 'claude' ? 'Claude' : 'Codex'} · ${accountName(a)} · since ${clock.said(rank.since, true)}${limit === undefined ? ' · its limit not read yet' : ` · ${Math.round(limit.used)}% of the ${usedIn} limit used`}${rank.dollars === undefined ? '' : ` · ≈ ${dollarsSaid(rank.dollars)} at API list prices`}`
+        // the dollars early, so a narrow pane cuts the time and the limit before them
+        const label = `${tool === 'claude' ? 'Claude' : 'Codex'} · ${accountName(a)}${rank.dollars === undefined ? '' : ` · ≈ ${dollarsSaid(rank.dollars)}`} · since ${clock.said(rank.since, true)}${limit === undefined ? ' · its limit not read yet' : ` · ${Math.round(limit.used)}% of the ${usedIn} limit used`}`
         return [
           <Text key={`usage ${a} ${tool}`} color={toolColor[tool]} wrap="truncate-end">{`  ${label}`}</Text>,
           ...rank.rows.map(r => (
@@ -3033,8 +3034,8 @@ export const register: Register = on => {
               <Box width={5} flexShrink={0} marginLeft={1}>
                 <Text>{`${Math.round(r.share * 100)}%`.padStart(4)}</Text>
               </Box>
-              <Box width={9} flexShrink={0} marginLeft={1}>
-                <Text>{r.dollars === undefined ? '' : dollarsSaid(r.dollars).padStart(8)}</Text>
+              <Box width={11} flexShrink={0} marginLeft={1}>
+                <Text>{r.dollars === undefined ? '' : dollarsSaid(r.dollars).padStart(10)}</Text>
               </Box>
               <Box width={16} flexShrink={0} marginLeft={1}>
                 <Text dimColor>{r.ofLimit === undefined ? '' : `≈ ${r.ofLimit < 1 ? '<1' : Math.round(r.ofLimit)}% of limit`}</Text>
