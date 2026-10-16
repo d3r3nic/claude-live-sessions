@@ -279,11 +279,14 @@ const TASKS_SHOWN = 3
 function load() {
   try {
     const raw = JSON.parse(readFileSync(SNAPSHOT, 'utf8'))
-    return c.OPS_FORMATS.includes(raw.version) && c.isSnapshot(raw.snapshot) ? { snap: raw.snapshot, mtime: statSync(SNAPSHOT).mtimeMs } : undefined
+    return c.OPS_FORMATS.includes(raw.version) && c.isSnapshot(raw.snapshot) ? { snap: raw.snapshot, mtime: statSync(SNAPSHOT).mtimeMs, version: raw.version } : undefined
   } catch {
     return undefined
   }
 }
+
+/** How long after a snapshot of this format one of the format before is still passed over (sessions of both writing). */
+const OLDER_AFTER_MS = 40_000
 
 /** What the screen says while there is no snapshot it can show (none yet, or only an older format than it reads). */
 const NO_SNAPSHOT = `No snapshot this screen can show at ${SNAPSHOT} yet: run /reload-plugins in a Claude Code session, then /sessions`
@@ -969,6 +972,8 @@ if (process.argv.includes('--frame')) {
     process.stdin.off('error', onGone)
   }
   clearRequests()
+  // when a snapshot of this format last came (0: none yet)
+  let newestAt = loaded.version === c.SHARED_VERSION ? Date.now() : 0
   let tick = 0
   let note = stale
   let noteUntil = 0
@@ -1090,7 +1095,11 @@ if (process.argv.includes('--frame')) {
       }
     }
     const again = load()
-    if (again !== undefined && again.mtime !== loaded.mtime) {
+    // sessions of two versions writing in turn (some not reloaded since an update): the format before is taken only
+    // once none of this one has come for OLDER_AFTER_MS, so the rows never jump about with the lines only this one has
+    if (again?.version === c.SHARED_VERSION) newestAt = Date.now()
+    const isOlderTooSoon = again !== undefined && again.version !== c.SHARED_VERSION && Date.now() - newestAt < OLDER_AFTER_MS
+    if (again !== undefined && again.mtime !== loaded.mtime && !isOlderTooSoon) {
       loaded = again
       try {
         diff(seenAs(loaded.snap), Date.now())

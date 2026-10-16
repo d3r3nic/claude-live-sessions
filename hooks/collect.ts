@@ -1194,7 +1194,8 @@ export function orderFrom(value: unknown): Record<string, string[]> | undefined 
 /**
  * The shared snapshot's format: one written by another version is not read. 8: Codex terminals matched through their
  * shared server (`loaded`), which a session of an earlier version, not reloaded yet, leaves unmatched. 9: the versions
- * installed and each session's (what waits on an update), which an earlier version leaves out.
+ * installed and each session's (what waits on an update), which an earlier version leaves out. A change here is
+ * weighed for OPS_FORMATS too: which formats before it the ops screen can still draw.
  */
 export const SHARED_VERSION = 9
 

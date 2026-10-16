@@ -2,8 +2,8 @@
 
 What each version changed, newest first. Each links its pull request, which holds the details, the checks and the reviews. After updating, run `/reload-plugins` in your sessions.
 
-## 0.37.1 — 2026-10-16
-- **The ops screen no longer goes blank after an update:** 0.37.0 changed the shared snapshot's format, and the ops screen, starting again on the new code, showed only `No snapshot of this version… Waiting` until every session (the workspaces' own Claudes too) had been reloaded, as the sessions not reloaded kept writing the format before. It now shows that format too (without the update line until a reloaded session writes the new one).
+## 0.37.1 — 2026-10-16 ([#54](https://github.com/d3r3nic/claude-live-sessions/pull/54))
+- **The ops screen no longer goes blank after an update:** 0.37.0 changed the shared snapshot's format, and the ops screen, starting again on the new code, showed only `No snapshot of this version… Waiting` until a reloaded session wrote the new format, as the sessions not reloaded (the workspaces' own Claudes too) kept writing the one before. It now shows that format too, without the update line. While sessions of both versions write in turn, it keeps to the new format (one of the format before is taken only once none of the new has come for 40 seconds), so its rows do not jump about.
 
 ## 0.37.0 — 2026-10-16 ([#52](https://github.com/d3r3nic/claude-live-sessions/pull/52))
 - **Says when an update waits, and what to do:** lines under the pane's counts, and under the ops screen's header, say what waits on an update: Claude sessions still running an older Claude Code than the one installed (Claude Code updates itself, but a session runs the version it started with until it is started again), Codex terminals still running the program an update has since replaced, and a Codex release newer than the one installed (the Codex program installed with npm does not update itself), each with how many are workspace agents and what to do (start them again; the command that installs Codex). With nothing waiting there is no line. The shared list's format is now 9 (it holds the versions): run `/reload-plugins` in every session.

@@ -59,6 +59,7 @@ import {
   contextSaid,
   normalPath,
   SHARED_VERSION,
+  OPS_FORMATS,
   BIN_SCRIPT,
   codexLatestFrom,
   compareVersions,
@@ -1666,6 +1667,8 @@ describe('pane', () => {
     const old = { claude: [], codex: [], places: {}, workspaces: [], envs: [''], tmux: { panes: {}, clients: {} }, checkedAt: NOW, problems: [] }
     files.set(SHARED, JSON.stringify({ version: 8, snapshot: old }))
     expect(SHARED_VERSION).toBe(9)
+    // the ops screen draws this format and the one before (which lacks only the versions): weighed again at every change
+    expect(OPS_FORMATS).toEqual([8, 9])
     await $.command.run(SESSIONS)
     expect(collections()).toBe(2)
   })

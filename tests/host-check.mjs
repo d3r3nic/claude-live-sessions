@@ -2341,4 +2341,38 @@ except ChildProcessError: pass
   }
 }
 
+// sessions of two plugin versions writing the shared snapshot in turn (some not reloaded since an update): a live ops
+// screen keeps to its own format, its rows never jumping about with the lines only that format has (a private tmux
+// server that reads no tmux.conf; the screen's HOME a scratch folder)
+{
+  const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'live-sessions-alternate-')))
+  const socket = `live-sessions-alternate-${process.pid}`
+  const tmux = (...a) => spawnSync('tmux', ['-L', socket, '-f', '/dev/null', ...a], { encoding: 'utf8', env: { ...process.env, SHELL: '/bin/sh' } })
+  try {
+    mkdirSync(join(scratch, 'home'))
+    writeFileSync(join(scratch, 'events.jsonl'), '')
+    const base = { claude: [], codex: [], places: {}, envs: [''], problems: [], workspaces: [], tmux: { panes: {}, clients: {} } }
+    const write = version => {
+      const snap = { ...base, checkedAt: Date.now(), ...(version === c.SHARED_VERSION ? { tools: { codex: '0.162.1', codexLatest: '0.163.0', at: Date.now() } } : {}) }
+      writeFileSync(join(scratch, 'snap.tmp'), JSON.stringify({ version, snapshot: snap }))
+      spawnSync('/bin/mv', [join(scratch, 'snap.tmp'), join(scratch, 'snap.json')])
+    }
+    write(c.SHARED_VERSION)
+    const opsFile = join(dirname(fileURLToPath(import.meta.url)), '..', 'ops', 'ops.mjs')
+    tmux('new-session', '-d', '-s', 'alt', '-x', '160', '-y', '40', `env HOME='${join(scratch, 'home')}' LIVE_SESSIONS_SNAPSHOT='${join(scratch, 'snap.json')}' LIVE_SESSIONS_EVENTS='${join(scratch, 'events.jsonl')}' LIVE_SESSIONS_OSASCRIPT=/usr/bin/false '${process.execPath}' --no-warnings '${opsFile}'; sleep 30`)
+    spawnSync('/bin/sleep', ['3'])
+    const seen = []
+    for (let k = 0; k < 6; k++) {
+      write(k % 2 === 0 ? 8 : c.SHARED_VERSION)
+      spawnSync('/bin/sleep', ['1.2'])
+      seen.push(tmux('capture-pane', '-p', '-t', '=alt:').stdout.split('\n').filter(l => l.includes('↑')).length)
+    }
+    check('ops: sessions of two versions writing in turn, the screen keeps to its own format (its update line never comes and goes)', seen.every(n => n === 1), JSON.stringify(seen))
+  } finally {
+    tmux('kill-server')
+    rmSync(join(process.env.TMUX_TMPDIR ?? '/tmp', `tmux-${process.getuid()}`, socket), { force: true })
+    rmSync(scratch, { recursive: true, force: true })
+  }
+}
+
 process.exitCode = failures > 0 ? 1 : 0
