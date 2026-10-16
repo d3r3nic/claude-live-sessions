@@ -186,8 +186,11 @@ export type Snapshot = {
 /** A plan limit's reading: how much of it is used, in percent, when it resets, and when it was read (ms). */
 export type UsageLimit = { used: number; resetsAt?: number; at: number }
 
-/** One project's part of an account's use of one tool in a window, and about how much of the limit that is. */
-export type UsageRow = { key: string; name: string; share: number; ofLimit?: number }
+/**
+ * One project's part of an account's use of one tool in a window, about how much of the limit that is, and (Claude) what
+ * it would cost at API list prices, in US dollars.
+ */
+export type UsageRow = { key: string; name: string; share: number; ofLimit?: number; dollars?: number }
 
 /** What the pane shows of usage, per account ('' the default): its limits, and per `<tool> <window>` its projects. */
 export type UsageView = {
@@ -200,7 +203,8 @@ export type UsageView = {
   offsets: Record<string, number>
   accounts: Record<string, {
     limits: { claude: Partial<Record<'5h' | '7d', UsageLimit>>; codex: Partial<Record<'5h' | '7d', UsageLimit>> }
-    ranks: Record<string, { since: number; rows: UsageRow[]; more: number }>
+    /** Per `<tool> <window>`: its projects, and (Claude) the whole window's use at API list prices, in US dollars. */
+    ranks: Record<string, { since: number; rows: UsageRow[]; more: number; dollars?: number }>
   }>
 }
 

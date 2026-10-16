@@ -65,7 +65,7 @@ import type { ClaudeSession, CodexSession, Snapshot, Workspace } from '../types'
 import { afterOwner, afterStep, CHECKIN_LINE, CHECKIN_START, CHECKIN_WITHIN_MS, isInputEmpty, withoutDim, claudeKeep, CODEX_AT_WORK, CODEX_BOTTOM, CODEX_DIALOG, HELD_LONG_MS, screenReady, STALL_MS, stallSteps, COMPACT_FROM, cueOf, cutBytes, eventOf, EVENT_SCRIPT, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, TURN_MAX_AGE_MS, TURN_SCRIPT, tokensSaid } from '../hooks/relay'
 import type { Side, Turn } from '../hooks/relay'
 import { branchOf, checkDue, checkFrom, driftRequest, isDueAfterCompaction, parseVerdict, recordFolderOf, RECORDS_SCRIPT } from '../hooks/drift'
-import { accountOfFile, applyScan, claudeCost, claudeLimits, clockSaid, codexUnits, currentLimits, EMPTY_USAGE, limitSaid, markKey, mergeLimits, offsetOf, OFFSETS_SCRIPT, parseContexts, priceOf, rankUsage, scanInput, sharedLimitsFrom, usageFrom, USAGE_FILES_SCRIPT, USAGE_KEEP_MS, wholeFiles } from '../hooks/usage'
+import { accountOfFile, applyScan, claudeCost, claudeLimits, clockSaid, codexUnits, currentLimits, dollarsSaid, EMPTY_USAGE, limitSaid, markKey, mergeLimits, offsetOf, OFFSETS_SCRIPT, parseContexts, priceOf, rankUsage, scanInput, sharedLimitsFrom, usageFrom, USAGE_FILES_SCRIPT, USAGE_KEEP_MS, wholeFiles } from '../hooks/usage'
 import { bringable, codexDir, CODEX_FOLDER_SCRIPT, CODEX_LETS_GO_S, CODEX_TASK_SCRIPT, codexTaskState, envOfProfile, holderOf, holdersOf, HOLDERS_SCRIPT, isKnownCodex, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, threadFrom, toggled, withThreads } from '../hooks/bring'
 import { BYPASS } from '../hooks/workspaces'
 import { isOwnersPrompt, isProblemDue, PROBLEM_FORMAT, PROBLEM_MAX, PROBLEM_OPTION, PROBLEM_RETRY_MS, problemAsk, problemFrom, problemLine, problemOf } from '../hooks/problem'
@@ -5633,6 +5633,8 @@ describe('usage', () => {
     expect(ranked.since).toBe(NOW - 4 * 3_600_000)
     near(ranked.total, 10)
     expect(ranked.rows.map(r => [r.key, r.name, Math.round(r.share * 100), Math.round(r.ofLimit! * 10) / 10])).toEqual([['github.com/acme/web-app', 'Acme/web-app', 80, 16], ['/Users/u/notes', '/Users/u/notes', 20, 4]])
+    // Claude's in US dollars at API list prices, as the slots keep it; Codex's weighted tokens are no price
+    expect(ranked.rows.map(r => Math.round(r.dollars! * 100) / 100)).toEqual([8, 2])
     // no limit read (or one already reset): the window back from now, shares only
     for (const limit of [undefined, { used: 20, resetsAt: NOW - 1, at: NOW - 10 }]) {
       const back = rankUsage(state, { tool: 'claude', account: '', window: '5h', now: NOW, placeOf, ...(limit === undefined ? {} : { limit }) })
@@ -5642,7 +5644,8 @@ describe('usage', () => {
     }
     // another account's, another tool's: their own
     expect(rankUsage(state, { tool: 'claude', account: 'work', window: '7d', now: NOW, placeOf }).rows.map(r => r.name)).toEqual(['/x'])
-    expect(rankUsage(state, { tool: 'codex', account: '', window: '7d', now: NOW, placeOf }).rows.map(r => [r.name, r.share])).toEqual([['/y', 1]])
+    expect(rankUsage(state, { tool: 'codex', account: '', window: '7d', now: NOW, placeOf }).rows.map(r => [r.name, r.share, r.dollars])).toEqual([['/y', 1, undefined]])
+    expect([0, 0.99, 1, 1.49, 999.5, 2502.5, 1234567.4].map(dollarsSaid)).toEqual(['<$1', '<$1', '$1', '$1', '$1,000', '$2,503', '$1,234,567'])
     expect(rankUsage(state, { tool: 'codex', account: 'work', window: '7d', now: NOW, placeOf })).toEqual({ since: NOW - 7 * 86_400_000, rows: [], total: 0 })
   })
 
@@ -5707,8 +5710,8 @@ describe('usage', () => {
     world.usageFiles = [transcript, rollout, workTranscript, '/elsewhere/z.jsonl', ''].join('\n')
     world.scan = {
       [transcript]: scanOf(transcript, [
-        'C\t2026-10-09T15:30\tclaude-opus-5-5\t/Users/u/dev/web-app\t0\t0\t0\t3000000\t0',
-        'C\t2026-10-09T15:30\tclaude-opus-5-5\t/Users/u/notes\t0\t0\t0\t1000000\t0',
+        'C\t2026-10-09T15:30\tclaude-opus-5-5\t/Users/u/dev/web-app\t0\t0\t0\t30000000000\t0',
+        'C\t2026-10-09T15:30\tclaude-opus-5-5\t/Users/u/notes\t0\t0\t0\t10000000000\t0',
       ], '9000\tmsg_7'),
       [rollout]: scanOf(rollout, ['X\t2026-10-09T15:20\t/Users/u/dev/api\t1000\t0\t0', `L\t2026-10-09T15:21:00.000Z\t42\t10080\t${(NOW + 4 * 86_400_000) / 1000}`], '700\t1000,0,0\t/Users/u/dev/api'),
       [workTranscript]: scanOf(workTranscript, ['C\t2026-10-09T15:30\tclaude-opus-5-5\t/Users/u/dev/api\t0\t0\t0\t1000000\t0'], '50\tmsg_1'),
@@ -5730,26 +5733,29 @@ describe('usage', () => {
     // its own account's limits: Claude's as this session reads them, Codex's from its rollouts; reset times by the Mac's clock
     expect(await texts()).toContain('Claude 5h 4% ↻11:40 · 7d 19% ↻Sun 08:40 │ Codex 7d 42% ↻Tue 08:40')
     expect(await texts()).not.toContain('Usage by project')
-    // usage by project, pressed: each project's share of the account's use, and about how much of the limit that is
+    // usage by project, pressed: each project's share of the account's use, what Claude's would cost at API list prices
+    // (30 and 10 billion cache reads of Opus 5.5 at $0.20 a million: $6,000 and $2,000), and about how much of the limit that is
     await ui.press({ key: 'usage' })
     expect(store.get('usageShown')).toBe(true)
     let shown = (await texts()).join('\n')
     expect(shown).toContain('Usage by project')
-    expect(shown).toContain('  Claude · default · since Sun 4 Oct 08:40 · 19% of the 7d limit used')
-    expect(shown).toMatch(/Acme\/web-app\n 75%\n≈ 14% of limit\n~\/notes\n 25%\n≈ 5% of limit/)
+    expect(shown).toContain('  Claude · default · since Sun 4 Oct 08:40 · 19% of the 7d limit used · ≈ $8,000 at API list prices')
+    expect(shown).toMatch(/Acme\/web-app\n 75%\n  \$6,000\n≈ 14% of limit\n~\/notes\n 25%\n  \$2,000\n≈ 5% of limit/)
     expect(shown).toContain('  Codex · default · since Tue 6 Oct 08:40 · 42% of the 7d limit used')
-    expect(shown).toMatch(/Acme\/api\n100%\n≈ 42% of limit/)
+    // Codex's: no price (its plan's credits are not priced here)
+    expect(shown).toMatch(/Acme\/api\n100%\n\n≈ 42% of limit/)
+    expect(shown).not.toMatch(/Codex · default[^\n]*\$/)
     // the other account's is not this account's
     expect(shown).not.toContain('· work ·')
     // in the 5-hour window
     await ui.press({ key: 'usage-window 5h' })
     expect(store.get('usageWindow')).toBe('5h')
     shown = (await texts()).join('\n')
-    expect(shown).toContain('  Claude · default · since 06:40 · 4% of the 5h limit used')
+    expect(shown).toContain('  Claude · default · since 06:40 · 4% of the 5h limit used · ≈ $8,000 at API list prices')
     expect(shown).toContain('  Codex · default · since 03:40 · its limit not read yet')
     // as text
     const asText = await $.command.run({ ...SESSIONS, args: 'usage 7d' })
-    expect(asText.text).toBe('Claude (default), 7d: 7d 19% ↻Sun 08:40; since Sun 4 Oct 08:40: Acme/web-app 75% (≈ 14% of the limit), ~/notes 25% (≈ 5% of the limit)\nCodex (default), 7d: 7d 42% ↻Tue 08:40; since Tue 6 Oct 08:40: Acme/api 100% (≈ 42% of the limit)')
+    expect(asText.text).toBe('Claude (default), 7d: 7d 19% ↻Sun 08:40; since Sun 4 Oct 08:40, ≈ $8,000 at API list prices: Acme/web-app 75% ≈ $6,000 (≈ 14% of the limit), ~/notes 25% ≈ $2,000 (≈ 5% of the limit)\nCodex (default), 7d: 7d 42% ↻Tue 08:40; since Tue 6 Oct 08:40: Acme/api 100% (≈ 42% of the limit)')
     // what was read is kept for every session: each file's mark, files not an account's left out
     const kept = JSON.parse(files.get(`${HOME}/Library/Caches/live-sessions/usage.json`)!) as { files: Record<string, unknown> }
     expect(kept.files).toEqual({ [transcript]: { offset: 9000, mark: 'msg_7' }, 'rollout:rollout-a.jsonl': { offset: 700, mark: '1000,0,0\t/Users/u/dev/api' }, [workTranscript]: { offset: 50, mark: 'msg_1' } })
@@ -5779,8 +5785,9 @@ describe('usage', () => {
     const shown = (await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')
     expect(shown).toContain('default: Claude 5h 4% ↻11:40 · 7d 19% ↻Sun 08:40 │ Codex 7d 42% ↻Tue 08:40')
     expect(shown).toContain('work: Claude 7d 61% ↻Sat 08:40')
-    expect(shown).toContain('  Claude · work · since Sat 3 Oct 08:40 · 61% of the 7d limit used')
-    expect(shown).toMatch(/Acme\/api\n100%\n≈ 61% of limit/)
+    // (a million cache reads: 20 cents)
+    expect(shown).toContain('  Claude · work · since Sat 3 Oct 08:40 · 61% of the 7d limit used · ≈ <$1 at API list prices')
+    expect(shown).toMatch(/Acme\/api\n100%\n     <\$1\n≈ 61% of limit/)
     await ui.unmount()
   })
 

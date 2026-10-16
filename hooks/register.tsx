@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { BackgroundTask, ClaudeSession, CodexSession, Place, Relay, SessionContext, Snapshot, Thread, UsageView, Workspace } from '../types'
-import { accountOfFile, applyScan, claudeLimits, clockOf, currentLimits, EMPTY_USAGE, limitSaid, markKey, mergeLimits, offsetOf, OFFSETS_SCRIPT, parseContexts, rankUsage, scanInput, sharedLimitsFrom, usageFrom, USAGE_FILES_SCRIPT, USAGE_KEEP_MS, WINDOW_MS, wholeFiles } from './usage'
+import { accountOfFile, applyScan, claudeLimits, clockOf, currentLimits, dollarsSaid, EMPTY_USAGE, limitSaid, markKey, mergeLimits, offsetOf, OFFSETS_SCRIPT, parseContexts, rankUsage, scanInput, sharedLimitsFrom, usageFrom, USAGE_FILES_SCRIPT, USAGE_KEEP_MS, WINDOW_MS, wholeFiles } from './usage'
 import type { Limit, UsageState } from './usage'
 import { AGENT_COMMANDS, CLAUDE_IDLE_MS, isInputEmpty, isStallStep, screenReady, afterOwner, afterStep, claudeKeep, COMPACT_FROM, cueOf, cutBytes, eventOf, EVENT_SCRIPT, parseTurns, passFailure, RELAY_CAP, RELAY_SCRIPT, relaySteps, tokensSaid, TURN_SCRIPT } from './relay'
 import type { RelayEvent, Side, Step } from './relay'
@@ -2521,7 +2521,7 @@ async function refreshUsage($: EngineInterface, isAsked = false) {
         for (const window of ['5h', '7d'] as const) {
           const limit = limits[tool][window]
           const ranked = rankUsage(state, { tool, account, window, now, placeOf, ...(limit === undefined ? {} : { limit }) })
-          if (ranked.rows.length > 0) ranks[`${tool} ${window}`] = { since: ranked.since, rows: ranked.rows.slice(0, USAGE_ROWS), more: Math.max(0, ranked.rows.length - USAGE_ROWS) }
+          if (ranked.rows.length > 0) ranks[`${tool} ${window}`] = { since: ranked.since, rows: ranked.rows.slice(0, USAGE_ROWS), more: Math.max(0, ranked.rows.length - USAGE_ROWS), ...(tool === 'claude' ? { dollars: ranked.total } : {}) }
         }
       }
       view.accounts[account] = { limits, ranks }
@@ -2555,8 +2555,9 @@ function usageText(used: UsageView, account: string, window: '5h' | '7d', now: n
     const limit = of?.limits[tool][window]
     const head = `${tool === 'claude' ? 'Claude' : 'Codex'} (${a || 'default'}), ${window}${limit === undefined ? '' : `: ${limitSaid(window, limit, now, clock.offsetAt)}`}`
     if (rank === undefined) return limit === undefined ? [] : [`${head}; nothing counted since ${clock.said(now - WINDOW_MS[window], true)}`]
-    const rows = rank.rows.map(r => `${r.name} ${Math.round(r.share * 100)}%${r.ofLimit === undefined ? '' : ` (≈ ${r.ofLimit < 1 ? '<1' : Math.round(r.ofLimit)}% of the limit)`}`)
-    return [`${head}; since ${clock.said(rank.since, true)}: ${rows.join(', ')}${rank.more === 0 ? '' : `, +${rank.more} more`}`]
+    const rows = rank.rows.map(r => `${r.name} ${Math.round(r.share * 100)}%${r.dollars === undefined ? '' : ` ≈ ${dollarsSaid(r.dollars)}`}${r.ofLimit === undefined ? '' : ` (≈ ${r.ofLimit < 1 ? '<1' : Math.round(r.ofLimit)}% of the limit)`}`)
+    const cost = rank.dollars === undefined ? '' : `, ≈ ${dollarsSaid(rank.dollars)} at API list prices`
+    return [`${head}; since ${clock.said(rank.since, true)}${cost}: ${rows.join(', ')}${rank.more === 0 ? '' : `, +${rank.more} more`}`]
   }))
   return [...lines, ...(used.problem === '' ? [] : [`! ${used.problem}`])].join('\n') || `Usage: nothing counted in this ${window} window.`
 }
@@ -3014,14 +3015,14 @@ export const register: Register = on => {
         {(['5h', '7d'] as const).map(w => (
           <Button key={`usage-window ${w}`} label={w} {...(w === usedIn ? { variant: 'primary' as const } : {})} onPress={() => void setUsageWindow($, w)} />
         ))}
-        <Text dimColor wrap="truncate-end">{used.at === 0 ? 'reading…' : `counted ${ago(now - used.at)} ago · each project's share of the account's use, and about how much of the limit that is`}</Text>
+        <Text dimColor wrap="truncate-end">{used.at === 0 ? 'reading…' : `counted ${ago(now - used.at)} ago · each project's share of the account's use, what Claude's would cost at API list prices, and about how much of the limit that is`}</Text>
       </Box>,
       ...(used.problem === '' ? [] : [<Text key="usage-problem" color="error" wrap="truncate-end">{`! ${used.problem}`}</Text>]),
       ...usageAccounts.flatMap(a => (['claude', 'codex'] as const).flatMap(tool => {
         const rank = used.accounts[a]?.ranks[`${tool} ${usedIn}`]
         if (rank === undefined) return []
         const limit = used.accounts[a]?.limits[tool][usedIn]
-        const label = `${tool === 'claude' ? 'Claude' : 'Codex'} · ${accountName(a)} · since ${clock.said(rank.since, true)}${limit === undefined ? ' · its limit not read yet' : ` · ${Math.round(limit.used)}% of the ${usedIn} limit used`}`
+        const label = `${tool === 'claude' ? 'Claude' : 'Codex'} · ${accountName(a)} · since ${clock.said(rank.since, true)}${limit === undefined ? ' · its limit not read yet' : ` · ${Math.round(limit.used)}% of the ${usedIn} limit used`}${rank.dollars === undefined ? '' : ` · ≈ ${dollarsSaid(rank.dollars)} at API list prices`}`
         return [
           <Text key={`usage ${a} ${tool}`} color={toolColor[tool]} wrap="truncate-end">{`  ${label}`}</Text>,
           ...rank.rows.map(r => (
@@ -3031,6 +3032,9 @@ export const register: Register = on => {
               </Box>
               <Box width={5} flexShrink={0} marginLeft={1}>
                 <Text>{`${Math.round(r.share * 100)}%`.padStart(4)}</Text>
+              </Box>
+              <Box width={9} flexShrink={0} marginLeft={1}>
+                <Text>{r.dollars === undefined ? '' : dollarsSaid(r.dollars).padStart(8)}</Text>
               </Box>
               <Box width={16} flexShrink={0} marginLeft={1}>
                 <Text dimColor>{r.ofLimit === undefined ? '' : `≈ ${r.ofLimit < 1 ? '<1' : Math.round(r.ofLimit)}% of limit`}</Text>

@@ -2,6 +2,9 @@
 
 What each version changed, newest first. Each links its pull request, which holds the details, the checks and the reviews. After updating, run `/reload-plugins` in your sessions.
 
+## 0.36.0 — 2026-10-16
+- **What Claude's use would cost, in dollars:** the usage panel and `/sessions usage` say what each account's Claude use in the window would cost at API list prices (`≈ $2,503`), and each project's part beside its share. It is a measure of how much work it was, not a bill (a plan is paid by the month). Codex has no price, as its plan's credits are not priced here. The figures were already counted for the shares; they are now shown.
+
 ## 0.35.0 — 2026-10-16
 - **Agents need you less:** a workspace's agents are told to decide themselves what the request, the code, the project rules or a sound default settles, say their choice in one line and go on. When only you can decide, they ask (in a pair, with NEEDS USER) and add one line on what would let them skip such a question next time (a rule, a saved default, a check), which they put in place themselves when it is theirs to do. The relay's check-in asks the same. Claude has it on its next start or resume of its pane, Codex in the first prompt of a workspace made or an agent brought in from now on; a resumed Claude conversation takes it once it next compacts.
 

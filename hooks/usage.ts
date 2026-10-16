@@ -130,6 +130,11 @@ export function codexUnits(input: number, cached: number, output: number): numbe
   return Math.max(0, input - cached) + cached * 0.1 + output * 8
 }
 
+/** US dollars as the usage view says them: whole, thousands grouped (`$2,503`); under one, `<$1`. */
+export function dollarsSaid(dollars: number): string {
+  return dollars < 1 ? '<$1' : `$${String(Math.round(dollars)).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`
+}
+
 /** A JSON string's raw spelling (escapes kept), as usage.pl prints a folder, read. */
 function rawString(raw: string): string {
   try {
@@ -247,7 +252,7 @@ export function rankUsage(
   }
   const total = [...byProject.values()].reduce((sum, p) => sum + p.value, 0)
   const rows = [...byProject.entries()]
-    .map(([key, p]) => ({ key, name: p.name, share: total > 0 ? p.value / total : 0, ...(o.limit === undefined ? {} : { ofLimit: (p.value / total) * o.limit.used }) }))
+    .map(([key, p]) => ({ key, name: p.name, share: total > 0 ? p.value / total : 0, ...(o.limit === undefined ? {} : { ofLimit: (p.value / total) * o.limit.used }), ...(o.tool === 'claude' ? { dollars: p.value } : {}) }))
     .sort((a, b) => b.share - a.share || a.name.localeCompare(b.name))
   return { since, rows, total }
 }
