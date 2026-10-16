@@ -52,8 +52,9 @@ export function problemOf(reply: string): string | undefined {
     .replace(/^(?:main problem|problem)\s*[:—–-]\s*/i, '')
     .replace(/^["'“”‘’]+|["'“”‘’]+$/g, '')
     .trim()
-  // (`none`, alone or with a reason after a stop or a dash: never a problem that starts with the word, `None of …`)
-  if (text === '' || /^none\s*(?:$|[.:;,—–-])/i.test(text)) return undefined
+  // (`none` or `none yet`, alone or with a reason after a stop or a dash: never a problem that starts with the word,
+  // `None of …`)
+  if (text === '' || /^none(?:\s+yet)?\s*(?:$|[.:;,—–-])/i.test(text)) return undefined
   return cutWords(text)
 }
 
@@ -67,11 +68,11 @@ export function problemFrom(raw: unknown): Workspace['problem'] | undefined {
 
 /**
  * Whether a prompt typed at the agent's terminal gives it something: not what the relay types there (a hand-off, a cue
- * line alone, pasted or not, or a check-in), a command alone (`/model`, `/compact …`), an interrupt or an engine's own
- * message (`<task-notification>`; as the relay reads the owner's typing, TURN_SCRIPT's `keyed`).
+ * line alone, pasted or not, or a check-in), a command alone (`/model`, `/compact …`) or an interrupt. (An engine's own
+ * message, as a background task's notice, is told apart by where it came from: prompt.submit's origin.)
  */
 export function isOwnersPrompt(text: string): boolean {
-  if (/^\s*(\[Request interrupted|<(?!command-name>|command-message>|bash-input>|pasted_content))/.test(text)) return false
+  if (/^\s*\[Request interrupted/.test(text)) return false
   const lines = text.replace(/<\/?pasted_content[^>]*>/g, '').split('\n').filter(line => /\S/.test(line))
   if (lines.length === 0) return false
   if (/^\s*\/compact(\s|$)/.test(lines[0]!) || (lines.length === 1 && /^\s*\/\S+\s*$/.test(lines[0]!))) return false

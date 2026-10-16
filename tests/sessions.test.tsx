@@ -6217,7 +6217,7 @@ describe('the main problem', () => {
     // the answer: one line, a label, marks and quotes dropped; none for none or nothing; cut at a word
     expect(problemOf('Main problem: "The sign-in page\nlooks broken."')).toBe('The sign-in page looks broken.')
     expect(problemOf('**MAIN PROBLEM** — the app is slow')).toBe('the app is slow')
-    expect([problemOf('none'), problemOf(' None. '), problemOf(''), problemOf('""'), problemOf('None — nothing has been asked yet.'), problemOf('none: no work yet')]).toEqual([undefined, undefined, undefined, undefined, undefined, undefined])
+    expect([problemOf('none'), problemOf(' None. '), problemOf(''), problemOf('""'), problemOf('None — nothing has been asked yet.'), problemOf('none: no work yet'), problemOf('None yet.')]).toEqual([undefined, undefined, undefined, undefined, undefined, undefined, undefined])
     expect(problemOf('None of the agent windows open in your light theme.')).toBe('None of the agent windows open in your light theme.')
     expect(problemOf('a\u202eb\u0007c\u200bd')).toBe('a b c d')
     const long = problemOf('word '.repeat(100))!
@@ -6234,10 +6234,10 @@ describe('the main problem', () => {
     expect(isOwnersPrompt(`${READY_CODEX}\nand look at the docs too`)).toBe(true)
     expect([isOwnersPrompt(READY_CODEX), isOwnersPrompt(`<pasted_content id="a">\n${READY_CLAUDE}\n</pasted_content id="a">`), isOwnersPrompt(CHECKIN_LINE), isOwnersPrompt(''), isOwnersPrompt(' \n '), isOwnersPrompt('/compact keep the plan')])
       .toEqual([false, false, false, false, false, false])
-    // a command alone, an interrupt or an engine's own message is not; a command with words, or a paste, is
-    expect([isOwnersPrompt('/model'), isOwnersPrompt(' /reload-plugins '), isOwnersPrompt('[Request interrupted by user]'), isOwnersPrompt('<task-notification>\n<task-id>b1</task-id>\n</task-notification>')])
-      .toEqual([false, false, false, false])
-    expect([isOwnersPrompt('/peer-coding go on with the export'), isOwnersPrompt('<pasted_content id="b">the logs</pasted_content id="b">\nwhy does this fail?'), isOwnersPrompt('<command-message>peer-coding</command-message>')])
+    // a command alone or an interrupt is not; a command with words, a paste, or a snippet of HTML typed first is (an
+    // engine's own message is told apart by its origin)
+    expect([isOwnersPrompt('/model'), isOwnersPrompt(' /reload-plugins '), isOwnersPrompt('[Request interrupted by user]')]).toEqual([false, false, false])
+    expect([isOwnersPrompt('/peer-coding go on with the export'), isOwnersPrompt('<pasted_content id="b">the logs</pasted_content id="b">\nwhy does this fail?'), isOwnersPrompt('<div class="x"> renders empty: why?')])
       .toEqual([true, true, true])
     // at a turn's end: none yet, or the owner has typed since it was said; never within the retry time of the last ask
     expect(isProblemDue({}, NOW)).toBe(true)
@@ -6265,11 +6265,12 @@ describe('the main problem', () => {
   /** A workspace's Claude (this session, session-104, in its left pane), its fork answered as `reply` says. */
   const claudeOfWorkspace = (on: On, fields: Partial<Workspace> = {}) => {
     const { files, runs, clock } = engine(on, machine, { termProgram: 'Apple_Terminal', selfId: 'session-104' })
-    on('prompt.submit', async ($, e) => ({ text: e.text }))
+    // (a prompt entering, or, with `fork.drop`, held back beneath the plugin)
+    on('prompt.submit', async ($, e) => (fork.drop ? { drop: 'held back by a hook' } : { text: e.text }))
     on('turn.complete', async ($, e) => ({ text: e.answer }))
     const usage = { input_tokens: 10, output_tokens: 30, cache_read_input_tokens: 200_000, cache_creation_input_tokens: 0 }
     const asked: string[] = []
-    const fork = { reply: { isAnswered: true, text: 'Main problem: the sign-in page turns away good passwords, so your testers cannot get in.', usage } as unknown, gate: undefined as Promise<void> | undefined }
+    const fork = { reply: { isAnswered: true, text: 'Main problem: the sign-in page turns away good passwords, so your testers cannot get in.', usage } as unknown, gate: undefined as Promise<void> | undefined, drop: false }
     on('model.fork', async ($, e) => {
       asked.push(e.prompt)
       if (fork.gate !== undefined) await fork.gate
@@ -6487,7 +6488,7 @@ describe('the main problem', () => {
   })
 
   test('only what the owner gives Claude asks: a background task\'s notice, a scheduled prompt or another session\'s message asks nothing; Remote Control does', async ($, on) => {
-    const { asked, settle } = claudeOfWorkspace(on, { problem: { text: 'x', at: NOW + 3_600_000 } })
+    const { asked, fork, settle } = claudeOfWorkspace(on, { problem: { text: 'x', at: NOW + 3_600_000 } })
     await $.session.start(START)
     await $.command.run(SESSIONS)
     await typed($, 'the export is done', 'task-notification')
@@ -6498,6 +6499,11 @@ describe('the main problem', () => {
     await typed($, 'from my phone: fix the login', 'bridge')
     await settle()
     expect(asked).toEqual([problemAsk('from my phone: fix the login')])
+    // one a hook held back never entered: nothing asked
+    fork.drop = true
+    await typed($, 'never entered')
+    await settle()
+    expect(asked).toHaveLength(1)
   })
 
   test('opening a workspace sets its line from the workspaces file as it is then; one started afresh gets it once its session is made', async ($, on) => {

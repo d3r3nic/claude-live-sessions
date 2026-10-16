@@ -811,10 +811,11 @@ async function showProblem($: EngineInterface, home: string, id: string, name: s
   const problem = (await readWorkspaces($, home)).list.find(w => w.id === id)?.problem?.text
   const status = problem === undefined ? undefined : await tmux(['show-options', '-gv', 'status'])
   const first = status?.exitCode === 0 && status.stdout.trim() === 'on' ? await tmux(['show-options', '-gv', 'status-format[0]']) : undefined
-  const line = problemLine(name, problem, first?.exitCode === 0 ? first.stdout.replace(/\n$/, '') : undefined)
+  const firstLine = first?.exitCode === 0 ? first.stdout.replace(/\n$/, '') : undefined
+  const isShown = problem !== undefined && problem !== '' && firstLine !== undefined && firstLine !== ''
   // (no line to show: one set before taken away, and only one this set)
-  if (line[0]?.includes('-u') === true && (await tmux(['show-options', '-t', name, '-qv', PROBLEM_OPTION])).stdout.trim() === '') return
-  for (const args of line) await tmux(args)
+  if (!isShown && (await tmux(['show-options', '-t', name, '-qv', PROBLEM_OPTION])).stdout.trim() === '') return
+  for (const args of problemLine(name, isShown ? problem : undefined, firstLine)) await tmux(args)
 }
 
 /**
@@ -2589,7 +2590,7 @@ export const register: Register = on => {
   // prompt or another session's message is not the owner's, nor a hand-off or check-in the relay types
   on('prompt.submit', async ($, e, next) => {
     const entered = await next(e)
-    if ((e.origin.kind === 'composer' || e.origin.kind === 'bridge') && !('drop' in entered) && isOwnersPrompt(e.text)) void askProblem($, e.text).catch(() => undefined)
+    if ((e.origin.kind === 'composer' || e.origin.kind === 'bridge') && !('drop' in entered && entered.drop !== undefined) && isOwnersPrompt(e.text)) void askProblem($, e.text).catch(() => undefined)
     return entered
   })
 
