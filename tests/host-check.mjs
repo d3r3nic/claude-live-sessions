@@ -1758,7 +1758,11 @@ except ChildProcessError: pass
       const saidColored = detailsOf('opsx', [])
       const head = said.findIndex(l => l.includes('║ MAIN PROBLEM · said 12m ago'))
       const note = `\x1b[38;2;${[1, 3, 5].map(k => parseInt('#f4ecd0'.slice(k, k + 2), 16)).join(';')}m`
-      const inBox = l => l.slice(l.indexOf('║ ') + 2, l.lastIndexOf(' ║')).trim()
+      // what a row of the box holds: inside its borders, the screen's own (at its ends) left out
+      const inBox = l => {
+        const row = l.trimEnd().replace(/^║/, '').replace(/║$/, '')
+        return row.slice(row.indexOf('║ ') + 2, row.lastIndexOf(' ║')).trim()
+      }
       const wrapped = said.slice(head + 1).map(inBox)
       const blank = wrapped.indexOf('')
       check('ops: a workspace\'s details say its main problem first, in a colour of its own, wrapped between words inside the box, then what its agents do',
