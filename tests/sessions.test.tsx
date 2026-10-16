@@ -6391,6 +6391,23 @@ describe('the main problem', () => {
     expect(asked).toHaveLength(6)
   })
 
+  test('a turn\'s end while the first question runs (the workspace has none yet) asks no second one', async ($, on) => {
+    const { asked, fork, saved, settle } = claudeOfWorkspace(on)
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    let open = () => {}
+    fork.gate = new Promise<void>(resolve => { open = resolve })
+    await $.turn.start({ text: 'fix the sign-in page', turnId: 't1' })
+    await settle()
+    await $.turn.complete({ answer: 'Fixed.', durationMs: 1_000, isAborted: false, turnId: 't1', reason: 'answer' })
+    await settle()
+    fork.gate = undefined
+    open()
+    await settle()
+    expect(asked).toEqual([problemAsk('fix the sign-in page')])
+    expect(saved().problem?.text).toBe(SAID)
+  })
+
   test('a Claude in a workspace\'s Codex pane (started there by hand) is not its Claude: it asks nothing', async ($, on) => {
     const { asked, settle } = claudeOfWorkspace(on)
     world.tmuxPanes = 'ws-practice-rbac\tpeers\t/dev/ttys045\t%1\tclaude\nws-practice-rbac\tpeers\t/dev/ttys022\t%2\tcodex\n'
