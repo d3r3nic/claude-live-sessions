@@ -222,7 +222,7 @@ for (const repo of view.repos) {
   console.log(`update line here now: ${line || '(nothing waiting)'}`)
 }
 // 4. Terminal.app answers each live session's tab background as a color
-const tabs =claude.filter(s => /^ttys\d+$/.test(s.tty))
+const tabs = claude.filter(s => /^ttys\d+$/.test(s.tty))
 if (tabs.length > 0 && process.platform === 'darwin') {
   const colors = tabs.map(s => c.parseBackground(runOk(['/usr/bin/osascript', '-l', 'JavaScript', '-e', c.BACKGROUND_SCRIPT, s.tty])))
   const found = colors.filter(Boolean)
@@ -1464,9 +1464,9 @@ except ChildProcessError: pass
       }
       const pending = frameOf({ claude: '2.1.301', codex: '0.162.1', codexLatest: '0.163.0' })
       const current = frameOf({ claude: '2.1.300', codex: '0.163.0', codexLatest: '0.163.0' })
-      const at = pending.findIndex(l => l.includes('↑ Claude 2.1.301 installed: 1 session still runs an older one · Codex 0.163.0 is out (0.162.1 installed)'))
-      check('ops: what waits on an update is said on its own line under the header; nothing when nothing does',
-        at > 0 && pending[at - 1].includes('updated') && !current.some(l => l.includes('↑')),
+      const at = pending.findIndex(l => l.includes('↑ Claude 2.1.301 installed: 1 session still runs an older one; start it again to update'))
+      check('ops: what waits on an update is said a line each under the header; nothing when nothing does',
+        at > 0 && pending[at - 1].includes('updated') && pending[at + 1].includes('↑ Codex 0.163.0 is out (0.162.1 installed); to install it: npm install -g @openai/codex') && !current.some(l => l.includes('↑')),
         JSON.stringify(pending[at]?.trim().slice(0, 120) ?? pending.slice(0, 4)))
     }
     // a workspace as it reads: its account only when every account is shown, `stopped` only when it is, nothing of its

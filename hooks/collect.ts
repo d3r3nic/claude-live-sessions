@@ -90,7 +90,7 @@ export function codexLatestFrom(raw: unknown): string | undefined {
  * first `txt` file, its executable) is no longer the file at that path, as after an update installed over it.
  */
 export const BIN_SCRIPT = [
-  `/usr/sbin/lsof -a -d txt -p "$1" -Fpin 2>/dev/null | /usr/bin/awk '/^p/ { p = substr($0, 2); seen = 0 } /^i/ { if (!seen) i = substr($0, 2) } /^n/ { if (!seen) { print p "\t" i "\t" substr($0, 2); seen = 1 } }' |`,
+  `/usr/sbin/lsof -a -d txt -p "$1" -Fpin 2>/dev/null | /usr/bin/awk '/^p/ { p = substr($0, 2); seen = 0; i = "" } /^i/ { if (!seen) i = substr($0, 2) } /^n/ { if (!seen && i != "") print p "\t" i "\t" substr($0, 2); seen = 1 }' |`,
   'while IFS="$(printf \'\\t\')" read -r pid inode path; do',
   '  [ "$(/usr/bin/stat -f %i "$path" 2>/dev/null)" = "$inode" ] && printf \'%s\\tcurrent\\n\' "$pid" || printf \'%s\\told\\n\' "$pid"',
   'done',
@@ -140,18 +140,38 @@ export function updatesPending(snap: Pick<Snapshot, 'claude' | 'codex' | 'worksp
   return pending
 }
 
-/** Pending said in a line (`Claude 2.1.302 installed: 3 sessions still run an older one, 2 in workspaces · …`), '' for nothing. */
-export function updatesSaid(p: Pending): string {
+/**
+ * Pending said, a line each, with what to do (`Claude 2.1.302 installed: 3 sessions still run an older one, 2 in
+ * workspaces; start them again to update`); none for nothing.
+ */
+export function updatesParts(p: Pending): string[] {
   const sessions = (n: number, what: string) => `${n} ${what}${n === 1 ? '' : 's'}`
   const of = (n: number) => (n === 0 ? '' : `, ${n} in workspaces`)
   const runs = (n: number) => (n === 1 ? 'runs' : 'run')
   const parts: string[] = []
-  if (p.claude !== undefined) parts.push(`Claude ${p.claude.installed} installed: ${sessions(p.claude.behind, 'session')} still ${runs(p.claude.behind)} an older one${of(p.claude.inWorkspaces)}`)
+  if (p.claude !== undefined) parts.push(`Claude ${p.claude.installed} installed: ${sessions(p.claude.behind, 'session')} still ${runs(p.claude.behind)} an older one${of(p.claude.inWorkspaces)}; start ${p.claude.behind === 1 ? 'it' : 'them'} again to update`)
   if (p.codex !== undefined) {
-    if (p.codex.latest !== undefined) parts.push(`Codex ${p.codex.latest} is out (${p.codex.installed} installed)`)
-    if (p.codex.behind > 0) parts.push(`Codex ${p.codex.installed ?? ''} installed: ${sessions(p.codex.behind, 'terminal')} still ${runs(p.codex.behind)} the one before${of(p.codex.inWorkspaces)}`.replace('Codex  installed', 'Codex installed'))
+    if (p.codex.latest !== undefined) parts.push(`Codex ${p.codex.latest} is out (${p.codex.installed} installed); to install it: npm install -g @openai/codex`)
+    if (p.codex.behind > 0) parts.push(`${p.codex.installed === undefined ? 'Codex' : `Codex ${p.codex.installed}`} installed: ${sessions(p.codex.behind, 'terminal')} still ${runs(p.codex.behind)} the one before${of(p.codex.inWorkspaces)}; start ${p.codex.behind === 1 ? 'it' : 'them'} again to update`)
   }
-  return parts.join(' · ')
+  return parts
+}
+
+/** Pending said in one line, its parts one after another (updatesParts); '' for nothing. */
+export const updatesSaid = (p: Pending) => updatesParts(p).join(' · ')
+
+/** How often the versions installed are read again at the least: an update lands about once a day. */
+export const TOOLS_EVERY_MS = 10 * 60_000
+
+/**
+ * Whether the versions installed are to be read again now: never read, read TOOLS_EVERY_MS ago, or an update shows
+ * since (a Codex terminal newly running a replaced program, or a Claude session on a version newer than the one read),
+ * so the line never says an update is out that was installed meanwhile.
+ */
+export function isToolsDue(tools: Tools | undefined, now: number, claude: readonly ClaudeSession[], wasOutdated: ReadonlySet<number>, outdated: ReadonlySet<number>): boolean {
+  if (tools?.at === undefined || now - tools.at >= TOOLS_EVERY_MS) return true
+  if ([...outdated].some(pid => !wasOutdated.has(pid))) return true
+  return claude.some(s => s.version !== undefined && (tools.claude === undefined || compareVersions(s.version, tools.claude) > 0))
 }
 
 const UUID_RE = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'

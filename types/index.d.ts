@@ -29,7 +29,8 @@ export type ClaudeSession = {
   /** Its context at its last request, in tokens, as its transcript records it (none read yet: unset). */
   context?: SessionContext
   /** The background work it has going, oldest first, as its transcript and its registry's state say; unset for none. */
-  tasks?: BackgroundTask[]  /** The Claude Code version it runs, as its registry entry says (`2.1.301`); unset where it does not. */
+  tasks?: BackgroundTask[]
+  /** The Claude Code version it runs, as its registry entry says (`2.1.301`); unset where it does not. */
   version?: string
 }
 
@@ -71,7 +72,8 @@ export type CodexSession = {
   /** Matched as `loaded`: the process of Codex's shared background server that runs its conversation for it. */
   loadedBy?: number
   /** Its context at its last request, in tokens, and its window, as its rollout records them (none read yet: unset). */
-  context?: SessionContext  /** An open terminal whose program was replaced on disk after it started (an update installed): it runs the one before. */
+  context?: SessionContext
+  /** An open terminal whose program was replaced on disk after it started (an update installed): it runs the one before. */
   isOutdated?: boolean
 }
 
@@ -182,16 +184,17 @@ export type Snapshot = {
   /** When this snapshot was taken; 0 before the first. */
   checkedAt: number
   /** What could not be read, one line each. */
-  problems: string[]  /** The versions installed and the newest known (Tools); unset until read. */
+  problems: string[]
+  /** The versions installed and the newest known (Tools); unset until read. */
   tools?: Tools
 }
 
 /**
  * Claude Code's and Codex's versions as installed (what `claude --version` and `codex --version` say: what a session
  * started now runs), and the newest Codex release that Codex's own update check found (its `version.json`); each unset
- * where it could not be read.
+ * where it could not be read. `at`: when they were read, ms since the epoch.
  */
-export type Tools = { claude?: string; codex?: string; codexLatest?: string }
+export type Tools = { claude?: string; codex?: string; codexLatest?: string; at?: number }
 
 /** A plan limit's reading: how much of it is used, in percent, when it resets, and when it was read (ms). */
 export type UsageLimit = { used: number; resetsAt?: number; at: number }

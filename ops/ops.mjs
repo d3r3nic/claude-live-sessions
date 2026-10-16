@@ -398,9 +398,8 @@ function frame(snap, now, cols, rows, tick, note = '', modal = undefined) {
     toolbar += `${isOn ? rgb(G.hi, bold(button)) : rgb(G.lo, button)} ${rgb(G.lo, key)}`
   }
   // what waits on an update (sessions of the account shown that run an older Claude or Codex, a Codex release out):
-  // a line of its own while something does
-  const updates = c.updatesSaid(c.updatesPending(snap))
-  if (updates !== '') line(` ${rgb(G.amber, `↑ ${updates}`)}`)
+  // a line each while something does
+  for (const u of c.updatesParts(c.updatesPending(snap))) line(` ${rgb(G.amber, `↑ ${u}`)}`)
   line(toolbar, presses)
   // workspaces: nodes, each its agents and the link the relay passes hand-offs over; as tiles, several a row (the
   // compact view), or each in full (the detailed view)

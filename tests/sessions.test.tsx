@@ -64,8 +64,11 @@ import {
   compareVersions,
   outdatedFrom,
   updatesPending,
+  updatesParts,
   updatesSaid,
   versionFrom,
+  isToolsDue,
+  TOOLS_EVERY_MS,
 } from '../hooks/collect'
 import type { CodexProc, ThreadRow } from '../hooks/collect'
 import type { ClaudeSession, CodexSession, Snapshot, Workspace } from '../types'
@@ -1728,55 +1731,91 @@ describe('updates', () => {
     expect([...outdatedFrom('201\tcurrent\n202\told\nx\told\n207\told\n')]).toEqual([202, 207])
   })
 
-  test('what waits on an update, said in a line; nothing when every session runs what is installed', async () => {
+  test('what waits on an update, said a line each with what to do; nothing when every session runs what is installed', async () => {
     const ws = { ...practice, createdAt: NOW }
-    const claude = (pid: number, tty: string, version?: string) => ({ pid, sessionId: `s-${pid}`, jobId: '', name: '', cwd: '/x', startCwd: '/x', status: 'idle', kind: 'interactive', profile: 'claude', tty, isForeground: true, since: NOW, ...(version === undefined ? {} : { version }) })
+    const claude = (pid: number, tty: string, version?: string, profile = 'claude') => ({ pid, sessionId: `s-${pid}`, jobId: '', name: '', cwd: '/x', startCwd: '/x', status: 'idle', kind: 'interactive', profile, tty, isForeground: true, since: NOW, ...(version === undefined ? {} : { version }) })
     const codex = (pid: number, tty: string, isOutdated?: boolean) => ({ key: `k-${pid}`, title: '', cwd: '/x', profile: 'codex', surface: 'terminal', tty, updatedAt: NOW, lastActive: NOW, agents: 0, pid, ...(isOutdated === undefined ? {} : { isOutdated }) })
     const snap = {
-      claude: [claude(1, 'ttys001', '2.1.300'), claude(2, 'ttys002', '2.1.301'), claude(3, 'ttys003', '2.1.299'), claude(4, 'ttys004')],
+      claude: [claude(1, 'ttys001', '2.1.300'), claude(2, 'ttys002', '2.1.301'), claude(3, 'ttys003', '2.1.299'), claude(4, 'ttys004'), claude(7, 'ttys007', '2.1.298', 'claude-work')],
       codex: [codex(5, 'ttys005', true), codex(6, 'ttys006')],
       workspaces: [ws],
       tmux: { panes: { ttys003: { session: 'ws-practice-rbac', window: 'peers', pane: '%1', owner: String(NOW) }, ttys005: { session: 'ws-practice-rbac', window: 'peers', pane: '%2', owner: String(NOW) } }, clients: {} },
       tools: { claude: '2.1.301', codex: '0.162.1', codexLatest: '0.163.0' },
     }
     const pending = updatesPending(snap)
-    expect(pending).toEqual({ claude: { installed: '2.1.301', behind: 2, inWorkspaces: 1 }, codex: { installed: '0.162.1', latest: '0.163.0', behind: 1, inWorkspaces: 1 } })
-    expect(updatesSaid(pending)).toBe('Claude 2.1.301 installed: 2 sessions still run an older one, 1 in workspaces · Codex 0.163.0 is out (0.162.1 installed) · Codex 0.162.1 installed: 1 terminal still runs the one before, 1 in workspaces')
+    expect(pending).toEqual({ claude: { installed: '2.1.301', behind: 3, inWorkspaces: 1 }, codex: { installed: '0.162.1', latest: '0.163.0', behind: 1, inWorkspaces: 1 } })
+    expect(updatesParts(pending)).toEqual([
+      'Claude 2.1.301 installed: 3 sessions still run an older one, 1 in workspaces; start them again to update',
+      'Codex 0.163.0 is out (0.162.1 installed); to install it: npm install -g @openai/codex',
+      'Codex 0.162.1 installed: 1 terminal still runs the one before, 1 in workspaces; start it again to update',
+    ])
+    expect(updatesSaid(pending)).toBe(updatesParts(pending).join(' · '))
+    // one account's screen counts that account's sessions alone (the pane and the ops screen go by forAccount)
+    const scoped = (account: string) => ({ ...forAccount({ ...snap, places: {}, envs: [''], checkedAt: NOW, problems: [], codex: snap.codex as CodexSession[], claude: snap.claude as ClaudeSession[] }, account), workspaces: snap.workspaces })
+    expect(updatesPending(scoped('work')).claude?.behind).toBe(1)
+    expect(updatesPending(scoped('')).claude?.behind).toBe(2)
     // a pane under a like-named session that is not the workspace's own is not one of its agents
     const notOwn = { ...snap, tmux: { panes: { ttys003: { session: 'ws-practice-rbac', window: 'peers', pane: '%1', owner: '1' } }, clients: {} } }
     expect(updatesPending(notOwn).claude?.inWorkspaces).toBe(0)
     // every session current, the newest Codex installed: nothing
     const current = { ...snap, claude: [claude(2, 'ttys002', '2.1.301')], codex: [codex(6, 'ttys006')], tools: { claude: '2.1.301', codex: '0.163.0', codexLatest: '0.163.0' } }
-    expect(updatesSaid(updatesPending(current))).toBe('')
-    // versions not read (no snapshot of this version yet, or the programs not found): nothing said
-    expect(updatesSaid(updatesPending({ ...snap, tools: undefined }))).toBe('Codex installed: 1 terminal still runs the one before, 1 in workspaces')
-    expect(updatesSaid(updatesPending({ ...snap, codex: [], tools: {} }))).toBe('')
+    expect(updatesParts(updatesPending(current))).toEqual([])
+    // the versions not read yet (a snapshot of an earlier version, or the programs not found): what is known of them only
+    expect(updatesParts(updatesPending({ ...snap, tools: undefined }))).toEqual(['Codex installed: 1 terminal still runs the one before, 1 in workspaces; start it again to update'])
+    expect(updatesParts(updatesPending({ ...snap, codex: [], tools: {} }))).toEqual([])
   })
 
-  test('the pane and the snapshot say what waits on an update; the versions read again every 10 minutes, not on every refresh', async ($, on) => {
+  test('the versions read again when due: never read, 10 minutes on, or as soon as an update shows (a terminal newly on a replaced program, a session on a newer Claude)', async () => {
+    const tools = { claude: '2.1.301', codex: '0.162.1', at: NOW }
+    const claude = (version?: string) => [{ pid: 1, sessionId: 's', jobId: '', name: '', cwd: '/x', startCwd: '/x', status: 'idle', kind: 'interactive', profile: 'claude', tty: 'ttys001', isForeground: true, since: NOW, ...(version === undefined ? {} : { version }) }]
+    const none = new Set<number>()
+    expect(isToolsDue(undefined, NOW, claude('2.1.301'), none, none)).toBe(true)
+    expect(isToolsDue({ claude: '2.1.301' }, NOW, claude('2.1.301'), none, none)).toBe(true)
+    expect(isToolsDue(tools, NOW + 9 * 60_000, claude('2.1.301'), none, none)).toBe(false)
+    expect(isToolsDue(tools, NOW + TOOLS_EVERY_MS, claude('2.1.301'), none, none)).toBe(true)
+    // a terminal newly on a replaced program: Codex was just updated
+    expect(isToolsDue(tools, NOW + 60_000, claude('2.1.301'), none, new Set([7]))).toBe(true)
+    expect(isToolsDue(tools, NOW + 60_000, claude('2.1.301'), new Set([7]), new Set([7]))).toBe(false)
+    // a session on a Claude newer than the one read: Claude updated itself, and a session started on it
+    expect(isToolsDue(tools, NOW + 60_000, claude('2.1.302'), none, none)).toBe(true)
+    expect(isToolsDue(tools, NOW + 60_000, claude('2.1.300'), none, none)).toBe(false)
+    expect(isToolsDue(tools, NOW + 60_000, claude(), none, none)).toBe(false)
+  })
+
+  test('the pane and the snapshot say what waits on an update; Codex updated meanwhile is said at once, never as still out', async ($, on) => {
     const { runs, clock, files } = engine(on)
     // an older Claude in WEB CONSOLE (the default account's), the work account's on the one installed
     files.set('/Users/u/.claude/sessions/101.json', JSON.stringify({ ...JSON.parse(files.get('/Users/u/.claude/sessions/101.json')!), version: '2.1.300' }))
     files.set('/Users/u/.claude-work/sessions/104.json', JSON.stringify({ ...JSON.parse(files.get('/Users/u/.claude-work/sessions/104.json')!), version: '2.1.301' }))
     files.set('/Users/u/.codex/version.json', JSON.stringify({ latest_version: '0.163.0', last_checked_at: '2026-10-16T17:38:33Z', dismissed_version: null }))
     world.versions = { claude: '2.1.301', codex: '0.162.1' }
-    world.binOld.add(201)
     const asked = () => runs.filter(r => (r[0] === 'claude' || r[0] === 'codex') && r[1] === '--version').length
+    const shown = async () => (await shownOn($, 'terminal', 200)).filter(t => t.startsWith('↑ '))
     await $.session.start(START)
     await $.command.run(SESSIONS)
-    const snap = JSON.parse(files.get(SHARED) ?? '{}').snapshot as Snapshot
-    expect(snap.tools).toEqual({ claude: '2.1.301', codex: '0.162.1', codexLatest: '0.163.0' })
-    expect(snap.claude.find(s => s.pid === 101)?.version).toBe('2.1.300')
-    expect(snap.codex.filter(s => s.isOutdated === true).map(s => s.pid)).toEqual([201])
-    const shown = (await shownOn($, 'terminal', 200)).join('\n')
-    expect(shown).toContain('↑ Claude 2.1.301 installed: 1 session still runs an older one · Codex 0.163.0 is out (0.162.1 installed) · Codex 0.162.1 installed: 1 terminal still runs the one before')
-    const first = asked()
-    expect(first).toBe(2)
+    const snap = () => JSON.parse(files.get(SHARED) ?? '{}').snapshot as Snapshot
+    expect(snap().tools).toEqual({ claude: '2.1.301', codex: '0.162.1', codexLatest: '0.163.0', at: NOW })
+    expect(snap().claude.find(s => s.pid === 101)?.version).toBe('2.1.300')
+    expect(await shown()).toEqual([
+      '↑ Claude 2.1.301 installed: 1 session still runs an older one; start it again to update',
+      '↑ Codex 0.163.0 is out (0.162.1 installed); to install it: npm install -g @openai/codex',
+    ])
+    expect(asked()).toBe(2)
     // the pane in view refreshes every 4 s: the programs are not asked again until 10 minutes are up
     await clock.advance(5 * 60_000)
-    expect(asked()).toBe(first)
+    expect(asked()).toBe(2)
     await clock.advance(6 * 60_000)
-    expect(asked()).toBe(first + 2)
+    expect(asked()).toBe(4)
+    // Codex updated now (its terminal on the program replaced): read again at once, never said to be out still
+    world.versions.codex = '0.163.0'
+    world.binOld.add(201)
+    await clock.advance(35_000)
+    expect(asked()).toBe(6)
+    expect(snap().codex.filter(s => s.isOutdated === true).map(s => s.pid)).toEqual([201])
+    expect(await shown()).toEqual([
+      '↑ Claude 2.1.301 installed: 1 session still runs an older one; start it again to update',
+      '↑ Codex 0.163.0 installed: 1 terminal still runs the one before; start it again to update',
+    ])
   })
 
   test('nothing waiting: no update line', async ($, on) => {

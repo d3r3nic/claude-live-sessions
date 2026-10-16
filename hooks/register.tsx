@@ -146,9 +146,10 @@ import {
   BIN_SCRIPT,
   codexLatestFrom,
   compareVersions,
+  isToolsDue,
   outdatedFrom,
+  updatesParts,
   updatesPending,
-  updatesSaid,
   versionFrom,
 } from './collect'
 import type { CodexProc, Item, Proc, ThreadRow } from './collect'
@@ -403,27 +404,31 @@ async function codexThreads(
   }
 }
 
-/** How often the versions installed are read again: an update lands about once a day. */
-const TOOLS_EVERY_MS = 10 * 60_000
-let toolsRead: { at: number; tools: Tools } | undefined
-
 /**
  * The versions installed (`claude --version`, `codex --version`: what a session started now runs) and the newest Codex
- * release that Codex's own update check found in any Codex home (its `version.json`), read again every TOOLS_EVERY_MS.
+ * release that Codex's own update check found in any Codex home (its `version.json`), read now.
  */
 async function toolsOf($: EngineInterface, codexHomes: readonly string[], now: number): Promise<Tools> {
-  if (toolsRead !== undefined && now - toolsRead.at < TOOLS_EVERY_MS) return toolsRead.tools
   const said = async (bin: string) =>
-    versionFrom((await $.process.run([bin, '--version'], { timeoutMs: 15_000 }).catch(() => ({ stdout: '' }))).stdout)
+    versionFrom((await $.process.run([bin, '--version'], { timeoutMs: 5_000 }).catch(() => ({ stdout: '' }))).stdout)
   const [claude, codex] = await Promise.all([said('claude'), said('codex')])
   let codexLatest: string | undefined
   for (const dir of codexHomes) {
     const latest = await $.fs.read(`${dir}/version.json`).then(text => codexLatestFrom(JSON.parse(text))).catch(() => undefined)
     if (latest !== undefined && (codexLatest === undefined || compareVersions(latest, codexLatest) > 0)) codexLatest = latest
   }
-  const tools: Tools = { ...(claude === undefined ? {} : { claude }), ...(codex === undefined ? {} : { codex }), ...(codexLatest === undefined ? {} : { codexLatest }) }
-  toolsRead = { at: now, tools }
-  return tools
+  return { ...(claude === undefined ? {} : { claude }), ...(codex === undefined ? {} : { codex }), ...(codexLatest === undefined ? {} : { codexLatest }), at: now }
+}
+
+/** Which Codex terminals run a replaced program (BIN_SCRIPT), asked again when the terminals change or after 30 s. */
+let binRead: { key: string; at: number; outdated: Set<number> } | undefined
+async function outdatedOf($: EngineInterface, pids: readonly number[], now: number): Promise<Set<number>> {
+  if (pids.length === 0) return new Set()
+  const key = [...pids].sort((a, b) => a - b).join(',')
+  if (binRead !== undefined && binRead.key === key && now - binRead.at < 30_000) return binRead.outdated
+  const out = await $.process.run(['/bin/sh', '-c', BIN_SCRIPT, 'sh', key], { timeoutMs: 10_000 }).catch(() => ({ stdout: '' }))
+  binRead = { key, at: now, outdated: outdatedFrom(out.stdout) }
+  return binRead.outdated
 }
 
 async function collect($: EngineInterface, home: string, now: number): Promise<Snapshot> {
@@ -495,7 +500,7 @@ async function collect($: EngineInterface, home: string, now: number): Promise<S
     if (rows !== undefined) threads.set(codexHome, rows)
   }
   // each open terminal: whether an update has since replaced the program it runs
-  const outdated = open.length === 0 ? new Set<number>() : outdatedFrom((await $.process.run(['/bin/sh', '-c', BIN_SCRIPT, 'sh', open.map(p => p.pid).join(',')], { timeoutMs: 10_000 }).catch(() => ({ stdout: '' }))).stdout)
+  const outdated = await outdatedOf($, open.map(p => p.pid), now)
   const started = codexSessions({ terminals, threads, now, servers }).map(s => (s.pid !== undefined && outdated.has(s.pid) ? { ...s, isOutdated: true } : s))
 
   // each session is listed where it has been working, which its own records say
@@ -548,8 +553,14 @@ async function collect($: EngineInterface, home: string, now: number): Promise<S
     problems.push(`relay: ${message(error)}`)
   }
 
-  const tools = await toolsOf($, [...codexHomes], now)
-  return { claude, codex, places, workspaces, envs, tmux, checkedAt: now, problems, tools }
+  // the versions installed, as the latest snapshot has them (the shared one, whatever its age, so every session goes by
+  // the same), read again when due
+  const mine = await read($, snapshot)
+  const shared = await readShared($, home, now, Number.POSITIVE_INFINITY)
+  const before = shared !== undefined && shared.checkedAt > mine.checkedAt ? shared : mine
+  const wasOutdated = new Set(before.codex.flatMap(s => (s.isOutdated === true && s.pid !== undefined ? [s.pid] : [])))
+  const tools = isToolsDue(before.tools, now, claude, wasOutdated, outdated) ? await toolsOf($, [...codexHomes], now) : before.tools
+  return { claude, codex, places, workspaces, envs, tmux, checkedAt: now, problems, ...(tools === undefined ? {} : { tools }) }
 }
 
 
@@ -3084,7 +3095,7 @@ export const register: Register = on => {
     ]
     const hidden = view.total - view.shown
     // what waits on an update: sessions of the account shown that run an older Claude or Codex, and a Codex release out
-    const updates = updatesSaid(updatesPending(snap))
+    const updates = updatesParts(updatesPending(snap))
     return hideInTree(
       <Box flexDirection="column" width={width} minHeight={height} backgroundColor={paint}>
         <Box flexDirection="row" width={width}>
@@ -3092,7 +3103,7 @@ export const register: Register = on => {
           {working > 0 && <Text color="warning">{` · ${working} working`}</Text>}
           {inBackground > 0 && <Text color="suggestion">{` · ${inBackground} background`}</Text>}
         </Box>
-        {updates !== '' && <Text color="warning" wrap="truncate-end">{`↑ ${updates}`}</Text>}
+        {updates.map(u => <Text key={`update ${u}`} color="warning" wrap="truncate-end">{`↑ ${u}`}</Text>)}
         <Box flexDirection="row" width={width} columnGap={1}>
           <Text dimColor>active in</Text>
           {WINDOWS.map(w => (
