@@ -5771,6 +5771,18 @@ describe('usage', () => {
     await ui.unmount()
   })
 
+  test('the dollars in a heading count every project of the window, also those past the rows shown', { timeoutMs: 30_000 }, async ($, on) => {
+    engine(on, machine, { termProgram: 'Apple_Terminal', isOwnAccount: true })
+    on('session.usage', async () => ({ value: { startedAt: NOW, context: { window: 1_000_000 }, rateLimits } }))
+    usageWorld()
+    // ten folders of $1,000 each (5 billion cache reads of Opus 5.5 at $0.20 a million): eight rows shown, two more
+    world.scan = { ...world.scan, [transcript]: scanOf(transcript, Array.from({ length: 10 }, (_, i) => `C\t2026-10-09T15:30\tclaude-opus-5-5\t/Users/u/p${i}\t0\t0\t0\t5000000000\t0`), '9000\tmsg_7') }
+    await $.session.start(START)
+    const asText = await $.command.run({ ...SESSIONS, args: 'usage 7d' })
+    expect(asText.text).toContain(', ≈ $10,000 at API list prices: ~/p0 10% ≈ $1,000 (≈ 2% of the limit), ')
+    expect(asText.text).toContain(', +2 more\nCodex')
+  })
+
   test('every account at once: each one\'s limits and projects, named', { timeoutMs: 30_000 }, async ($, on) => {
     const { files, clock } = engine(on, machine, { termProgram: 'Apple_Terminal' })
     on('session.usage', async () => ({ value: { startedAt: NOW, context: { window: 1_000_000 }, rateLimits } }))
