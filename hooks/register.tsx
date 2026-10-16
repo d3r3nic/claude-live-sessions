@@ -76,7 +76,7 @@ import {
   HIDE_SCRIPT,
   mayBindHide,
 } from './workspaces'
-import { isOwnersPrompt, isProblemDue, PROBLEM_OPTION, problemAsk, problemLine, problemOf } from './problem'
+import { isOwnersPrompt, isProblemDue, PROBLEM_OPTION, problemAsk, problemLine, problemOf, showsProblem } from './problem'
 import {
   ACTIVE_MS,
   AGENT_MS,
@@ -812,10 +812,9 @@ async function showProblem($: EngineInterface, home: string, id: string, name: s
   const status = problem === undefined ? undefined : await tmux(['show-options', '-gv', 'status'])
   const first = status?.exitCode === 0 && status.stdout.trim() === 'on' ? await tmux(['show-options', '-gv', 'status-format[0]']) : undefined
   const firstLine = first?.exitCode === 0 ? first.stdout.replace(/\n$/, '') : undefined
-  const isShown = problem !== undefined && problem !== '' && firstLine !== undefined && firstLine !== ''
   // (no line to show: one set before taken away, and only one this set)
-  if (!isShown && (await tmux(['show-options', '-t', name, '-qv', PROBLEM_OPTION])).stdout.trim() === '') return
-  for (const args of problemLine(name, isShown ? problem : undefined, firstLine)) await tmux(args)
+  if (!showsProblem(problem, firstLine) && (await tmux(['show-options', '-t', name, '-qv', PROBLEM_OPTION])).stdout.trim() === '') return
+  for (const args of problemLine(name, problem, firstLine)) await tmux(args)
 }
 
 /**

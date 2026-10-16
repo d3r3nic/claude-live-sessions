@@ -94,6 +94,11 @@ export const PROBLEM_OPTION = '@live-sessions-problem'
 /** The problem's line on the window's bar: dark on pale yellow, unlike the bar above it. */
 export const PROBLEM_FORMAT = `#[fill=#ffe8a3 bg=#ffe8a3 fg=#1f1a00]#[bold] MAIN PROBLEM #[nobold] #{${PROBLEM_OPTION}} `
 
+/** Whether problemLine shows `problem`: there is one, and the bar's first line, which it keeps, was read. */
+export function showsProblem(problem: string | undefined, firstLine: string | undefined): problem is string {
+  return problem !== undefined && problem !== '' && firstLine !== undefined && firstLine !== ''
+}
+
 /**
  * tmux commands that show `problem` on a second line of the workspace session `name`'s bar, under the bar tmux.conf
  * draws (`firstLine`, tmux.conf's `status-format[0]`, which a session's own `status-format` would otherwise leave
@@ -101,12 +106,12 @@ export const PROBLEM_FORMAT = `#[fill=#ffe8a3 bg=#ffe8a3 fg=#1f1a00]#[bold] MAIN
  * line's format names, so nothing in it is ever run; each `#` doubled, so none starts a style.
  */
 export function problemLine(name: string, problem: string | undefined, firstLine: string | undefined): string[][] {
-  if (problem === undefined || problem === '' || firstLine === undefined || firstLine === '') {
+  if (!showsProblem(problem, firstLine)) {
     return [['set-option', '-u', '-t', name, 'status'], ['set-option', '-u', '-t', name, 'status-format'], ['set-option', '-u', '-t', name, PROBLEM_OPTION]]
   }
   return [
     ['set-option', '-t', name, PROBLEM_OPTION, problem.replace(/#/g, '##')],
-    ['set-option', '-t', name, 'status-format[0]', firstLine],
+    ['set-option', '-t', name, 'status-format[0]', firstLine!],
     ['set-option', '-t', name, 'status-format[1]', PROBLEM_FORMAT],
     ['set-option', '-t', name, 'status', '2'],
   ]

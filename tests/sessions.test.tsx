@@ -6487,6 +6487,15 @@ describe('the main problem', () => {
     }
   })
 
+  test('a problem kept but the bar\'s first line not read, and no line of the plugin\'s on the bar: nothing of the bar touched', async ($, on) => {
+    const { settle, barSince } = claudeOfWorkspace(on, { problem: { text: 'Your report is slow', at: NOW - 60_000 } })
+    world.firstLine = ''
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    await settle()
+    expect(barSince(0)).toEqual([])
+  })
+
   test('only what the owner gives Claude asks: a background task\'s notice, a scheduled prompt or another session\'s message asks nothing; Remote Control does', async ($, on) => {
     const { asked, fork, settle } = claudeOfWorkspace(on, { problem: { text: 'x', at: NOW + 3_600_000 } })
     await $.session.start(START)
