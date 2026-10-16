@@ -2,6 +2,10 @@
 
 What each version changed, newest first. Each links its pull request, which holds the details, the checks and the reviews. After updating, run `/reload-plugins` in your sessions.
 
+## 0.38.0 — 2026-10-16
+- **Workspace agents move onto the new version by themselves:** once every agent of a running workspace has been quiet for an hour, with nothing typed in its input line, an agent still on an older Claude Code (which updates itself) or on a Codex program replaced by an install is stopped between turns and started again in its pane, in the same conversation and window, checked as `Close` checks it. After an hour the prompt cache has lapsed, so it costs nothing the next turn would not. The event log says so (`UPDATE`).
+- **A workspace's Claude goes on unattended:** it never stops to ask how to resume a large conversation (it resumes in full, as it stood), and when the API is overloaded or out of capacity it waits and tries again, up to 2 hours, instead of ending its turn (Claude Code's unattended retry mode); a plan's usage limit still ends the request as before. A Claude running now takes this when it is next started.
+
 ## 0.37.1 — 2026-10-16 ([#54](https://github.com/d3r3nic/claude-live-sessions/pull/54))
 - **The ops screen no longer goes blank after an update:** 0.37.0 changed the shared snapshot's format, and the ops screen, starting again on the new code, showed only `No snapshot of this version… Waiting` until a reloaded session wrote the new format, as the sessions not reloaded (the workspaces' own Claudes too) kept writing the one before. It now shows that format too, without the update line. While sessions of both versions write in turn, it keeps to the new format (one of the format before is taken only once none of the new has come for 40 seconds), so its rows do not jump about.
 

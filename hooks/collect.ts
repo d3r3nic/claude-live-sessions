@@ -176,6 +176,41 @@ export function isToolsDue(tools: Tools | undefined, now: number, claude: readon
   return claude.some(s => s.version !== undefined && tools.claude !== undefined && (s.startedAt ?? 0) > tools.at! && compareVersions(s.version, tools.claude) > 0)
 }
 
+/**
+ * How long a workspace stays quiet before an agent of it running an older version is started again on the one
+ * installed: an hour. By then the prompt cache has lapsed (Claude's holds an hour), so starting again costs nothing the
+ * next turn would not cost anyway, and nobody has been at work there for a while.
+ */
+export const REFRESH_QUIET_MS = 60 * 60_000
+
+/** A workspace agent to start again on the version installed: its tool, its pane's terminal and tmux id, its process. */
+export type Due = { tool: 'claude' | 'codex'; tty: string; pane: string; pid: number }
+
+/**
+ * The agents of a workspace to start again on the version installed now (Claude: older than the one installed; Codex:
+ * a program an update has replaced), once every agent of it is between turns and has been quiet REFRESH_QUIET_MS:
+ * Claude idle by its registry with no background work, Codex not written to. None while any agent is not.
+ */
+export function dueRefresh(ws: Pick<Workspace, 'id' | 'createdAt'>, snap: Pick<Snapshot, 'claude' | 'codex' | 'tmux' | 'tools'>, now: number): Due[] {
+  const panes = Object.entries(snap.tmux.panes).filter(([, p]) => isOwnPane(ws, p) && (p.window === 'claude' || p.window === 'codex') && p.pane !== undefined)
+  const due: Due[] = []
+  for (const [tty, p] of panes) {
+    if (p.window === 'claude') {
+      const s = snap.claude.find(c => c.tty === tty && c.kind === 'interactive')
+      if (s === undefined) continue
+      // (`idle` in its registry: its turn over, nothing it started in the background still running, no question open)
+      if (s.status !== 'idle' || now - s.since < REFRESH_QUIET_MS) return []
+      if (s.version !== undefined && snap.tools?.claude !== undefined && compareVersions(s.version, snap.tools.claude) < 0) due.push({ tool: 'claude', tty, pane: p.pane!, pid: s.pid })
+    } else {
+      const s = snap.codex.find(c => c.tty === tty && c.surface === 'terminal' && c.pid !== undefined)
+      if (s === undefined) continue
+      if (now - Math.max(s.updatedAt, s.lastActive) < REFRESH_QUIET_MS) return []
+      if (s.isOutdated === true) due.push({ tool: 'codex', tty, pane: p.pane!, pid: s.pid! })
+    }
+  }
+  return due
+}
+
 const UUID_RE = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
 const UUID = new RegExp(`^${UUID_RE}$`, 'i')
 

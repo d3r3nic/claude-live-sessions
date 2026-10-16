@@ -12,6 +12,7 @@ import type { Hiding } from './names'
 import { type Bringable, bringable, codexDir, CODEX_LETS_GO_S, envOfProfile, holderOf, holdersOf, HOLDERS_SCRIPT, isKnownCodex, CODEX_FOLDER_SCRIPT, CODEX_TASK_SCRIPT, codexTaskState, JOB_COMMANDS, ROLLOUT_SCRIPT, seenThreads, STOP_SCRIPT, toggled, withThreads } from './bring'
 import {
   agentsOf,
+  paneScript,
   CHECKOUT_SCRIPT,
   CLIENTS_FORMAT,
   PROJECTS_SCRIPT,
@@ -145,6 +146,8 @@ import {
   forAccount,
   BIN_SCRIPT,
   codexLatestFrom,
+  dueRefresh,
+  REFRESH_QUIET_MS,
   compareVersions,
   isToolsDue,
   outdatedFrom,
@@ -560,7 +563,51 @@ async function collect($: EngineInterface, home: string, now: number): Promise<S
   const before = shared !== undefined && shared.checkedAt > mine.checkedAt ? shared : mine
   const wasOutdated = new Set(before.codex.flatMap(s => (s.isOutdated === true && s.pid !== undefined ? [s.pid] : [])))
   const tools = isToolsDue(before.tools, now, claude, wasOutdated, outdated) ? await toolsOf($, [...codexHomes], now) : before.tools
-  return { claude, codex, places, workspaces, envs, tmux, checkedAt: now, problems, ...(tools === undefined ? {} : { tools }) }
+  const taken: Snapshot = { claude, codex, places, workspaces, envs, tmux, checkedAt: now, problems, ...(tools === undefined ? {} : { tools }) }
+  // workspace agents on an older version, started again on the one installed once their workspace has gone quiet
+  if (!isRefreshing && workspaces.some(ws => dueRefresh(ws, taken, now).length > 0)) {
+    isRefreshing = true
+    void refreshAgents($, home, taken, now).catch(() => undefined).finally(() => { isRefreshing = false })
+  }
+  return taken
+}
+
+let isRefreshing = false
+
+/**
+ * Each workspace agent due to move onto the version installed (dueRefresh: its workspace quiet REFRESH_QUIET_MS, it on
+ * an older one), started again where it runs: nothing typed in its input line (the owner's draft is never lost),
+ * checked as close checks it (the conversation kept for the workspace, under its account, not this session, between
+ * turns, checked again just before), taken by one session alone (its ledger key, by its process), stopped, and its pane
+ * started afresh with the command the workspace starts it with, resuming that conversation in the same window. An
+ * agent that could not be started again is told of.
+ */
+async function refreshAgents($: EngineInterface, home: string, snap: Snapshot, now: number) {
+  const NAME = { claude: 'Claude', codex: 'Codex' } as const
+  for (const ws of snap.workspaces) {
+    for (const due of dueRefresh(ws, snap, now)) {
+      const screen = await $.process.run(['tmux', 'capture-pane', '-p', '-e', '-t', due.pane], { timeoutMs: 10_000 }).catch(() => ({ exitCode: -1, stdout: '' }))
+      if (screen.exitCode !== 0 || isInputEmpty(due.tool, screen.stdout) !== true) continue
+      const agent = await stoppable($, home, ws, due.tty, snap, 'start it again on the new version')
+      if (agent === undefined || 'why' in agent || agent.tool !== due.tool || agent.pid !== due.pid || (await agent.check()) !== undefined) continue
+      const ledger = ledgerPath(home)
+      await $.process.run(['/bin/mkdir', '-p', ledger], { timeoutMs: 10_000 })
+      if ((await $.process.run(['/bin/mkdir', `${ledger}/refresh-${ws.id}-${due.tool}-${due.pid}`], { timeoutMs: 10_000 }).catch(() => ({ exitCode: -1 }))).exitCode !== 0) continue
+      const version = due.tool === 'claude' ? snap.tools?.claude : snap.tools?.codex
+      const quiet = `after ${ago(REFRESH_QUIET_MS)} quiet`
+      const stopped = (await $.process.run(['/bin/sh', '-c', STOP_SCRIPT, 'sh', due.tty, JOB_COMMANDS[due.tool], String(due.pid)], { timeoutMs: 30_000 }).catch(() => ({ stdout: 'failed' }))).stdout.trim()
+      if (stopped !== 'stopped') continue
+      const started = await $.process.run(['tmux', 'respawn-pane', '-k', '-t', due.pane, paneScript(due.tool, ws, home)], { timeoutMs: 10_000 }).catch((error: unknown) => ({ exitCode: -1, stderr: message(error) }))
+      const what = `${ws.name}: ${NAME[due.tool]} started again on ${version === undefined ? 'the version installed' : `${due.tool === 'claude' ? 'Claude Code' : 'Codex'} ${version}`}, ${quiet}, in the same conversation`
+      if (started.exitCode === 0) {
+        await logEvent($, home, { kind: 'update', text: what, workspace: ws.id, agent: due.tool })
+        continue
+      }
+      const failed = `${ws.name}: ${NAME[due.tool]} was stopped to move onto the new version but could not be started again (${firstLine(started.stderr) || `exit ${started.exitCode}`}); close the workspace and open it again`
+      await logEvent($, home, { kind: 'update', text: failed, workspace: ws.id, agent: due.tool })
+      await $.process.run(['/bin/sh', '-c', RELAY_SCRIPT, 'sh', 'tell', ledger, `refresh-failed-${ws.id}-${due.tool}-${due.pid}`, '', '', await told($, failed), '', 'Workspace update'], { timeoutMs: 20_000 }).catch(() => undefined)
+    }
+  }
 }
 
 
@@ -945,6 +992,44 @@ async function hideWindows($: EngineInterface, home: string, ws: Workspace): Pro
  * then. Never from the workspace's own Claude, which would close itself first. An agent that began a turn after the
  * checks is left running.
  */
+/** A workspace agent that may be stopped between turns: its pane's terminal, its process, and the check made just before. */
+type Stoppable = { tool: 'claude' | 'codex'; tty: string; pid: number; check: () => Promise<string | undefined> }
+
+/**
+ * The agent in a workspace's pane (`tty`), as it may be stopped and resumed in its conversation (Stoppable): a Claude
+ * other than this session, under the workspace's account, running the conversation kept for the workspace; or a Codex
+ * so, its conversation known for certain and its rollout found. Its `check` makes sure again, just before, that it is
+ * the same and between turns (`asked` says what for). `why` it may not be; undefined for no agent known in the pane.
+ */
+async function stoppable($: EngineInterface, home: string, ws: Workspace, tty: string, snap: Snapshot, asked: string): Promise<Stoppable | { why: string } | undefined> {
+  const claude = snap.claude.find(c => c.tty === tty && c.kind === 'interactive')
+  const codex = snap.codex.find(c => c.tty === tty && c.surface === 'terminal' && c.pid !== undefined && !c.key.startsWith('pid-'))
+  if (claude !== undefined) {
+    if (claude.sessionId === (await $.session.id())) return { why: 'this is the workspace\'s own Claude, which would close itself first; close it from another session or the Ops screen' }
+    if (envOfProfile('claude', claude.profile) !== ws.env) return { why: 'the Claude in its pane runs under another account than the workspace\'s; close it there yourself' }
+    if (ws.threads?.claude?.id !== claude.sessionId) return { why: 'the conversation Claude runs is not kept for the workspace yet; try again in a moment' }
+    const check = async () => {
+      const live = await liveClaude($, home, claude.pid, claude.profile, claude.sessionId, asked)
+      return typeof live === 'string' ? `Claude ${live}` : live.tty !== tty ? 'Claude has moved from its pane' : undefined
+    }
+    return { tool: 'claude', tty, pid: claude.pid, check }
+  }
+  if (codex === undefined) return undefined
+  if (envOfProfile('codex', codex.profile) !== ws.env) return { why: 'the Codex in its pane runs under another account than the workspace\'s; close it there yourself' }
+  if (!isKnownCodex(snap, codex) || ws.threads?.codex?.id !== codex.key) return { why: 'which conversation Codex runs is not known for certain yet; try again in a moment' }
+  const codexHome = `${home}/.${codex.profile}`
+  const rollout = (await $.process.run(['/bin/sh', '-c', ROLLOUT_SCRIPT, 'sh', codexHome, codex.key], { timeoutMs: 15_000 }).catch(() => ({ stdout: '' }))).stdout.trim()
+  if (!rollout.startsWith('/')) return { why: `Codex's conversation was not found under ~/.${codex.profile}` }
+  const check = async () => {
+    // which conversation it runs, made sure of again now, as bring-in does
+    if (!(await isSureCodex($, codexHome, codex))) return 'which conversation Codex runs is no longer certain; try again in a moment'
+    const busy = await codexBusy($, rollout, asked)
+    if (busy !== undefined) return `Codex ${busy}`
+    return codex.updatedAt > 0 && (await $.clock.now()) - codex.updatedAt < WORKING_MS ? `Codex is working: ${asked} once its turn is done` : undefined
+  }
+  return { tool: 'codex', tty, pid: codex.pid!, check }
+}
+
 async function closeWorkspace($: EngineInterface, ws: Workspace): Promise<{ isClosed: boolean; text: string }> {
   const home = (await $.env.get('HOME')) ?? ''
   const name = tmuxName(ws)
@@ -968,42 +1053,16 @@ async function closeWorkspace($: EngineInterface, ws: Workspace): Promise<{ isCl
   const ps = await $.process.run(['/bin/ps', '-ax', '-o', 'ppid='], { timeoutMs: 10_000 }).catch(() => ({ exitCode: -1, stdout: '', stderr: '' }))
   if (listed.exitCode !== 0 || ps.exitCode !== 0) return not('its panes could not be read')
   const parents = parentsFrom(ps.stdout)
-  const selfId = await $.session.id()
   const NAME = { claude: 'Claude', codex: 'Codex' } as const
   const asked = 'close the workspace'
-  type Agent = { tool: 'claude' | 'codex'; tty: string; pid: number; check: () => Promise<string | undefined> }
-  const agents: Agent[] = []
+  const agents: Stoppable[] = []
   for (const pane of paneStates(listed.stdout)) {
     if (isQuietPane(pane, parents)) continue
-    const claude = snap.claude.find(c => c.tty === pane.tty && c.kind === 'interactive')
-    const codex = snap.codex.find(c => c.tty === pane.tty && c.surface === 'terminal' && c.pid !== undefined && !c.key.startsWith('pid-'))
-    if (claude !== undefined) {
-      if (claude.sessionId === selfId) return not('this is the workspace\'s own Claude, which would close itself first; close it from another session or the Ops screen')
-      if (envOfProfile('claude', claude.profile) !== ws.env) return not('the Claude in its pane runs under another account than the workspace\'s; close it there yourself')
-      if (kept.threads?.claude?.id !== claude.sessionId) return not('the conversation Claude runs is not kept for the workspace yet; try again in a moment')
-      const check = async () => {
-        const live = await liveClaude($, home, claude.pid, claude.profile, claude.sessionId, asked)
-        return typeof live === 'string' ? `Claude ${live}` : live.tty !== pane.tty ? 'Claude has moved from its pane' : undefined
-      }
-      agents.push({ tool: 'claude', tty: pane.tty, pid: claude.pid, check })
-    } else if (codex !== undefined) {
-      if (envOfProfile('codex', codex.profile) !== ws.env) return not('the Codex in its pane runs under another account than the workspace\'s; close it there yourself')
-      if (!isKnownCodex(snap, codex) || kept.threads?.codex?.id !== codex.key) return not('which conversation Codex runs is not known for certain yet; try again in a moment')
-      const codexHome = `${home}/.${codex.profile}`
-      const rollout = (await $.process.run(['/bin/sh', '-c', ROLLOUT_SCRIPT, 'sh', codexHome, codex.key], { timeoutMs: 15_000 }).catch(() => ({ stdout: '' }))).stdout.trim()
-      if (!rollout.startsWith('/')) return not(`Codex's conversation was not found under ~/.${codex.profile}`)
-      const check = async () => {
-        // which conversation it runs, made sure of again now, as bring-in does
-        if (!(await isSureCodex($, codexHome, codex))) return 'which conversation Codex runs is no longer certain; try again in a moment'
-        const busy = await codexBusy($, rollout, asked)
-        if (busy !== undefined) return `Codex ${busy}`
-        return codex.updatedAt > 0 && (await $.clock.now()) - codex.updatedAt < WORKING_MS ? `Codex is working: ${asked} once its turn is done` : undefined
-      }
-      agents.push({ tool: 'codex', tty: pane.tty, pid: codex.pid!, check })
-    } else {
-      // (not an agent known here: one just started, or something of the owner's) never ended unchecked
-      return not(`${pane.command || 'something'} runs in one of its panes, and close cannot check it; end it there, or try again in a moment`)
-    }
+    const agent = await stoppable($, home, kept, pane.tty, snap, asked)
+    // (not an agent known here: one just started, or something of the owner's) never ended unchecked
+    if (agent === undefined) return not(`${pane.command || 'something'} runs in one of its panes, and close cannot check it; end it there, or try again in a moment`)
+    if ('why' in agent) return not(agent.why)
+    agents.push(agent)
   }
   // every agent between turns first, so nothing is closed while one is not
   for (const a of agents) {

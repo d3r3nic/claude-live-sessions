@@ -147,10 +147,26 @@ const SESSION_MARKERS = [
   'CLAUDE_CONFIG_DIR', 'CODEX_HOME',
 ]
 
-/** An agent's start under a workspace's environment: its config directory, Claude's or Codex's. */
+/**
+ * What a workspace's Claude starts with, so that it goes on unattended. It never stops at the question Claude Code asks
+ * on resuming an old, large conversation (from a summary, or in full: asked past 70 minutes since its last message and
+ * 100k tokens, as a workspace started again after quiet, by ■ then ►, or after a crash meets it): it resumes in full,
+ * as it stood, and compacts at a hand-off as before. And it waits out the API's overload and capacity errors, up to 2
+ * hours in all, instead of ending its turn on them (Claude Code's unattended retry mode), while a plan's usage limit
+ * ends the request as it does without it (a wait of 0 for it).
+ */
+export const CLAUDE_UNATTENDED = [
+  'CLAUDE_CODE_RESUME_THRESHOLD_MINUTES=525600',
+  'CLAUDE_CODE_RETRY_WATCHDOG=1',
+  'CLAUDE_CODE_RETRY_WATCHDOG_MAX_WAIT_MS=7200000',
+  'CLAUDE_CODE_RETRY_WATCHDOG_MAX_USAGE_LIMIT_WAIT_MS=0',
+] as const
+
+/** An agent's start under a workspace's environment: its config directory, Claude's or Codex's; Claude's set to go on unattended. */
 export function agentStart(tool: 'claude' | 'codex', env: string, home: string, bin: string = tool): string {
   const vars = env === '' ? '' : tool === 'claude' ? `CLAUDE_CONFIG_DIR=${shellWord(`${home}/.claude-${env}`)} ` : `CODEX_HOME=${shellWord(`${home}/.codex-${env}`)} `
-  return `env ${SESSION_MARKERS.map(v => `-u ${v}`).join(' ')} ${vars}${bin}`
+  const unattended = tool === 'claude' ? `${CLAUDE_UNATTENDED.join(' ')} ` : ''
+  return `env ${SESSION_MARKERS.map(v => `-u ${v}`).join(' ')} ${vars}${unattended}${bin}`
 }
 
 /** Where a workspace's first prompt for an agent waits until the agent starts (and takes it, once). */
@@ -173,7 +189,7 @@ export const promptPath = (home: string, id: string, tool: 'claude' | 'codex') =
  * from the folder it ran in, bypassed the same way, whatever mode it ran in
  * before.
  */
-function paneScript(tool: 'claude' | 'codex', ws: Pick<Workspace, 'id' | 'env' | 'checkout' | 'threads' | 'only'>, home: string, bin?: string, waitFor?: WaitFor): string {
+export function paneScript(tool: 'claude' | 'codex', ws: Pick<Workspace, 'id' | 'env' | 'checkout' | 'threads' | 'only'>, home: string, bin?: string, waitFor?: WaitFor): string {
   // (an id from the workspaces file reaches the line only as threadFrom read it: letters, digits, dashes)
   const thread = ws.threads?.[tool]
   const addDir = ws.checkout === undefined ? '' : ` --add-dir ${shellWord(`${ws.checkout}-worktrees`)}`

@@ -2375,4 +2375,43 @@ except ChildProcessError: pass
   }
 }
 
+// a workspace agent moved onto a new version: stopped where it runs, then its pane started afresh with the command the
+// workspace starts it with, resuming its conversation, set to go on unattended (a stand-in Claude: a clone of this
+// Node named claude), on a private tmux server that reads no tmux.conf
+{
+  const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'live-sessions-refresh-')))
+  const socket = `live-sessions-refresh-${process.pid}`
+  const tmux = (...a) => spawnSync('tmux', ['-L', socket, '-f', '/dev/null', ...a], { encoding: 'utf8', env: { ...process.env, SHELL: '/bin/sh' } })
+  const pause = ms => spawnSync('/bin/sleep', [String(ms / 1000)])
+  const until = (f, ms = 15_000) => { const end = Date.now() + ms; let v; while (!(v = f()) && Date.now() < end) pause(250); return v }
+  try {
+    mkdirSync(join(scratch, 'real')); mkdirSync(join(scratch, 'bin')); mkdirSync(join(scratch, 'home'))
+    run(['/bin/cp', '-c', process.execPath, join(scratch, 'real', 'claude')])
+    const js = "console.log('STARTED ' + process.pid + ' ' + process.argv.slice(1).join(' ') + ' RESUME_MIN=' + process.env.CLAUDE_CODE_RESUME_THRESHOLD_MINUTES + ' WATCHDOG=' + process.env.CLAUDE_CODE_RETRY_WATCHDOG); setInterval(() => {}, 1000)"
+    writeFileSync(join(scratch, 'bin', 'claude'), `#!/bin/sh\nexec ${w.shellQuote(join(scratch, 'real', 'claude'))} -e ${w.shellQuote(js)} -- "$@"\n`)
+    spawnSync('/bin/chmod', ['755', join(scratch, 'bin', 'claude')])
+    // run once first: macOS looks a new program over on its first start
+    spawnSync(join(scratch, 'real', 'claude'), ['-e', '0'], { timeout: 60_000 })
+    const ws = { id: 'rt', env: '', dir: scratch, createdAt: 1, only: 'claude', threads: { claude: { id: '11111111-2222-3333-4444-555555555555', dir: scratch, since: 1 } } }
+    const script = w.paneScript('claude', ws, join(scratch, 'home'), join(scratch, 'bin', 'claude'))
+    tmux('new-session', '-d', '-s', 'ws-rt', '-x', '220', '-y', '40', '-c', scratch, script)
+    const [paneId, ttyPath = ''] = tmux('list-panes', '-t', '=ws-rt', '-F', '#{pane_id}\t#{pane_tty}').stdout.trim().split('\t')
+    const shown = () => tmux('capture-pane', '-p', '-J', '-t', paneId).stdout.split('\n').filter(l => l.startsWith('STARTED'))
+    const first = until(() => shown().length === 1 && shown())
+    const pid1 = Number(first?.[0]?.split(' ')[1])
+    check('refresh: a workspace Claude starts resuming its conversation, set to go on unattended', /STARTED \d+ .*--resume 11111111-2222-3333-4444-555555555555 .*--dangerously-skip-permissions.* RESUME_MIN=525600 WATCHDOG=1/.test(first?.[0] ?? ''), (first?.[0] ?? '').slice(0, 120))
+    const stopped = spawnSync('/bin/sh', ['-c', b.STOP_SCRIPT, 'sh', ttyPath.replace('/dev/', ''), b.JOB_COMMANDS.claude, String(pid1)], { encoding: 'utf8', timeout: 30_000 }).stdout.trim()
+    const respawned = tmux('respawn-pane', '-k', '-t', paneId, script)
+    const second = until(() => { const s = shown(); return s.length >= 1 && Number(s.at(-1).split(' ')[1]) !== pid1 && s })
+    const panes = tmux('list-panes', '-s', '-t', '=ws-rt', '-F', '#{pane_id}').stdout.trim().split('\n')
+    check('refresh: stopped where it runs, then started again in the same pane, in the same conversation',
+      stopped === 'stopped' && respawned.status === 0 && /--resume 11111111-2222-3333-4444-555555555555 .* RESUME_MIN=525600 WATCHDOG=1/.test(second?.at(-1) ?? '') && panes.length === 1 && panes[0] === paneId,
+      `${stopped} ${respawned.stderr.trim()} ${JSON.stringify(panes)}`)
+  } finally {
+    tmux('kill-server')
+    rmSync(join(process.env.TMUX_TMPDIR ?? '/tmp', `tmux-${process.getuid()}`, socket), { force: true })
+    rmSync(scratch, { recursive: true, force: true })
+  }
+}
+
 process.exitCode = failures > 0 ? 1 : 0

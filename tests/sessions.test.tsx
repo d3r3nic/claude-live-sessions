@@ -70,6 +70,8 @@ import {
   versionFrom,
   isToolsDue,
   TOOLS_EVERY_MS,
+  dueRefresh,
+  REFRESH_QUIET_MS,
 } from '../hooks/collect'
 import type { CodexProc, ThreadRow } from '../hooks/collect'
 import type { ClaudeSession, CodexSession, Snapshot, Workspace } from '../types'
@@ -314,6 +316,9 @@ const world = {
   /** What `claude --version` and `codex --version` say (unset: not found), and the pids BIN_SCRIPT finds replaced. */
   versions: {} as { claude?: string; codex?: string },
   binOld: new Set<number>(),
+  /** Folders mkdir made (without -p, a second one of a name fails), and each `tmux respawn-pane` (its arguments after it). */
+  made: new Set<string>(),
+  respawned: [] as string[][],
 }
 const resetWorld = () => {
   world.heads = { '/Users/u/dev/web-app': 'main\nmain\n', '/Users/u/dev/build': 'linked\nfix/build\n' }
@@ -381,6 +386,8 @@ const resetWorld = () => {
   world.mtimes.clear()
   world.versions = {}
   world.binOld.clear()
+  world.made.clear()
+  world.respawned = []
 }
 const changed = (pid: number, line: string) => {
   const stat = world.stat.get(pid)
@@ -523,6 +530,10 @@ function machine(argv: readonly string[], env: unknown): Run {
       if (argv[1] === 'list-panes' && argv[2] === '-s') return ok(world.leftover)
       if (argv[1] === 'capture-pane') return ok(world.screens[argv[argv.length - 1] ?? ''] ?? '')
       if (argv[1] === 'list-panes') return world.tmuxPanes === '' ? { exitCode: 1, stdout: '', stderr: 'no server running\n' } : ok(world.tmuxPanes)
+      if (argv[1] === 'respawn-pane') {
+        world.respawned.push(argv.slice(2))
+        return ok('')
+      }
       if (argv[1] === 'kill-session') {
         // ended: its panes gone, and the session a window made
         world.killed.push(argv[3] ?? '')
@@ -576,6 +587,13 @@ function machine(argv: readonly string[], env: unknown): Run {
       const db = dbOf(argv)
       const home = db.slice(0, db.lastIndexOf('/'))
       return ok(JSON.stringify((THREADS[home] ?? []).filter(t => !world.hiddenThreads.has((t as { id: string }).id))))
+    }
+    case '/bin/mkdir': {
+      const path = argv[argv.length - 1] ?? ''
+      if (argv[1] === '-p') return ok('')
+      if (world.made.has(path)) return { exitCode: 1, stdout: '', stderr: `mkdir: ${path}: File exists\n` }
+      world.made.add(path)
+      return ok('')
     }
     case 'claude':
     case 'codex': {
@@ -1824,6 +1842,95 @@ describe('updates', () => {
     ])
   })
 
+  test('a workspace agent is due to start again on the version installed once every agent of its workspace has been quiet an hour', async () => {
+    const ws = { ...practice, createdAt: NOW }
+    const pane = (id: string, agent: string) => ({ session: 'ws-practice-rbac', window: agent, pane: id, owner: String(NOW) })
+    const claude = (o: Partial<ClaudeSession>): ClaudeSession => ({ pid: 1, sessionId: 's-1', jobId: '', name: '', cwd: '/x', startCwd: '/x', status: 'idle', kind: 'interactive', profile: 'claude', tty: 'ttys001', isForeground: true, since: NOW - REFRESH_QUIET_MS, version: '2.1.300', ...o })
+    const codex = (o: Partial<CodexSession>): CodexSession => ({ key: 'k', title: '', cwd: '/x', profile: 'codex', surface: 'terminal', tty: 'ttys002', updatedAt: NOW - REFRESH_QUIET_MS, lastActive: NOW - REFRESH_QUIET_MS, agents: 0, pid: 2, isOutdated: true, ...o })
+    const snap = (c: ClaudeSession, x: CodexSession) => ({ claude: [c], codex: [x], tmux: { panes: { ttys001: pane('%1', 'claude'), ttys002: pane('%2', 'codex') }, clients: {} }, tools: { claude: '2.1.301', codex: '0.163.0' } })
+    expect(dueRefresh(ws, snap(claude({}), codex({})), NOW)).toEqual([{ tool: 'claude', tty: 'ttys001', pane: '%1', pid: 1 }, { tool: 'codex', tty: 'ttys002', pane: '%2', pid: 2 }])
+    // either side quiet a minute short of the hour: neither
+    expect(dueRefresh(ws, snap(claude({ since: NOW - REFRESH_QUIET_MS + 60_000 }), codex({})), NOW)).toEqual([])
+    expect(dueRefresh(ws, snap(claude({}), codex({ updatedAt: NOW - 60_000 })), NOW)).toEqual([])
+    // Claude at work, waiting on you, or at background work: neither
+    for (const status of ['busy', 'waiting', 'shell']) expect(dueRefresh(ws, snap(claude({ status }), codex({})), NOW)).toEqual([])
+    // one on the version installed: the other alone
+    expect(dueRefresh(ws, snap(claude({ version: '2.1.301' }), codex({})), NOW).map(d => d.tool)).toEqual(['codex'])
+    expect(dueRefresh(ws, snap(claude({}), codex({ isOutdated: undefined })), NOW).map(d => d.tool)).toEqual(['claude'])
+    // the version installed not read, or the session's own not said: Claude never taken to be behind
+    expect(dueRefresh(ws, { ...snap(claude({}), codex({ isOutdated: undefined })), tools: undefined }, NOW)).toEqual([])
+    expect(dueRefresh(ws, snap(claude({ version: undefined }), codex({ isOutdated: undefined })), NOW)).toEqual([])
+    // panes of a like-named tmux session that is not the workspace's own: nothing of them
+    const foreign = { ...snap(claude({}), codex({})), tmux: { panes: { ttys001: { ...pane('%1', 'claude'), owner: '7' }, ttys002: { ...pane('%2', 'codex'), owner: '7' } }, clients: {} } }
+    expect(dueRefresh(ws, foreign, NOW)).toEqual([])
+  })
+
+  /** A workspace of Claude alone (WEB CONSOLE, ttys004, pane %1), on an older Claude Code, idle for `idleMs`. */
+  const behindClaude = (on: On, idleMs: number, input = '') => {
+    const { files, clock } = engine(on, machine, { termProgram: 'Apple_Terminal' })
+    files.set(WORKSPACES, JSON.stringify({ version: 1, workspaces: [{ ...practice, env: '', only: 'claude' }] }))
+    world.tmuxPanes = `ws-practice-rbac\tpeers\t/dev/ttys004\t%1\tclaude\t${NOW}\n`
+    world.tmuxOwner = String(NOW)
+    files.set('/Users/u/.claude/sessions/101.json', JSON.stringify({ ...JSON.parse(files.get('/Users/u/.claude/sessions/101.json')!), status: 'idle', statusUpdatedAt: NOW - idleMs, version: '2.1.300' }))
+    world.versions = { claude: '2.1.301', codex: '0.163.0' }
+    world.screens['%1'] = `────\n\u001b[39m❯ ${input}\n────`
+    const settle = async () => {
+      for (let i = 0; i < 10; i++) await clock.advance(10)
+    }
+    return { files, clock, settle }
+  }
+
+  test('a workspace Claude on an older Claude Code, its workspace quiet an hour: stopped between turns and started again in its pane, in the same conversation', async ($, on) => {
+    const { settle } = behindClaude(on, 2 * 3_600_000)
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    await settle()
+    expect(world.stopped).toEqual(['ttys004 claude 101'])
+    expect(world.respawned.length).toBe(1)
+    const args = world.respawned[0]!
+    expect(args.slice(0, 3)).toEqual(['-k', '-t', '%1'])
+    // the command the workspace starts its Claude with, resuming the conversation kept for it
+    expect(args[3]).toContain('--resume session-101')
+    expect(args[3]).toContain(BYPASS.claude)
+    expect(args[3]).toContain('--append-system-prompt')
+    expect(world.events.map(e => (e as { text: string }).text)).toContain('Practice RBAC: Claude started again on Claude Code 2.1.301, after 1h quiet, in the same conversation')
+  })
+
+  test('never over your draft, never mid-turn or before the hour; a stop that did not finish is not tried again on that process', async ($, on) => {
+    // your draft in its input line: nothing
+    const { files, clock, settle } = behindClaude(on, 2 * 3_600_000, 'fix the sign-in')
+    const REG = '/Users/u/.claude/sessions/101.json'
+    let rewrites = 1
+    const rewrite = (fields: Record<string, unknown>) => {
+      files.set(REG, JSON.stringify({ ...JSON.parse(files.get(REG)!), ...fields }))
+      world.mtimes.set(REG, ++rewrites)
+    }
+    await $.session.start(START)
+    await $.command.run(SESSIONS)
+    await settle()
+    expect(world.stopped).toEqual([])
+    // the line empty, but quiet 30 minutes only: nothing
+    world.screens['%1'] = '────\n\u001b[39m❯ \n────'
+    rewrite({ statusUpdatedAt: NOW - 30 * 60_000 })
+    await clock.advance(5_000)
+    await settle()
+    expect(world.stopped).toEqual([])
+    // at work: nothing
+    rewrite({ status: 'busy', statusUpdatedAt: NOW - 2 * 3_600_000 })
+    await clock.advance(5_000)
+    await settle()
+    expect(world.stopped).toEqual([])
+    // quiet two hours, its stop not finishing: tried once, never again on that process
+    rewrite({ status: 'idle' })
+    world.stop['ttys004'] = 'stuck'
+    await clock.advance(5_000)
+    await settle()
+    await clock.advance(5_000)
+    await settle()
+    expect(world.stopped).toEqual(['ttys004 claude 101'])
+    expect(world.respawned).toEqual([])
+  })
+
   test('nothing waiting: no update line', async ($, on) => {
     engine(on)
     world.versions = { claude: '2.1.301', codex: '0.163.0' }
@@ -1871,8 +1978,10 @@ describe('workspaces', () => {
   })
 
   test('the tmux command: a claude and a codex window in its folder, under its environment, then attach', async () => {
-    expect(agentStart('claude', '', HOME)).toBe(`env ${MARKERS} claude`)
-    expect(agentStart('claude', 'work', HOME)).toBe(`env ${MARKERS} CLAUDE_CONFIG_DIR='/Users/u/.claude-work' claude`)
+    // Claude set to go on unattended: no question on resuming an old, large conversation; overload waited out, a usage limit not
+    const unattended = 'CLAUDE_CODE_RESUME_THRESHOLD_MINUTES=525600 CLAUDE_CODE_RETRY_WATCHDOG=1 CLAUDE_CODE_RETRY_WATCHDOG_MAX_WAIT_MS=7200000 CLAUDE_CODE_RETRY_WATCHDOG_MAX_USAGE_LIMIT_WAIT_MS=0'
+    expect(agentStart('claude', '', HOME)).toBe(`env ${MARKERS} ${unattended} claude`)
+    expect(agentStart('claude', 'work', HOME)).toBe(`env ${MARKERS} CLAUDE_CONFIG_DIR='/Users/u/.claude-work' ${unattended} claude`)
     expect(agentStart('codex', 'work', HOME)).toBe(`env ${MARKERS} CODEX_HOME='/Users/u/.codex-work' codex`)
     // one window, Claude on the left and Codex on the right, each pane marked with its agent
     const cmd = openCommand(practice, HOME)
